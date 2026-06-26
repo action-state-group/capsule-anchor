@@ -1,0 +1,30 @@
+capsule-anchor
+Copyright 2024-2026 Action State Group, Inc.
+
+This product is licensed under the Apache License, Version 2.0.
+
+---
+
+Provenance, neutrality & governance
+-------------------------------------
+capsule-anchor is developed by Action State Group, Inc. and published as
+open-source software (Apache-2.0). It implements a neutral, vendor-free SCITT
+Transparency Service (draft-ietf-scitt-architecture) with RFC9162 (RFC6962)
+Certificate-Transparency Merkle proofs and COSE Receipt issuance.
+
+The codebase is product-free — no commercial features, tier gates, or
+metering are present. It is designed with a clean transfer path to a neutral
+standards body or foundation donation when the ecosystem matures.
+
+---
+
+Third-party dependencies
+--------------------------
+This software includes open-source packages under their respective licenses:
+
+- FastAPI (MIT) — https://github.com/tiangolo/fastapi
+- Uvicorn (BSD-3-Clause) — https://github.com/encode/uvicorn
+- Pydantic (MIT) — https://github.com/pydantic/pydantic
+- cryptography (Apache-2.0 / BSD) — https://github.com/pyca/cryptography
+- httpx (BSD-3-Clause) — https://github.com/encode/httpx
+- cbor2 (MIT) — https://github.com/agronholm/cbor2

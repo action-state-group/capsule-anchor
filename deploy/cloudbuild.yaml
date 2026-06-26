@@ -1,0 +1,57 @@
+# capsule-anchor — parameterized Cloud Build → Cloud Run deploy.
+#
+# Account-portable: every project/region/registry value is a substitution.
+# Nothing is hardcoded.
+#
+# Usage:
+#   gcloud builds submit --config deploy/cloudbuild.yaml \
+#     --substitutions \
+#       _REGION=us-central1,\
+#       _REGISTRY=us-central1-docker.pkg.dev/PROJECT_ID/anchor,\
+#       _SIGNING_KEY_SECRET=capsule-anchor-signing-key
+
+substitutions:
+  _REGION: ""
+  _REGISTRY: ""
+  _SERVICE: "capsule-anchor"
+  _SIGNING_KEY_SECRET: "capsule-anchor-signing-key"
+  _TAG: "latest"
+  _MAX_INSTANCES: "1"
+
+images:
+  - "${_REGISTRY}/${_SERVICE}:${_TAG}"
+
+steps:
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - "-f"
+      - Dockerfile
+      - "-t"
+      - "${_REGISTRY}/${_SERVICE}:${_TAG}"
+      - "."
+
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args: ["push", "${_REGISTRY}/${_SERVICE}:${_TAG}"]
+
+  - id: deploy
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - "${_SERVICE}"
+      - "--image=${_REGISTRY}/${_SERVICE}:${_TAG}"
+      - "--region=${_REGION}"
+      - "--platform=managed"
+      - "--port=8000"
+      - "--set-env-vars=CAPSULE_ANCHOR_HOST=0.0.0.0,CAPSULE_ANCHOR_PORT=8000"
+      - "--set-secrets=CAPSULE_ANCHOR_SIGNING_KEY=${_SIGNING_KEY_SECRET}:latest"
+      - "--max-instances=${_MAX_INSTANCES}"
+      - "--allow-unauthenticated"
+      - "--no-use-http2"
+
+options:
+  logging: CLOUD_LOGGING_ONLY

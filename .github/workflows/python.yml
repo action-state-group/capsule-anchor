@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+name: python
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${{ matrix.python-version }}"
+
+      - name: install capsule-anchor
+        run: pip install -e ".[dev]"
+
+      - name: ruff
+        run: python -m ruff check .
+
+      - name: pytest
+        run: python -m pytest -q

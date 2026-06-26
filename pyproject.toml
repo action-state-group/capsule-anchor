@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "capsule-anchor"
+version = "0.1.0"
+description = "Neutral public SCITT Transparency Service — submit digest → RFC9162 COSE Receipt"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Action State Group, Inc.", email = "opensource@actionstate.ai" }]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Internet :: WWW/HTTP :: HTTP Servers",
+    "Development Status :: 3 - Alpha",
+]
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "cryptography>=42.0",
+    "httpx>=0.27",
+    # SCITT COSE Receipt: COSE_Sign1 / inclusion-proof CBOR encoding
+    # (draft-ietf-cose-merkle-tree-proofs). Pure-Python, no native deps.
+    "cbor2>=5.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/action-state-group/capsule-anchor"
+Source = "https://github.com/action-state-group/capsule-anchor"
+Specification = "https://github.com/action-state-group/agent-action-capsule"
+Organization = "https://github.com/action-state-group"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+]
+# Durable Postgres/Cloud SQL CT-log persistence (SQLAlchemy Core + psycopg v3).
+# Without this extra the service uses in-memory storage (state lost on restart).
+postgres = [
+    "sqlalchemy>=2.0",
+    "psycopg[binary]>=3.1",
+]
+
+[project.scripts]
+capsule-anchor = "capsule_anchor.app:main"
+
+[tool.setuptools.packages.find]
+where = ["packages"]
+
+[tool.pytest.ini_options]
+testpaths = ["packages"]
+pythonpath = ["packages"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
