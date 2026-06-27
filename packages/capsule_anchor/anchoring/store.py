@@ -43,6 +43,8 @@ class InMemoryLogStore:
         # an anchor request carried a capsule binding. Not part of the entry
         # itself (TransparencyLogEntry shape is frozen by contracts.types).
         self._capsule_ids: dict[int, str] = {}
+        # Idempotent dedup: entry_hash -> (receipt_bytes, leaf_index, tree_size)
+        self._statements: dict[str, tuple[bytes, int, int]] = {}
 
     # --- log ---
     def append_entry(self, entry: TransparencyLogEntry) -> None:
@@ -74,6 +76,15 @@ class InMemoryLogStore:
     def entries_for_capsule(self, capsule_id: str) -> list[TransparencyLogEntry]:
         idxs = {i for i, c in self._capsule_ids.items() if c == capsule_id}
         return [e for e in self._log if e.log_index in idxs]
+
+    # --- idempotent statement dedup ---
+    def put_statement(
+        self, entry_hash: str, receipt_bytes: bytes, leaf_index: int, tree_size: int
+    ) -> None:
+        self._statements[entry_hash] = (receipt_bytes, leaf_index, tree_size)
+
+    def get_statement(self, entry_hash: str) -> tuple[bytes, int, int] | None:
+        return self._statements.get(entry_hash)
 
 
 class SqliteLogStore:
@@ -133,6 +144,17 @@ class SqliteLogStore:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_log_capsule_bindings_capsule "
                 "ON log_capsule_bindings(capsule_id)"
+            )
+            # Idempotent dedup: one row per unique submitted statement.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS submitted_statements (
+                    entry_hash   TEXT PRIMARY KEY,
+                    receipt      BLOB NOT NULL,
+                    leaf_index   INTEGER NOT NULL,
+                    tree_size    INTEGER NOT NULL
+                )
+                """
             )
 
     # --- row <-> model ---
@@ -253,6 +275,29 @@ class SqliteLogStore:
                 (capsule_id,),
             )
             return [self._row_to_entry(r) for r in cur.fetchall()]
+
+    # --- idempotent statement dedup ---
+    def put_statement(
+        self, entry_hash: str, receipt_bytes: bytes, leaf_index: int, tree_size: int
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO submitted_statements "
+                "(entry_hash, receipt, leaf_index, tree_size) VALUES (?, ?, ?, ?)",
+                (entry_hash, receipt_bytes, leaf_index, tree_size),
+            )
+
+    def get_statement(self, entry_hash: str) -> tuple[bytes, int, int] | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT receipt, leaf_index, tree_size FROM submitted_statements "
+                "WHERE entry_hash = ?",
+                (entry_hash,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return (bytes(row[0]), int(row[1]), int(row[2]))
 
     def close(self) -> None:
         with self._lock:

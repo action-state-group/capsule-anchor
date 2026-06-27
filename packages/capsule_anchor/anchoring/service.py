@@ -62,6 +62,9 @@ from .tsa import TsaError, timestamp_root_hash, tsa_enabled
 # Coordinate scheme for the (scaffold) public log location.
 _LOG_LOCATION_PREFIX = "as-transparency-log://entry/"
 _LOG_KIND_ROOT = "countersigned_root"
+# Maximum accepted COSE statement size (bytes). Large enough for any realistic
+# Signed Statement; small enough to bound memory/log impact from abuse.
+MAX_STATEMENT_BYTES = 64 * 1024  # 64 KB
 # SCITT Signed-Statement registration entries (Transparency Service, RFC9162
 # CT log). Their CT leaf preimage is the raw 32-byte SHA-256 of the COSE_Sign1
 # Signed Statement (NOT the canonical-JSON entry record used by other kinds) --
@@ -617,8 +620,24 @@ class AnchorerService:
         current CT root, signed by the authority Ed25519 key.
 
         Returns ``(receipt_bytes, entry_hash_hex, leaf_index, tree_size)``.
+
+        Raises ``ValueError`` if ``statement_bytes`` exceeds ``MAX_STATEMENT_BYTES``.
+        Idempotent: a second submission of the same bytes returns the cached receipt
+        from the first registration without appending a duplicate log entry.
         """
+        if len(statement_bytes) > MAX_STATEMENT_BYTES:
+            raise ValueError(
+                f"statement too large: {len(statement_bytes)} bytes "
+                f"(max {MAX_STATEMENT_BYTES})"
+            )
         entry_hash = hashlib.sha256(statement_bytes).hexdigest()
+
+        # Idempotent dedup: return the original receipt for duplicate submissions.
+        cached = self._store.get_statement(entry_hash)
+        if cached is not None:
+            receipt_bytes, leaf_index, tree_size = cached
+            return receipt_bytes, entry_hash, leaf_index, tree_size
+
         logged_at = _now()
         with self._lock:
             # 1. Append to the SAME append-only CT log; the entry's payload_hash
@@ -644,6 +663,12 @@ class AnchorerService:
             root=root,
             sign=lambda payload: bytes.fromhex(self._attestor.attest(payload).signature),
         )
+
+        # 3. Persist for idempotent dedup — INSERT OR IGNORE so a concurrent
+        #    duplicate that races past the get_statement check above doesn't
+        #    overwrite the first caller's row.
+        self._store.put_statement(entry_hash, receipt, leaf_index, tree_size)
+
         return receipt, entry_hash, leaf_index, tree_size
 
     # --- inclusion proofs (TENANT ledger tree) -----------------------------

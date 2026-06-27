@@ -29,8 +29,11 @@ instance, so countersignatures verify against the key published at
 from __future__ import annotations
 
 import base64
+import collections
+import threading
+import time
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from capsule_anchor.attestation.router import get_service as get_attestor
@@ -41,7 +44,42 @@ from capsule_anchor.contracts.types import (
     TransparencyLogEntry,
 )
 
-from .service import AnchorerService
+from .service import AnchorerService, MAX_STATEMENT_BYTES
+
+
+class _SlidingWindowLimiter:
+    """Thread-safe sliding-window rate limiter (no external deps).
+
+    Tracks call timestamps in a deque per key (IP or "global"). A call is
+    allowed when fewer than ``max_calls`` have been made in the last
+    ``window_s`` seconds; rejected calls do NOT count against the window.
+
+    Note: in a Cloud Run deployment with multiple instances, this limiter is
+    per-instance. For cluster-wide enforcement use Cloud Armor / API Gateway.
+    """
+
+    def __init__(self, max_calls: int, window_s: float) -> None:
+        self._max = max_calls
+        self._window = window_s
+        self._windows: dict[str, collections.deque] = {}
+        self._lock = threading.Lock()
+
+    def is_allowed(self, key: str = "global") -> bool:
+        now = time.monotonic()
+        with self._lock:
+            dq = self._windows.setdefault(key, collections.deque())
+            cutoff = now - self._window
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            if len(dq) >= self._max:
+                return False
+            dq.append(now)
+            return True
+
+
+# 300 POST submissions per minute globally (5/s average).
+# Digest-only endpoint is the primary surface; register-statement shares the budget.
+_POST_LIMITER = _SlidingWindowLimiter(max_calls=300, window_s=60.0)
 
 # Shared anchorer, bound to the shared authority attestor.
 _SERVICE = AnchorerService(attestor=get_attestor())
@@ -238,7 +276,9 @@ def get_router() -> APIRouter:
     ts = APIRouter(prefix="/transparency", tags=["transparency-service"])
 
     @ts.post("/register-statement", response_model=RegisterStatementResponse)
-    def register_statement(req: RegisterStatementRequest) -> RegisterStatementResponse:
+    def register_statement(
+        req: RegisterStatementRequest, request: Request
+    ) -> RegisterStatementResponse:
         """SCITT registration API: register a Signed Statement, issue a COSE Receipt.
 
         Accepts a SCITT Signed Statement (a COSE_Sign1 CBOR blob) as base64 in
@@ -246,7 +286,11 @@ def get_router() -> APIRouter:
         entry hash ``SHA256(statement_bytes).hex()``, appends it to the RFC9162
         (RFC6962) CT log, and returns a COSE Receipt (COSE_Sign1, CBOR tag 18)
         carrying an RFC6962 inclusion proof to the current signed CT root.
+
+        Idempotent: submitting the same bytes twice returns the original receipt.
         """
+        if not _POST_LIMITER.is_allowed():
+            raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
         try:
             statement_bytes = base64.b64decode(req.signed_statement_b64, validate=True)
         except (ValueError, base64.binascii.Error) as exc:
@@ -255,6 +299,11 @@ def get_router() -> APIRouter:
             ) from exc
         if not statement_bytes:
             raise HTTPException(status_code=400, detail="empty signed statement")
+        if len(statement_bytes) > MAX_STATEMENT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"statement too large ({len(statement_bytes)} bytes; max {MAX_STATEMENT_BYTES})",
+            )
 
         svc = get_service()
         receipt, entry_hash, leaf_index, tree_size = svc.register_signed_statement(
@@ -275,16 +324,19 @@ def get_router() -> APIRouter:
     v1 = APIRouter(prefix="/v1", tags=["digest"])
 
     @v1.post("/digest", response_model=RegisterStatementResponse)
-    def digest(req: DigestRequest) -> RegisterStatementResponse:
+    def digest(req: DigestRequest, request: Request) -> RegisterStatementResponse:
         """Register a capsule digest and receive an RFC9162 COSE Receipt.
 
         Accepts a 64-hex SHA-256 capsule_id. The service converts it to 32 raw
         bytes and registers them through the same SCITT CT-log path used by
         ``/transparency/register-statement``, issuing an identical COSE Receipt.
 
+        Idempotent: submitting the same capsule_id twice returns the original receipt.
         Offline verification: ``entry_hash = SHA256(bytes.fromhex(capsule_id))``
         — that is the CT log entry hash the inclusion proof covers.
         """
+        if not _POST_LIMITER.is_allowed():
+            raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
         cid = req.capsule_id.lower().strip()
         if len(cid) != 64 or not all(c in "0123456789abcdef" for c in cid):
             raise HTTPException(
