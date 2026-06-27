@@ -18,8 +18,9 @@ RUN apt-get update \
 COPY pyproject.toml ./
 COPY packages ./packages
 
-# Non-editable install so the package lands in site-packages (not a .pth stub).
-RUN pip install .
+# Non-editable install with the postgres extra so psycopg[binary] is present
+# when CAPSULE_ANCHOR_DATABASE_URL is set (Cloud SQL backend).
+RUN pip install ".[postgres]"
 
 RUN chown -R anchor:anchor /app
 USER anchor
