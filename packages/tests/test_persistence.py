@@ -2,6 +2,8 @@
 
 Covers:
 - SQLite restart survival: append N entries, reopen, verify all present + proofs intact
+- Postgres restart survival: same contract against a real Postgres instance
+  (skipped when CAPSULE_ANCHOR_DATABASE_URL is not set)
 - Signing key stable across "restart" (same key id; old receipts still verify)
 - STH endpoint returns a verifiable signed STH
 - Idempotent dedup: same submission returns the original receipt
@@ -14,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,6 +25,28 @@ from capsule_anchor.anchoring.service import AnchorerService, MAX_STATEMENT_BYTE
 from capsule_anchor.anchoring.router import _SlidingWindowLimiter
 from capsule_anchor.anchoring.store import SqliteLogStore
 from capsule_anchor.app import create_app
+
+# ---------------------------------------------------------------------------
+# Postgres helpers — skip gracefully when no DB URL is configured
+# ---------------------------------------------------------------------------
+
+_PG_URL = os.environ.get("CAPSULE_ANCHOR_DATABASE_URL")
+_pg_required = pytest.mark.skipif(
+    not _PG_URL,
+    reason="CAPSULE_ANCHOR_DATABASE_URL not set — skipping Postgres tests",
+)
+
+
+def _pg_store():
+    """Return a fresh PostgresLogStore with all tables truncated for a clean slate."""
+    from capsule_anchor.anchoring.store import PostgresLogStore
+    store = PostgresLogStore(_PG_URL)
+    with store._lock, store._conn.transaction():
+        store._conn.execute(
+            "TRUNCATE TABLE submitted_statements, log_capsule_bindings, "
+            "countersigned_roots, log_entries RESTART IDENTITY CASCADE"
+        )
+    return store
 
 
 # ---------------------------------------------------------------------------
@@ -401,3 +426,97 @@ class TestCrashConsistency:
         svc2 = AnchorerService(attestor=attestor, db_path=db)
         assert svc2.verify_log(), "log chain integrity broken after reopen"
         assert svc2._store.size() == 20
+
+
+# ---------------------------------------------------------------------------
+# 10. Postgres restart survival
+#     All tests in this class skip when CAPSULE_ANCHOR_DATABASE_URL is absent.
+# ---------------------------------------------------------------------------
+
+@_pg_required
+class TestPostgresRestartSurvival:
+    """Postgres restart-survival tests.
+
+    All tests follow the same pattern:
+      1. _pg_store() → fresh truncated PostgresLogStore (clean slate)
+      2. Write data via AnchorerService
+      3. close() the connection (simulates process restart)
+      4. PostgresLogStore(_PG_URL) → reconnect (no truncation — reads persisted data)
+      5. Assert data survived intact
+    """
+    N = 10
+
+    def test_all_entries_survive_reconnect(self):
+        from capsule_anchor.anchoring.store import PostgresLogStore
+        store1 = _pg_store()                    # fresh truncated store
+        svc1 = AnchorerService(store=store1)
+        for i in range(self.N):
+            svc1.register_signed_statement(_digest(i))
+        root_before = svc1.ct_root()
+        store1.close()
+
+        store2 = PostgresLogStore(_PG_URL)      # reconnect — no truncation
+        svc2 = AnchorerService(store=store2)
+        assert svc2._store.size() == self.N
+        assert svc2.ct_root() == root_before
+        store2.close()
+
+    def test_inclusion_proofs_verify_after_reconnect(self):
+        from capsule_anchor.anchoring.store import PostgresLogStore
+        store1 = _pg_store()
+        svc1 = AnchorerService(store=store1)
+        proofs = []
+        for i in range(self.N):
+            _, _, leaf_index, tree_size = svc1.register_signed_statement(_digest(i))
+            proofs.append(svc1.inclusion_proof_ct(leaf_index, tree_size))
+        store1.close()
+
+        store2 = PostgresLogStore(_PG_URL)
+        svc2 = AnchorerService(store=store2)
+        for proof in proofs:
+            assert svc2.verify_inclusion(proof), f"proof for leaf {proof.leaf_index} failed"
+        store2.close()
+
+    def test_dedup_survives_reconnect(self):
+        from capsule_anchor.anchoring.store import PostgresLogStore
+        store1 = _pg_store()
+        svc1 = AnchorerService(store=store1)
+        stmt = _digest(77)
+        r1, _, idx1, _ = svc1.register_signed_statement(stmt)
+        store1.close()
+
+        store2 = PostgresLogStore(_PG_URL)
+        svc2 = AnchorerService(store=store2)
+        r2, _, idx2, _ = svc2.register_signed_statement(stmt)
+        assert r1 == r2, "dedup receipt changed across reconnect"
+        assert idx1 == idx2
+        assert svc2._store.size() == 1, "duplicate added after reconnect"
+        store2.close()
+
+    def test_log_chain_verifies_after_reconnect(self):
+        from capsule_anchor.anchoring.store import PostgresLogStore
+        store1 = _pg_store()
+        svc1 = AnchorerService(store=store1)
+        attestor = svc1._attestor              # stable key across reconnect
+        for i in range(self.N):
+            svc1.register_signed_statement(_digest(i))
+        store1.close()
+
+        store2 = PostgresLogStore(_PG_URL)
+        svc2 = AnchorerService(attestor=attestor, store=store2)
+        assert svc2.verify_log(), "log chain integrity broken after reconnect"
+        store2.close()
+
+    def test_sth_root_identical_after_reconnect(self):
+        from capsule_anchor.anchoring.store import PostgresLogStore
+        store1 = _pg_store()
+        svc1 = AnchorerService(store=store1)
+        for i in range(5):
+            svc1.register_signed_statement(_digest(i))
+        root_before = svc1.get_sth().root_hash
+        store1.close()
+
+        store2 = PostgresLogStore(_PG_URL)
+        svc2 = AnchorerService(store=store2)
+        assert svc2.get_sth().root_hash == root_before
+        store2.close()
