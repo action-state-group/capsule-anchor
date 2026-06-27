@@ -290,10 +290,10 @@ class AnchorerService:
         self._lock = threading.RLock()
 
         # Append-only public log store, in priority order:
-        #   1. ``store`` injected directly (durable Postgres/Cloud SQL via the
-        #      app factory) -> use it verbatim.
-        #   2. ``db_path`` -> durable sqlite file.
-        #   3. neither -> in-memory (the local/dev + CI default).
+        #   1. ``store`` injected directly (PostgresLogStore from the app factory
+        #      when CAPSULE_ANCHOR_DATABASE_URL is set) → use it verbatim.
+        #   2. ``db_path`` → durable SQLite file (local dev / testing).
+        #   3. neither → InMemoryLogStore (local/CI default).
         self._db_path = db_path
         if store is not None:
             self._store = store

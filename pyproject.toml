@@ -42,10 +42,9 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.4",
 ]
-# Durable Postgres/Cloud SQL CT-log persistence (SQLAlchemy Core + psycopg v3).
+# Durable Postgres/Cloud SQL CT-log persistence (psycopg v3 direct).
 # Without this extra the service uses in-memory storage (state lost on restart).
 postgres = [
-    "sqlalchemy>=2.0",
     "psycopg[binary]>=3.1",
 ]
 

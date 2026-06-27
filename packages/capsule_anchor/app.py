@@ -40,14 +40,21 @@ def create_app() -> FastAPI:
     attestor = AttestorService(key_provider=provider)
     cfg_attest(attestor)
 
-    # Durable storage: read CAPSULE_ANCHOR_DB_PATH from env.
-    # When set, the append-only CT log and dedup cache survive process restarts.
-    # When unset (dev/test default), an in-memory store is used and state is lost
-    # on restart. For production Cloud Run set this to a Cloud Filestore mount
-    # path (e.g. /data/anchor.db); for Cloud SQL use CAPSULE_ANCHOR_DB_URL +
-    # the [postgres] extra instead.
-    db_path = os.environ.get("CAPSULE_ANCHOR_DB_PATH") or None
-    cfg_anchor(AnchorerService(attestor=attestor, db_path=db_path))
+    # Durable storage: read CAPSULE_ANCHOR_DATABASE_URL from env.
+    # When set, the CT log and dedup cache survive process restarts via Cloud SQL.
+    # When unset (dev/test default), an in-memory store is used (state lost on restart).
+    # Cloud Run (unix socket):
+    #   postgresql://USER:PASS@/capsule_anchor?host=/cloudsql/PROJECT:REGION:INSTANCE
+    # Standard TCP (local / staging):
+    #   postgresql://USER:PASS@HOST:5432/capsule_anchor
+    # Requires: pip install 'capsule-anchor[postgres]'
+    database_url = os.environ.get("CAPSULE_ANCHOR_DATABASE_URL") or None
+    if database_url:
+        from capsule_anchor.anchoring.store import PostgresLogStore
+        _store: object = PostgresLogStore(database_url)
+        cfg_anchor(AnchorerService(attestor=attestor, store=_store))
+    else:
+        cfg_anchor(AnchorerService(attestor=attestor))
 
     app.include_router(anchor_router())
     app.include_router(attest_router())
@@ -70,7 +77,7 @@ def create_app() -> FastAPI:
             "signing_key_ephemeral": loaded.ephemeral,
             "key_id": pubkey_hex[:16],
             "tree_size": tree_size,
-            "storage": "sqlite" if db_path else "memory",
+            "storage": "postgres" if database_url else "memory",
         }
         if tree_size > 0:
             try:
