@@ -3,8 +3,12 @@ from __future__ import annotations
 
 import base64
 import os
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
+
+_ROOT_HTML = Path(__file__).parent / "static" / "root.html"
 
 
 def create_app() -> FastAPI:
@@ -47,6 +51,10 @@ def create_app() -> FastAPI:
 
     app.include_router(anchor_router())
     app.include_router(attest_router())
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def root() -> HTMLResponse:
+        return HTMLResponse(_ROOT_HTML.read_text(encoding="utf-8"))
 
     @app.get("/health", tags=["meta"])
     @app.get("/healthz", tags=["meta"])

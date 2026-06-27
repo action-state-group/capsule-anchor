@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Action Capsule — Transparency Service</title>
+<meta name="description" content="A neutral, public SCITT Transparency Service for the Agent Action Capsule profile. Registers signed statements, issues COSE receipts, and anchors them to an append-only RFC 9162 log. Open source, Apache-2.0.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#0B0E14; --ink-2:#161B25; --paper:#FCFCFA; --paper-2:#F4F4F0;
+    --line:#E3E3DC; --line-2:#2A313F;
+    --muted:#5C6573; --muted-2:#9AA3B2;
+    --accent:#3A5BD9; --accent-soft:#EAEEFC;
+    --verify:#127A52; --verify-soft:#E6F2EC;
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{font-family:'Inter',system-ui,sans-serif;background:var(--paper);color:var(--ink);line-height:1.6;-webkit-font-smoothing:antialiased}
+  a{color:inherit}
+  .wrap{max-width:980px;margin:0 auto;padding:0 32px}
+  .mono{font-family:var(--mono)}
+
+  nav{border-bottom:1px solid var(--line)}
+  .nav-in{max-width:980px;margin:0 auto;padding:14px 32px;display:flex;align-items:center;justify-content:space-between}
+  .brand{display:flex;align-items:center;gap:10px;font-weight:600;font-size:15px;letter-spacing:-0.2px}
+  .brand .glyph{width:22px;height:22px;border:1.5px solid var(--ink);border-radius:5px;position:relative;flex-shrink:0}
+  .brand .glyph::after{content:'';position:absolute;inset:4px;border-left:1.5px solid var(--accent);border-bottom:1.5px solid var(--accent);transform:rotate(-45deg) translate(1px,-1px)}
+  .brand .svc{font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:1px;text-transform:uppercase;color:var(--muted);border-left:1px solid var(--line);padding-left:10px;margin-left:2px}
+  .nav-links{display:flex;gap:22px;align-items:center}
+  .nav-links a{font-size:13.5px;color:var(--muted);text-decoration:none}
+  .nav-links a:hover{color:var(--ink)}
+
+  /* STATUS HERO */
+  .hero{padding:56px 0 44px;border-bottom:1px solid var(--line)}
+  .live{display:inline-flex;align-items:center;gap:8px;font-family:var(--mono);font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--verify);background:var(--verify-soft);padding:6px 13px;border-radius:100px;margin-bottom:20px}
+  .live .pulse{width:8px;height:8px;border-radius:50%;background:var(--verify);box-shadow:0 0 0 0 rgba(18,122,82,.5);animation:pulse 2s infinite}
+  @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(18,122,82,.45)}70%{box-shadow:0 0 0 7px rgba(18,122,82,0)}100%{box-shadow:0 0 0 0 rgba(18,122,82,0)}}
+  .hero h1{font-size:clamp(28px,4vw,42px);letter-spacing:-1.2px;font-weight:700;line-height:1.1;max-width:20ch;margin-bottom:16px}
+  .hero p{font-size:17px;color:var(--muted);max-width:62ch}
+  .hero .host{margin-top:22px;font-family:var(--mono);font-size:13px;color:var(--ink);background:var(--paper-2);border:1px solid var(--line);border-radius:9px;padding:12px 16px;display:inline-block}
+  .hero .host b{color:var(--accent)}
+
+  section.band{padding:52px 0;border-bottom:1px solid var(--line)}
+  .sec-eyebrow{font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
+  .sec-title{font-size:22px;font-weight:700;letter-spacing:-0.5px;margin-bottom:10px}
+  .sec-sub{color:var(--muted);font-size:15.5px;max-width:64ch;margin-bottom:30px}
+
+  /* WHAT IT DOES */
+  .does{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  .does .d{border:1px solid var(--line);border-radius:12px;padding:22px;background:#fff}
+  .does .n{font-family:var(--mono);font-size:12px;color:var(--accent);margin-bottom:10px}
+  .does h3{font-size:15.5px;font-weight:600;margin-bottom:6px}
+  .does p{font-size:14px;color:var(--muted)}
+
+  /* ENDPOINTS */
+  .ep{display:grid;grid-template-columns:1fr;gap:8px}
+  .eprow{display:grid;grid-template-columns:62px 1fr;gap:16px;align-items:baseline;border:1px solid var(--line);border-radius:10px;padding:13px 16px;background:#fff;text-decoration:none;transition:border-color .15s}
+  .eprow:hover{border-color:var(--ink)}
+  .verbtag{font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.5px;text-align:center;padding:3px 0;border-radius:5px}
+  .verbtag.get{color:var(--verify);background:var(--verify-soft)}
+  .verbtag.post{color:var(--accent);background:var(--accent-soft)}
+  .eppath{font-family:var(--mono);font-size:13.5px;color:var(--ink);font-weight:500}
+  .epdesc{font-size:13px;color:var(--muted);margin-top:2px}
+
+  /* USE */
+  .use-grid{display:grid;grid-template-columns:1fr 1fr;gap:28px;align-items:start}
+  pre.code{background:var(--ink);color:#E8ECF4;border-radius:12px;padding:20px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.7;border:1px solid var(--line-2)}
+  pre.code .c{color:#7E8AA0}
+  pre.code .s{color:#9DE2B8}
+  pre.code .ok{color:#54D08A;font-weight:600}
+  pre.code .k{color:#C58AF9}
+  .use h4{font-size:14px;font-weight:600;font-family:var(--mono);margin-bottom:10px;color:var(--muted)}
+
+  /* TRUST MODEL */
+  .trust{background:var(--ink);color:var(--paper);border-color:var(--line-2)}
+  .trust .sec-title{color:var(--paper)}
+  .trust .sec-sub{color:var(--muted-2)}
+  .tcols{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .tcol{border:1px solid var(--line-2);border-radius:12px;padding:22px;background:var(--ink-2)}
+  .tcol h4{font-size:14px;font-weight:600;margin-bottom:12px;display:flex;align-items:center;gap:9px}
+  .tcol h4 .b{font-family:var(--mono);font-size:11px;padding:2px 8px;border-radius:5px}
+  .tcol.verify h4 .b{color:#54D08A;background:rgba(84,208,138,.12)}
+  .tcol.trust-req h4 .b{color:#A9BCFF;background:rgba(169,188,255,.12)}
+  .tcol ul{list-style:none;display:flex;flex-direction:column;gap:9px}
+  .tcol li{font-size:13.5px;color:#C7CDD8;padding-left:18px;position:relative}
+  .tcol li::before{content:'›';position:absolute;left:0;color:var(--muted-2)}
+
+  footer{padding:40px 0 52px}
+  .foot-in{display:flex;justify-content:space-between;gap:20px;flex-wrap:wrap;align-items:center}
+  .foot-links{display:flex;gap:24px;flex-wrap:wrap}
+  .foot-links a{font-size:13px;color:var(--muted);text-decoration:none;font-family:var(--mono)}
+  .foot-links a:hover{color:var(--ink)}
+  .foot-note{font-family:var(--mono);font-size:12px;color:var(--muted-2);margin-top:18px}
+
+  @media(max-width:780px){
+    .does,.use-grid,.tcols{grid-template-columns:1fr}
+    .nav-links a:not(:last-child){display:none}
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-in">
+    <div class="brand"><span class="glyph"></span> Agent Action Capsule <span class="svc">Transparency Service</span></div>
+    <div class="nav-links">
+      <a href="#endpoints">Endpoints</a>
+      <a href="#use">Anchor &amp; verify</a>
+      <a href="https://agentactioncapsule.org">The standard &#x2197;</a>
+      <a href="https://github.com/action-state-group/capsule-anchor">Source &#x2197;</a>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<header class="hero">
+  <div class="wrap">
+    <div class="live"><span class="pulse"></span> Live · public SCITT log</div>
+    <h1>A neutral transparency service for agent actions.</h1>
+    <p>This service registers Agent Action Capsule signed statements, issues COSE receipts, and anchors them to an append-only RFC 9162 Merkle log — so the record of an agent action can be proven included, and never quietly dropped or rewritten. It is infrastructure, not a product: it verifies nothing for you and asks you to trust nothing you can't check yourself.</p>
+    <div class="host">POST your signed statement → <b>anchor.agentactioncapsule.org</b></div>
+  </div>
+</header>
+
+<!-- WHAT IT DOES -->
+<section class="band">
+  <div class="wrap">
+    <div class="sec-eyebrow">What it does</div>
+    <div class="does">
+      <div class="d">
+        <div class="n">01 · register</div>
+        <h3>Accepts signed statements</h3>
+        <p>POST a COSE_Sign1 Agent Action Capsule. The service appends its digest as a leaf in the Merkle tree.</p>
+      </div>
+      <div class="d">
+        <div class="n">02 · receipt</div>
+        <h3>Issues a COSE receipt</h3>
+        <p>Returns a signed inclusion proof (RFC9162_SHA256, vds=1) you can verify offline, forever, against the log key.</p>
+      </div>
+      <div class="d">
+        <div class="n">03 · anchor</div>
+        <h3>Publishes a signed tree head</h3>
+        <p>Exposes the current root, inclusion and consistency proofs — the append-only guarantees of a transparency log.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ENDPOINTS -->
+<section class="band" id="endpoints">
+  <div class="wrap">
+    <div class="sec-eyebrow">API</div>
+    <h2 class="sec-title">Endpoints</h2>
+    <p class="sec-sub">Read-only endpoints are public. The service is the open-source <span class="mono">capsule-anchor</span>; the full OpenAPI schema is at <span class="mono">/docs</span>.</p>
+    <div class="ep">
+      <a class="eprow" href="https://anchor.agentactioncapsule.org/health"><span class="verbtag get">GET</span><span><span class="eppath">/health</span><div class="epdesc">Liveness / readiness of the service.</div></span></a>
+      <a class="eprow" href="https://anchor.agentactioncapsule.org/.well-known/did.json"><span class="verbtag get">GET</span><span><span class="eppath">/.well-known/did.json</span><div class="epdesc">The service's identity + log public key — what receipts verify against.</div></span></a>
+      <a class="eprow" href="https://anchor.agentactioncapsule.org/anchor/sth"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/sth</span><div class="epdesc">Signed Tree Head — the current Merkle root and tree size, signed.</div></span></a>
+      <a class="eprow" href="https://anchor.agentactioncapsule.org/anchor/transparency-log"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/transparency-log</span><div class="epdesc">The public log entries.</div></span></a>
+      <a class="eprow" href="https://anchor.agentactioncapsule.org/anchor/inclusion-proof-ct"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/inclusion-proof-ct</span><div class="epdesc">Inclusion proof for a leaf at a given tree size.</div></span></a>
+      <a class="eprow" href="https://anchor.agentactioncapsule.org/anchor/consistency-proof"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/consistency-proof</span><div class="epdesc">Append-only consistency proof between two tree sizes.</div></span></a>
+      <div class="eprow"><span class="verbtag post">POST</span><span><span class="eppath">/transparency/register-statement</span><div class="epdesc">Register a COSE_Sign1 signed statement (base64 JSON body); returns a COSE receipt.</div></span></div>
+    </div>
+  </div>
+</section>
+
+<!-- USE -->
+<section class="band" id="use">
+  <div class="wrap">
+    <div class="sec-eyebrow">Anchor &amp; verify</div>
+    <h2 class="sec-title">Register an action, then verify it from the bytes.</h2>
+    <p class="sec-sub">The receipt this log returns verifies offline against the log key — no trust in the operator required.</p>
+    <div class="use-grid">
+      <div class="use">
+        <h4># register a signed statement</h4>
+<pre class="code"><span class="c"># POST your COSE_Sign1 statement (base64-encoded)</span>
+curl -s -X POST \
+  https://anchor.agentactioncapsule.org/transparency/register-statement \
+  -H <span class="s">"Content-Type: application/json"</span> \
+  -d <span class="s">"{\"signed_statement_b64\": \"$(base64 statement.cose)\"}"</span>
+<span class="c"># → returns a COSE receipt (inclusion proof)</span></pre>
+      </div>
+      <div class="use">
+        <h4># verify the receipt, offline</h4>
+<pre class="code"><span class="k">from</span> scitt_cose <span class="k">import</span> verify_receipt
+
+r = verify_receipt(receipt, leaf_entry_hex=leaf,
+                   log_public_key_pem=log_key)
+<span class="k">print</span>(r.ok)   <span class="c"># → </span><span class="ok">True</span>
+<span class="c"># the digest is provably in the log</span></pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- TRUST MODEL -->
+<section class="band trust">
+  <div class="wrap">
+    <div class="sec-eyebrow" style="color:#A9BCFF">Trust model</div>
+    <h2 class="sec-title">What you verify yourself vs. what a log commits to.</h2>
+    <p class="sec-sub">A transparency service is high-trust infrastructure. We state the boundary plainly.</p>
+    <div class="tcols">
+      <div class="tcol verify">
+        <h4><span class="b">VERIFY YOURSELF</span> No operator trust needed</h4>
+        <ul>
+          <li>The signature on each capsule — who sealed it</li>
+          <li>The inclusion proof in the receipt — that the log included it</li>
+          <li>Consistency between any two tree heads — that the log stayed append-only</li>
+          <li>Everything from the bytes, offline, with the open verifier</li>
+        </ul>
+      </div>
+      <div class="tcol trust-req">
+        <h4><span class="b">THE LOG COMMITS TO</span> Operational guarantees</h4>
+        <ul>
+          <li>Uptime and durable, append-only storage</li>
+          <li>Non-equivocation — one consistent view for everyone</li>
+          <li>A stable signing key, published at /.well-known/did.json</li>
+          <li>This service runs the open-source capsule-anchor — auditable in full</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+  <div class="wrap">
+    <div class="foot-in">
+      <div class="brand"><span class="glyph"></span> Agent Action Capsule <span class="svc">Transparency Service</span></div>
+      <div class="foot-links">
+        <a href="https://agentactioncapsule.org">The standard &#x2197;</a>
+        <a href="https://verify.actionstate.ai">Hosted verifier &#x2197;</a>
+        <a href="https://github.com/action-state-group/capsule-anchor">capsule-anchor &#x2197;</a>
+        <a href="https://datatracker.ietf.org/doc/draft-mih-scitt-agent-action-capsule/">The draft &#x2197;</a>
+      </div>
+    </div>
+    <div class="foot-note">Neutral, product-free SCITT Transparency Service · Apache-2.0 · operated by Action State Group</div>
+  </div>
+</footer>
+
+</body>
+</html>
