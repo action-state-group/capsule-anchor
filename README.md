@@ -4,6 +4,7 @@
 [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162) Certificate-Transparency
 COSE Receipt back.
 
+[![CI](https://github.com/action-state-group/capsule-anchor/actions/workflows/python.yml/badge.svg)](https://github.com/action-state-group/capsule-anchor/actions/workflows/python.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 ---
@@ -36,7 +37,7 @@ https://anchor.agentactioncapsule.org
 ```
 
 - Free, public, unauthenticated
-- Stable Ed25519 authority key (key_id: `19a9ab3e02fad55c`)
+- Stable Ed25519 authority key; resolve the current `key_id` at [`/.well-known/did.json`](https://anchor.agentactioncapsule.org/.well-known/did.json)
 - Interactive API docs: [`/docs`](https://anchor.agentactioncapsule.org/docs)
 - Health: [`/health`](https://anchor.agentactioncapsule.org/health)
 
@@ -115,7 +116,7 @@ curl -s -X POST https://anchor.agentactioncapsule.org/transparency/register-stat
 | `GET`  | `/anchor/inclusion-proof-ct` | RFC 6962 CT inclusion proof |
 | `GET`  | `/anchor/consistency-proof` | RFC 6962 consistency proof |
 | `GET`  | `/anchor/authority-pubkey` | Authority Ed25519 public key |
-| `GET`  | `/attest/pubkey` | Authority pubkey (attestation path) |
+| `GET`  | `/.well-known/did.json` | Authority key as a DID document (JWK OKP) |
 | `GET`  | `/health` | Health + signing key source |
 
 ---

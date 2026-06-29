@@ -21,9 +21,9 @@ Endpoints:
   GET  /anchor/consistency-proof      -> RFC6962 consistency proof between sizes
   GET  /anchor/authority-pubkey       -> authority public key (out-of-band pin)
 
-The anchoring service reuses the attestation subsystem's shared authority
-instance, so countersignatures verify against the key published at
-``/attest/pubkey`` -- one signing root across the authority.
+One signing root: the authority Ed25519 key signs all STHs, COSE Receipts,
+and countersigned roots.  The public key is exposed at ``/.well-known/did.json``
+(no sign-oracle endpoint is provided).
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ import time
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from capsule_anchor.attestation.router import get_service as get_attestor
 from capsule_anchor.contracts.types import (
     AnchorReceipt,
     CountersignedRoot,
@@ -81,8 +80,8 @@ class _SlidingWindowLimiter:
 # Digest-only endpoint is the primary surface; register-statement shares the budget.
 _POST_LIMITER = _SlidingWindowLimiter(max_calls=300, window_s=60.0)
 
-# Shared anchorer, bound to the shared authority attestor.
-_SERVICE = AnchorerService(attestor=get_attestor())
+# Shared anchorer; replaced by configure_service() in the app factory.
+_SERVICE = AnchorerService()
 
 
 def get_service() -> AnchorerService:

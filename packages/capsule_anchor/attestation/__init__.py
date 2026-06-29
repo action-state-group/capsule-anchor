@@ -1,13 +1,12 @@
-"""Attestation subsystem: Ed25519 signing under the AS authority key.
+"""Attestation subsystem: Ed25519 signing under the authority key.
 
-Attestor subsystem — the authority keypair lives
-here and is the single signing root the anchoring subsystem reuses to
-countersign tenant Merkle roots and to sign transparency-log tree heads.
+The authority keypair is the single signing root for STHs, COSE Receipts,
+and countersigned roots.  No HTTP sign-oracle is exposed.
 """
 
 from __future__ import annotations
 
-from .router import get_router, get_service
+from .router import get_service
 from .service import AttestorService
 
-__all__ = ["AttestorService", "get_router", "get_service"]
+__all__ = ["AttestorService", "get_service"]

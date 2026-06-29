@@ -378,20 +378,18 @@ class TestDIDDocument:
         assert jwk["crv"] == "Ed25519"
         assert "x" in jwk
 
-    def test_did_public_key_matches_authority(self):
+    def test_did_key_matches_health_key_id(self):
         client = TestClient(create_app())
         did_doc = client.get("/.well-known/did.json").json()
-        attest = client.get("/attest/pubkey").json()
+        health = client.get("/health").json()
 
-        # Decode both to raw bytes and compare
         x_b64url = did_doc["verificationMethod"][0]["publicKeyJwk"]["x"]
-        # Add padding back
         padding = 4 - len(x_b64url) % 4
         if padding != 4:
             x_b64url += "=" * padding
         did_key_bytes = base64.urlsafe_b64decode(x_b64url)
-        attest_key_bytes = bytes.fromhex(attest["public_key_hex"])
-        assert did_key_bytes == attest_key_bytes
+        # First 8 bytes (16 hex chars) of the raw pubkey == key_id in /health
+        assert did_key_bytes.hex()[:16] == health["key_id"]
 
     def test_did_key_id_matches_health(self):
         client = TestClient(create_app())
@@ -520,3 +518,41 @@ class TestPostgresRestartSurvival:
         svc2 = AnchorerService(store=store2)
         assert svc2.get_sth().root_hash == root_before
         store2.close()
+
+
+# ---------------------------------------------------------------------------
+# 11. Sign-oracle removed — /attest/* must be absent
+# ---------------------------------------------------------------------------
+
+class TestSignOracleRemoved:
+    """Verify that no public sign-arbitrary-bytes oracle is exposed.
+
+    A transparency log must never allow a caller to obtain an authority
+    signature over arbitrary bytes — that would enable forgery of STHs
+    and COSE Receipts.  All /attest/* routes must be 404.
+    """
+
+    def test_sign_endpoint_is_gone(self):
+        client = TestClient(create_app())
+        resp = client.post("/attest/sign", json={"payload_hex": "deadbeef"})
+        assert resp.status_code == 404, f"sign oracle still exposed: {resp.status_code}"
+
+    def test_verify_endpoint_is_gone(self):
+        client = TestClient(create_app())
+        resp = client.post(
+            "/attest/verify",
+            json={"payload_hex": "deadbeef", "signature": {"key_id": "x", "signature": "y"}},
+        )
+        assert resp.status_code == 404, f"/attest/verify still exposed: {resp.status_code}"
+
+    def test_pubkey_endpoint_is_gone(self):
+        client = TestClient(create_app())
+        resp = client.get("/attest/pubkey")
+        assert resp.status_code == 404, f"/attest/pubkey still exposed: {resp.status_code}"
+
+    def test_authority_key_still_available_via_did(self):
+        client = TestClient(create_app())
+        resp = client.get("/.well-known/did.json")
+        assert resp.status_code == 200
+        jwk = resp.json()["verificationMethod"][0]["publicKeyJwk"]
+        assert jwk["kty"] == "OKP" and jwk["crv"] == "Ed25519" and "x" in jwk

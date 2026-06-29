@@ -25,10 +25,7 @@ def create_app() -> FastAPI:
 
     from capsule_anchor.signing_key import StaticKeyProvider, load_signing_key
     from capsule_anchor.attestation.service import AttestorService
-    from capsule_anchor.attestation.router import (
-        configure_service as cfg_attest,
-        get_router as attest_router,
-    )
+    from capsule_anchor.attestation.router import configure_service as cfg_attest
     from capsule_anchor.anchoring.service import AnchorerService
     from capsule_anchor.anchoring.router import (
         configure_service as cfg_anchor,
@@ -38,7 +35,7 @@ def create_app() -> FastAPI:
     loaded = load_signing_key()
     provider = StaticKeyProvider(loaded)
     attestor = AttestorService(key_provider=provider)
-    cfg_attest(attestor)
+    cfg_attest(attestor)  # keep the shared attestor instance coherent
 
     # Durable storage: read CAPSULE_ANCHOR_DATABASE_URL from env.
     # When set, the CT log and dedup cache survive process restarts via Cloud SQL.
@@ -57,7 +54,6 @@ def create_app() -> FastAPI:
         cfg_anchor(AnchorerService(attestor=attestor))
 
     app.include_router(anchor_router())
-    app.include_router(attest_router())
 
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def root() -> HTMLResponse:
