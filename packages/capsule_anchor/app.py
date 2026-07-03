@@ -33,19 +33,42 @@ def create_app() -> FastAPI:
     )
 
     loaded = load_signing_key()
+
+    # FAIL-CLOSED: an ephemeral signing key invalidates all prior receipts on
+    # restart — never acceptable for a real transparency log. Require a stable
+    # configured key, or an explicit dev opt-in.
+    if loaded.ephemeral and os.environ.get("CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY") != "1":
+        raise RuntimeError(
+            "No signing key configured. Set CAPSULE_ANCHOR_SIGNING_KEY (hex-encoded "
+            "Ed25519 seed, e.g. from Secret Manager) or CAPSULE_ANCHOR_SIGNING_KEY_FILE. "
+            "An ephemeral key invalidates all previously issued receipts on restart. "
+            "For local development only: set CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY=1 "
+            "to acknowledge this risk and start with a throwaway identity."
+        )
+
     provider = StaticKeyProvider(loaded)
     attestor = AttestorService(key_provider=provider)
     cfg_attest(attestor)  # keep the shared attestor instance coherent
 
-    # Durable storage: read CAPSULE_ANCHOR_DATABASE_URL from env.
-    # When set, the CT log and dedup cache survive process restarts via Cloud SQL.
-    # When unset (dev/test default), an in-memory store is used (state lost on restart).
+    # Durable storage — FAIL-CLOSED when no DATABASE_URL is set.
+    # In-memory storage drops the entire CT log on restart: prior receipts
+    # become unverifiable. Require an explicit dev opt-in for volatile mode.
     # Cloud Run (unix socket):
     #   postgresql://USER:PASS@/capsule_anchor?host=/cloudsql/PROJECT:REGION:INSTANCE
     # Standard TCP (local / staging):
     #   postgresql://USER:PASS@HOST:5432/capsule_anchor
     # Requires: pip install 'capsule-anchor[postgres]'
     database_url = os.environ.get("CAPSULE_ANCHOR_DATABASE_URL") or None
+    if not database_url and os.environ.get("CAPSULE_ANCHOR_INSECURE_IN_MEMORY") != "1":
+        raise RuntimeError(
+            "No durable store configured. Set CAPSULE_ANCHOR_DATABASE_URL to a Postgres "
+            "connection URL (see deploy/DEPLOY.md and deploy/KEY-MANAGEMENT.md). "
+            "In-memory storage silently loses the CT log on restart — prior receipts "
+            "become unverifiable without the tree they were issued against. "
+            "For local development only: set CAPSULE_ANCHOR_INSECURE_IN_MEMORY=1 "
+            "to acknowledge this risk and start with volatile in-memory storage."
+        )
+
     if database_url:
         from capsule_anchor.anchoring.store import PostgresLogStore
         _store: object = PostgresLogStore(database_url)
