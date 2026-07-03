@@ -164,18 +164,24 @@ GCP. See [`deploy/DEPLOY.md`](deploy/DEPLOY.md) for the full walkthrough.
 
 ## Configuration
 
+The service is **fail-closed by default**: it refuses to start without both a stable signing key
+and a durable store. The `INSECURE_*` env vars below are dev-only escape hatches.
+
 | Env var | Default | Purpose |
 |---------|---------|---------|
-| `CAPSULE_ANCHOR_SIGNING_KEY` | _(required in prod)_ | Hex-encoded Ed25519 seed. Absent → ephemeral key (loud warning at startup). |
+| `CAPSULE_ANCHOR_SIGNING_KEY` | _(required)_ | Hex-encoded Ed25519 seed (from Secret Manager). Absent → startup fails. |
 | `CAPSULE_ANCHOR_SIGNING_KEY_FILE` | — | Alternative: path to a PEM/seed file. |
+| `CAPSULE_ANCHOR_DATABASE_URL` | _(required)_ | Postgres connection URL. Absent → startup fails. |
 | `CAPSULE_ANCHOR_HOST` | `0.0.0.0` | Bind host. |
 | `CAPSULE_ANCHOR_PORT` | `8000` | Bind port. |
 | `CAPSULE_ANCHOR_TSA_ENABLED` | `0` | Set `1` to add RFC 3161 TSA timestamps to anchors. |
 | `CAPSULE_ANCHOR_TSA_URL` | FreeTSA | Override the TSA endpoint. |
 | `AAC_ANCHOR_URL` | — | Consumed by `capsule-emit` to point at this instance. |
+| `CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY` | — | **Dev only.** Set `1` to allow startup without a signing key. |
+| `CAPSULE_ANCHOR_INSECURE_IN_MEMORY` | — | **Dev only.** Set `1` to allow startup without `CAPSULE_ANCHOR_DATABASE_URL`. |
 
-**Storage:** in-memory by default (state resets on restart). Install the
-`[postgres]` extra and set `CAPSULE_ANCHOR_DB_URL` for durable persistence.
+**Storage:** Postgres (`[postgres]` extra + `CAPSULE_ANCHOR_DATABASE_URL`) is required in production.
+For Cloud Run, use the unix-socket URL form with `--add-cloudsql-instances`. See [`deploy/DEPLOY.md`](deploy/DEPLOY.md).
 
 ---
 

@@ -556,3 +556,50 @@ class TestSignOracleRemoved:
         assert resp.status_code == 200
         jwk = resp.json()["verificationMethod"][0]["publicKeyJwk"]
         assert jwk["kty"] == "OKP" and jwk["crv"] == "Ed25519" and "x" in jwk
+
+
+# ---------------------------------------------------------------------------
+# 12. Fail-closed startup — no silent in-memory or ephemeral-key fallback
+# ---------------------------------------------------------------------------
+
+class TestFailClosed:
+    """Verify that production-unsafe defaults are explicitly gated.
+
+    A transparency log must not start silently with volatile in-memory storage
+    (log lost on restart → prior receipts unverifiable) or an ephemeral signing
+    key (identity rotates on restart → old receipts cannot be verified against
+    the new key). Both require an explicit INSECURE_* opt-in.
+
+    These tests use monkeypatch to temporarily clear the dev escape hatches set
+    by conftest.py, verifying the fail-closed behaviour at the create_app() layer.
+    """
+
+    def test_startup_refuses_without_db(self, monkeypatch):
+        monkeypatch.delenv("CAPSULE_ANCHOR_INSECURE_IN_MEMORY", raising=False)
+        monkeypatch.delenv("CAPSULE_ANCHOR_DATABASE_URL", raising=False)
+        monkeypatch.setenv("CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY", "1")
+        with pytest.raises(RuntimeError, match="CAPSULE_ANCHOR_DATABASE_URL"):
+            create_app()
+
+    def test_startup_refuses_without_signing_key(self, monkeypatch):
+        monkeypatch.delenv("CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY", raising=False)
+        monkeypatch.delenv("CAPSULE_ANCHOR_SIGNING_KEY", raising=False)
+        monkeypatch.delenv("CAPSULE_ANCHOR_SIGNING_KEY_FILE", raising=False)
+        monkeypatch.setenv("CAPSULE_ANCHOR_INSECURE_IN_MEMORY", "1")
+        with pytest.raises(RuntimeError, match="CAPSULE_ANCHOR_SIGNING_KEY"):
+            create_app()
+
+    def test_insecure_in_memory_opt_in_allows_startup(self, monkeypatch):
+        monkeypatch.setenv("CAPSULE_ANCHOR_INSECURE_IN_MEMORY", "1")
+        monkeypatch.delenv("CAPSULE_ANCHOR_DATABASE_URL", raising=False)
+        monkeypatch.setenv("CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY", "1")
+        client = TestClient(create_app())
+        assert client.get("/health").status_code == 200
+
+    def test_insecure_ephemeral_key_opt_in_allows_startup(self, monkeypatch):
+        monkeypatch.setenv("CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY", "1")
+        monkeypatch.delenv("CAPSULE_ANCHOR_SIGNING_KEY", raising=False)
+        monkeypatch.delenv("CAPSULE_ANCHOR_SIGNING_KEY_FILE", raising=False)
+        monkeypatch.setenv("CAPSULE_ANCHOR_INSECURE_IN_MEMORY", "1")
+        client = TestClient(create_app())
+        assert client.get("/health").json()["signing_key_ephemeral"] is True
