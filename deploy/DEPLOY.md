@@ -111,13 +111,12 @@ Create a Cloud Monitoring uptime check on `/health` so any future DB-connectivit
 
 ```bash
 # Create a public HTTPS uptime check on /health (pings every 1 min from global PoPs).
-gcloud monitoring uptime create \
-  --display-name="capsule-anchor /health" \
+gcloud monitoring uptime create "capsule-anchor /health" \
   --resource-type=uptime-url \
-  --hostname=anchor.agentactioncapsule.org \
+  --resource-labels="host=anchor.agentactioncapsule.org,project_id=PROJECT_ID" \
   --path=/health \
-  --check-interval=60s \
-  --timeout=10s \
+  --period=1 \
+  --timeout=10 \
   --project=PROJECT_ID
 ```
 
