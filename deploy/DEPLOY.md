@@ -103,3 +103,41 @@ gcloud builds submit --config deploy/cloudbuild.yaml \
     _SIGNING_KEY_SECRET=capsule-anchor-signing-key \
   --project=PROJECT_ID
 ```
+
+## Uptime monitoring
+
+Create a Cloud Monitoring uptime check on `/health` so any future DB-connectivity
+500 pages on-call immediately rather than going unnoticed:
+
+```bash
+# Create a public HTTPS uptime check on /health (pings every 1 min from global PoPs).
+gcloud monitoring uptime create \
+  --display-name="capsule-anchor /health" \
+  --resource-type=uptime-url \
+  --hostname=anchor.agentactioncapsule.org \
+  --path=/health \
+  --check-interval=60s \
+  --timeout=10s \
+  --project=PROJECT_ID
+```
+
+The check passes when the response is HTTP 200. A non-200 (including 500) triggers
+a Cloud Monitoring alert if an alerting policy is attached. Set one up in the
+Cloud Console: Monitoring → Alerting → Create policy → Uptime check policy →
+notify via email or PagerDuty.
+
+Smoke-test the write path after each deploy (substitute a real 64-hex capsule_id):
+
+```bash
+# anchor a synthetic test capsule — no real customer data
+curl -s -X POST https://anchor.agentactioncapsule.org/v1/digest \
+  -H "Content-Type: application/json" \
+  -d '{"capsule_id":"0000000000000000000000000000000000000000000000000000000000000001"}' \
+  | python3 -m json.tool
+
+# verify /health reports ok=true and tree_size > 0
+curl -s https://anchor.agentactioncapsule.org/health | python3 -m json.tool
+
+# verify /anchor/sth returns a signed tree head
+curl -s https://anchor.agentactioncapsule.org/anchor/sth | python3 -m json.tool
+```

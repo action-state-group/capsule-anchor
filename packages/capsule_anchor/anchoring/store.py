@@ -324,6 +324,12 @@ class PostgresLogStore:
     tables with ``ALTER TABLE … ADD COLUMN IF NOT EXISTS``; never delete.
 
     Requires: ``pip install 'capsule-anchor[postgres]'`` (psycopg v3).
+
+    Reconnect policy: Cloud SQL closes idle connections after ~10 min. Each
+    public method catches ``OperationalError`` and reconnects once before
+    retrying, so a single idle-timeout cycle is transparent to callers.
+    ``_lock`` is held across the reconnect, so no concurrent operation can
+    observe the stale connection.
     """
 
     def __init__(self, database_url: str) -> None:
@@ -335,11 +341,44 @@ class PostgresLogStore:
                 "Install it with: pip install 'capsule-anchor[postgres]'"
             ) from exc
         self._pg = _psycopg
+        self._database_url = database_url
         self._lock = threading.Lock()
         # autocommit=True: explicit conn.transaction() blocks own each write;
         # reads happen outside a transaction (no read-snapshot overhead).
         self._conn = _psycopg.connect(database_url, autocommit=True)
         self._init_schema()
+
+    # ------------------------------------------------------------------
+    # Reconnect helpers — MUST be called while _lock is held.
+    # ------------------------------------------------------------------
+
+    def _reconnect(self) -> None:
+        """Replace the stale connection with a fresh one."""
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        self._conn = self._pg.connect(self._database_url, autocommit=True)
+
+    def _read(self, sql: str, params: tuple = ()) -> object:
+        """Execute a read query; reconnect once on closed-connection error. Called under lock."""
+        try:
+            return self._conn.execute(sql, params)
+        except self._pg.OperationalError:
+            self._reconnect()
+            return self._conn.execute(sql, params)
+
+    def _transact(self, fn: object) -> None:
+        """Run fn() in a transaction; reconnect once on closed-connection error. Called under lock."""
+        def _run() -> None:
+            with self._conn.transaction():
+                fn()  # type: ignore[operator]
+
+        try:
+            _run()
+        except self._pg.OperationalError:
+            self._reconnect()
+            _run()
 
     def _init_schema(self) -> None:
         with self._lock, self._conn.transaction():
@@ -398,24 +437,27 @@ class PostgresLogStore:
 
     # --- log ---
     def append_entry(self, entry: TransparencyLogEntry) -> None:
-        with self._lock, self._conn.transaction():
-            self._conn.execute(
-                "INSERT INTO log_entries "
-                "(log_index, logged_at, kind, payload_hash, log_signature, prev_log_hash) "
-                "VALUES (%s, %s, %s, %s, %s, %s)",
-                (
-                    entry.log_index,
-                    entry.logged_at,
-                    entry.kind,
-                    entry.payload_hash,
-                    _sig_to_json(entry.log_signature),
-                    entry.prev_log_hash,
-                ),
+        params = (
+            entry.log_index,
+            entry.logged_at,
+            entry.kind,
+            entry.payload_hash,
+            _sig_to_json(entry.log_signature),
+            entry.prev_log_hash,
+        )
+        with self._lock:
+            self._transact(
+                lambda: self._conn.execute(
+                    "INSERT INTO log_entries "
+                    "(log_index, logged_at, kind, payload_hash, log_signature, prev_log_hash) "
+                    "VALUES (%s, %s, %s, %s, %s, %s)",
+                    params,
+                )
             )
 
     def all_entries(self) -> list[TransparencyLogEntry]:
         with self._lock:
-            cur = self._conn.execute(
+            cur = self._read(
                 "SELECT log_index, logged_at, kind, payload_hash, log_signature, "
                 "prev_log_hash FROM log_entries ORDER BY log_index ASC"
             )
@@ -423,7 +465,7 @@ class PostgresLogStore:
 
     def entries_after(self, after_index: int) -> list[TransparencyLogEntry]:
         with self._lock:
-            cur = self._conn.execute(
+            cur = self._read(
                 "SELECT log_index, logged_at, kind, payload_hash, log_signature, "
                 "prev_log_hash FROM log_entries WHERE log_index >= %s "
                 "ORDER BY log_index ASC",
@@ -433,32 +475,35 @@ class PostgresLogStore:
 
     def size(self) -> int:
         with self._lock:
-            cur = self._conn.execute("SELECT COUNT(*) FROM log_entries")
+            cur = self._read("SELECT COUNT(*) FROM log_entries")
             return int(cur.fetchone()[0])
 
     # --- countersigned roots ---
     def put_root(self, root: CountersignedRoot) -> None:
-        with self._lock, self._conn.transaction():
-            self._conn.execute(
-                "INSERT INTO countersigned_roots "
-                "(tenant_id, root_hash, seq_from, seq_to, attested_at, countersignature) "
-                "VALUES (%s, %s, %s, %s, %s, %s) "
-                "ON CONFLICT (tenant_id, root_hash) DO UPDATE SET "
-                "attested_at = EXCLUDED.attested_at, "
-                "countersignature = EXCLUDED.countersignature",
-                (
-                    root.tenant_id,
-                    root.root_hash,
-                    int(root.seq_range[0]),
-                    int(root.seq_range[1]),
-                    root.attested_at,
-                    _sig_to_json(root.countersignature),
-                ),
+        params = (
+            root.tenant_id,
+            root.root_hash,
+            int(root.seq_range[0]),
+            int(root.seq_range[1]),
+            root.attested_at,
+            _sig_to_json(root.countersignature),
+        )
+        with self._lock:
+            self._transact(
+                lambda: self._conn.execute(
+                    "INSERT INTO countersigned_roots "
+                    "(tenant_id, root_hash, seq_from, seq_to, attested_at, countersignature) "
+                    "VALUES (%s, %s, %s, %s, %s, %s) "
+                    "ON CONFLICT (tenant_id, root_hash) DO UPDATE SET "
+                    "attested_at = EXCLUDED.attested_at, "
+                    "countersignature = EXCLUDED.countersignature",
+                    params,
+                )
             )
 
     def get_root(self, tenant_id: str, root_hash: str) -> CountersignedRoot | None:
         with self._lock:
-            cur = self._conn.execute(
+            cur = self._read(
                 "SELECT tenant_id, root_hash, seq_from, seq_to, attested_at, "
                 "countersignature FROM countersigned_roots "
                 "WHERE tenant_id = %s AND root_hash = %s",
@@ -477,16 +522,19 @@ class PostgresLogStore:
 
     # --- capsule binding ---
     def put_capsule_id(self, log_index: int, capsule_id: str) -> None:
-        with self._lock, self._conn.transaction():
-            self._conn.execute(
-                "INSERT INTO log_capsule_bindings (log_index, capsule_id) "
-                "VALUES (%s, %s) ON CONFLICT (log_index) DO UPDATE SET capsule_id = EXCLUDED.capsule_id",
-                (int(log_index), capsule_id),
+        params = (int(log_index), capsule_id)
+        with self._lock:
+            self._transact(
+                lambda: self._conn.execute(
+                    "INSERT INTO log_capsule_bindings (log_index, capsule_id) "
+                    "VALUES (%s, %s) ON CONFLICT (log_index) DO UPDATE SET capsule_id = EXCLUDED.capsule_id",
+                    params,
+                )
             )
 
     def get_capsule_id(self, log_index: int) -> str | None:
         with self._lock:
-            cur = self._conn.execute(
+            cur = self._read(
                 "SELECT capsule_id FROM log_capsule_bindings WHERE log_index = %s",
                 (int(log_index),),
             )
@@ -495,7 +543,7 @@ class PostgresLogStore:
 
     def entries_for_capsule(self, capsule_id: str) -> list[TransparencyLogEntry]:
         with self._lock:
-            cur = self._conn.execute(
+            cur = self._read(
                 "SELECT le.log_index, le.logged_at, le.kind, le.payload_hash, "
                 "le.log_signature, le.prev_log_hash "
                 "FROM log_entries le "
@@ -509,17 +557,20 @@ class PostgresLogStore:
     def put_statement(
         self, entry_hash: str, receipt_bytes: bytes, leaf_index: int, tree_size: int
     ) -> None:
-        with self._lock, self._conn.transaction():
-            self._conn.execute(
-                "INSERT INTO submitted_statements "
-                "(entry_hash, receipt, leaf_index, tree_size) "
-                "VALUES (%s, %s, %s, %s) ON CONFLICT (entry_hash) DO NOTHING",
-                (entry_hash, receipt_bytes, leaf_index, tree_size),
+        params = (entry_hash, receipt_bytes, leaf_index, tree_size)
+        with self._lock:
+            self._transact(
+                lambda: self._conn.execute(
+                    "INSERT INTO submitted_statements "
+                    "(entry_hash, receipt, leaf_index, tree_size) "
+                    "VALUES (%s, %s, %s, %s) ON CONFLICT (entry_hash) DO NOTHING",
+                    params,
+                )
             )
 
     def get_statement(self, entry_hash: str) -> tuple[bytes, int, int] | None:
         with self._lock:
-            cur = self._conn.execute(
+            cur = self._read(
                 "SELECT receipt, leaf_index, tree_size FROM submitted_statements "
                 "WHERE entry_hash = %s",
                 (entry_hash,),
