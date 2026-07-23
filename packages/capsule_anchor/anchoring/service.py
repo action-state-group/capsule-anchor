@@ -671,6 +671,19 @@ class AnchorerService:
 
         return receipt, entry_hash, leaf_index, tree_size
 
+    def get_registered_statement(
+        self, entry_hash: str
+    ) -> tuple[bytes, int, int] | None:
+        """Read-only lookup of a registered statement by its CT entry hash.
+
+        Returns ``(receipt_bytes, leaf_index, tree_size)`` if a statement with
+        ``entry_hash`` was previously registered, else ``None``. Purely a read —
+        NEVER appends to the log (contrast ``register_signed_statement``, which
+        registers on a miss). Backs the ``GET /v1/inclusion/{capsule_id}``
+        resolve route so an unknown capsule_id yields a 404, not a new entry.
+        """
+        return self._store.get_statement(entry_hash)
+
     # --- inclusion proofs (TENANT ledger tree) -----------------------------
     def inclusion_proof(self, leaf_hashes: list[str], index: int) -> MerkleProof:
         """Build a Merkle inclusion proof for ``leaf_hashes[index]``.
