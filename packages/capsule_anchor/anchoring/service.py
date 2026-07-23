@@ -632,19 +632,25 @@ class AnchorerService:
             )
         entry_hash = hashlib.sha256(statement_bytes).hexdigest()
 
-        # Idempotent dedup: return the original receipt for duplicate submissions.
-        cached = self._store.get_statement(entry_hash)
-        if cached is not None:
-            receipt_bytes, leaf_index, tree_size = cached
-            return receipt_bytes, entry_hash, leaf_index, tree_size
-
         logged_at = _now()
         with self._lock:
+            # Atomic dedup + append. The get_statement check MUST be inside the
+            # same lock as the append: otherwise two concurrent submissions of
+            # the same NEW statement both see "not present" and both append,
+            # landing ONE statement at TWO CT leaves (observed in the wild:
+            # a doubly-submitted capsule occupied leaves 180 AND 181). Holding
+            # the lock across check → append → persist makes registration
+            # exactly-once per entry_hash.
+            cached = self._store.get_statement(entry_hash)
+            if cached is not None:
+                receipt_bytes, leaf_index, tree_size = cached
+                return receipt_bytes, entry_hash, leaf_index, tree_size
+
             # 1. Append to the SAME append-only CT log; the entry's payload_hash
             #    IS the SCITT entry hash, and (per ct_leaf_payload) its CT leaf
             #    preimage is the raw 32 bytes of that hash. Build the inclusion
-            #    proof + current root atomically under the same lock so the
-            #    returned leaf_index/tree_size match the receipt exactly.
+            #    proof + current root under the same lock so the returned
+            #    leaf_index/tree_size match the receipt exactly.
             entry = self._append_log(_LOG_KIND_SCITT, statement_bytes, logged_at)
             leaf_index = entry.log_index
             leaves = self._ct_leaves()
@@ -652,22 +658,21 @@ class AnchorerService:
             audit_hex = ct.inclusion_audit_path(leaf_index, leaves)
             root_hex = ct.merkle_tree_hash(leaves)
 
-        audit_path = [bytes.fromhex(h) for h in audit_hex]
-        root = bytes.fromhex(root_hex)
+            audit_path = [bytes.fromhex(h) for h in audit_hex]
+            root = bytes.fromhex(root_hex)
 
-        # 2. Assemble + sign the COSE Receipt (detached root payload).
-        receipt = build_cose_receipt(
-            tree_size=tree_size,
-            leaf_index=leaf_index,
-            audit_path=audit_path,
-            root=root,
-            sign=lambda payload: bytes.fromhex(self._attestor.attest(payload).signature),
-        )
+            # 2. Assemble + sign the COSE Receipt (detached root payload).
+            receipt = build_cose_receipt(
+                tree_size=tree_size,
+                leaf_index=leaf_index,
+                audit_path=audit_path,
+                root=root,
+                sign=lambda payload: bytes.fromhex(self._attestor.attest(payload).signature),
+            )
 
-        # 3. Persist for idempotent dedup — INSERT OR IGNORE so a concurrent
-        #    duplicate that races past the get_statement check above doesn't
-        #    overwrite the first caller's row.
-        self._store.put_statement(entry_hash, receipt, leaf_index, tree_size)
+            # 3. Persist for idempotent dedup (still INSERT OR IGNORE as
+            #    defence-in-depth across processes / durable backends).
+            self._store.put_statement(entry_hash, receipt, leaf_index, tree_size)
 
         return receipt, entry_hash, leaf_index, tree_size
 
