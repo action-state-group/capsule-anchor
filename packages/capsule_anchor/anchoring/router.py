@@ -14,6 +14,9 @@ Endpoints:
   --- SCITT Transparency Service (TS) ---
   POST /transparency/register-statement -> register a SCITT Signed Statement
                                            (COSE_Sign1) and issue a COSE Receipt
+  POST /v1/digest                       -> register a capsule_id digest, issue a Receipt
+  GET  /v1/inclusion/{capsule_id}       -> read-only resolve: capsule_id -> inclusion
+                                           proof + Receipt (200 present / 404 absent)
 
   --- CT monitor routes (Phase 4) ---
   GET  /anchor/sth                    -> current Signed Tree Head (RFC6962)
@@ -30,6 +33,7 @@ from __future__ import annotations
 
 import base64
 import collections
+import hashlib
 import threading
 import time
 
@@ -153,6 +157,27 @@ class RegisterStatementResponse(BaseModel):
     entry_hash: str
     leaf_index: int
     tree_size: int
+
+
+class InclusionResolveResponse(BaseModel):
+    """Read-only resolve of a ``capsule_id`` to its CT-log inclusion evidence.
+
+    Returned by ``GET /v1/inclusion/{capsule_id}``. ``entry_hash`` is
+    ``SHA256(bytes.fromhex(capsule_id)).hex()`` — the CT-log entry hash whose
+    RFC6962 leaf is ``SHA256(0x00 || entry_hash_bytes)``. The fields let a
+    relying party verify offline: ``verify_receipt(receipt, leaf_entry_hex=
+    entry_hash, log_public_key_pem=…)`` reconstructs ``root_hash`` and checks
+    the authority signature, and the ``audit_path`` folds to the same root.
+    """
+
+    capsule_id: str
+    entry_hash: str
+    leaf_index: int
+    tree_size: int
+    leaf_hash: str
+    audit_path: list[str]
+    root_hash: str
+    receipt_b64: str
 
 
 def get_router() -> APIRouter:
@@ -352,6 +377,43 @@ def get_router() -> APIRouter:
             entry_hash=entry_hash,
             leaf_index=leaf_index,
             tree_size=tree_size,
+        )
+
+    @v1.get("/inclusion/{capsule_id}", response_model=InclusionResolveResponse)
+    def inclusion(capsule_id: str) -> InclusionResolveResponse:
+        """Read-only resolve: ``capsule_id`` -> CT inclusion proof + COSE Receipt.
+
+        Derives ``entry_hash = SHA256(bytes.fromhex(capsule_id))`` and looks it
+        up in the log. Returns **200** with the inclusion evidence if the
+        capsule's statement is registered, **404** if it is absent (the
+        negative-case DENY), **400** on a malformed capsule_id. This is a pure
+        read — it NEVER registers the capsule_id (contrast ``POST /v1/digest``).
+        """
+        cid = capsule_id.lower().strip()
+        if len(cid) != 64 or not all(c in "0123456789abcdef" for c in cid):
+            raise HTTPException(
+                status_code=400,
+                detail="capsule_id must be a 64-character hex string (32-byte SHA-256 digest)",
+            )
+        entry_hash = hashlib.sha256(bytes.fromhex(cid)).hexdigest()
+        svc = get_service()
+        cached = svc.get_registered_statement(entry_hash)
+        if cached is None:
+            raise HTTPException(
+                status_code=404,
+                detail="capsule_id not found in transparency log",
+            )
+        receipt_bytes, leaf_index, tree_size = cached
+        proof = svc.inclusion_proof_ct(leaf_index, tree_size)
+        return InclusionResolveResponse(
+            capsule_id=cid,
+            entry_hash=entry_hash,
+            leaf_index=leaf_index,
+            tree_size=tree_size,
+            leaf_hash=proof.leaf_hash,
+            audit_path=proof.audit_path,
+            root_hash=proof.root_hash,
+            receipt_b64=base64.b64encode(receipt_bytes).decode("ascii"),
         )
 
     parent = APIRouter()
