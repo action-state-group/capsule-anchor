@@ -23,11 +23,10 @@ from __future__ import annotations
 
 from typing import Any, Protocol
 
-from capsule_anchor.contracts.types import AnchorReceipt, Signature
-
 # We import from anchoring/ ONLY for the payload helpers. Anchoring is a
 # sibling package and we are not modifying it.
 from capsule_anchor.anchoring.service import sth_payload
+from capsule_anchor.contracts.types import AnchorReceipt, Signature
 
 
 class _PublicLogLike(Protocol):

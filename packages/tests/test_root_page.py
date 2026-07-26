@@ -1,7 +1,6 @@
 """Tests for the root page (GET /)."""
-from fastapi.testclient import TestClient
-
 from capsule_anchor.app import create_app
+from fastapi.testclient import TestClient
 
 
 def test_root_returns_200_html():

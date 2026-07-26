@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -25,7 +25,7 @@ from .types import Commitment, MerkleProof, Signature
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 class ShimCryptoCore:
@@ -63,7 +63,7 @@ class ShimCryptoCore:
                 bytes.fromhex(sig.signature), payload
             )
             return True
-        except Exception:
+        except Exception:  # noqa: BLE001
             return False
 
     # --- hashing / chain ---

@@ -23,14 +23,16 @@ def create_app() -> FastAPI:
         version="0.1.0",
     )
 
-    from capsule_anchor.signing_key import StaticKeyProvider, load_signing_key
-    from capsule_anchor.attestation.service import AttestorService
-    from capsule_anchor.attestation.router import configure_service as cfg_attest
-    from capsule_anchor.anchoring.service import AnchorerService
     from capsule_anchor.anchoring.router import (
         configure_service as cfg_anchor,
+    )
+    from capsule_anchor.anchoring.router import (
         get_router as anchor_router,
     )
+    from capsule_anchor.anchoring.service import AnchorerService
+    from capsule_anchor.attestation.router import configure_service as cfg_attest
+    from capsule_anchor.attestation.service import AttestorService
+    from capsule_anchor.signing_key import StaticKeyProvider, load_signing_key
 
     loaded = load_signing_key()
 
@@ -103,7 +105,7 @@ def create_app() -> FastAPI:
                 sth = svc.get_sth()
                 result["latest_sth_timestamp"] = sth.timestamp.isoformat()
                 result["latest_root_hash"] = sth.root_hash
-            except Exception:
+            except Exception:  # noqa: BLE001, S110
                 pass
         return result
 

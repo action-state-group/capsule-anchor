@@ -25,12 +25,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
-from typing import Any
+from typing import Any, Self
 
 import httpx
 
 from capsule_anchor.contracts.types import Signature
-
 
 # Rekor's hashedrekord schema:
 #   https://github.com/sigstore/rekor/blob/main/types/hashedrekord/v0.0.1/hashedrekord_v0_0_1_schema.json
@@ -204,9 +203,7 @@ class RekorPublicLog:
             return False
         # If the caller already has a SET, require it matches what Rekor serves.
         receipt_set = receipt.get("signed_entry_timestamp")
-        if receipt_set is not None and receipt_set != set_value:
-            return False
-        return True
+        return not (receipt_set is not None and receipt_set != set_value)
 
     def name(self) -> str:
         return self._LOG_NAME
@@ -216,7 +213,7 @@ class RekorPublicLog:
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> "RekorPublicLog":
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(self, *_exc: object) -> None:

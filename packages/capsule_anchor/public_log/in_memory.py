@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import hashlib
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from capsule_anchor.contracts.types import Signature
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class InMemoryPublicLog:
@@ -73,9 +73,7 @@ class InMemoryPublicLog:
                 return False
             if receipt.get("signature") != sig_hex:
                 return False
-            if receipt.get("integrated_time") != integrated_time:
-                return False
-            return True
+            return receipt.get("integrated_time") == integrated_time
 
     def name(self) -> str:
         return self._LOG_NAME

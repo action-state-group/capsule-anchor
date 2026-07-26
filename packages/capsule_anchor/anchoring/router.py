@@ -43,7 +43,7 @@ from capsule_anchor.contracts.types import (
     TransparencyLogEntry,
 )
 
-from .service import AnchorerService, MAX_STATEMENT_BYTES
+from .service import MAX_STATEMENT_BYTES, AnchorerService
 
 
 class _SlidingWindowLimiter:
@@ -205,7 +205,7 @@ def get_router() -> APIRouter:
 
     # --- CT monitor routes (Phase 4) ----------------------------------------
 
-    from .service import SignedTreeHead, InclusionProof, ConsistencyProof
+    from .service import ConsistencyProof, InclusionProof, SignedTreeHead
 
     @router.get("/sth", response_model=SignedTreeHead)
     def sth() -> SignedTreeHead:

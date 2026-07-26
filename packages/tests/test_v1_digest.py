@@ -4,9 +4,8 @@ import hashlib
 
 import cbor2
 import pytest
-from fastapi.testclient import TestClient
-
 from capsule_anchor.app import create_app
+from fastapi.testclient import TestClient
 
 DIGEST_64 = "a" * 64  # valid 64-hex (32 bytes of 0xaa)
 DIGEST_B = bytes.fromhex(DIGEST_64)
@@ -40,7 +39,7 @@ def test_v1_digest_receipt_is_cose_sign1(client):
     receipt_raw = base64.b64decode(resp.json()["receipt_b64"])
     tag = cbor2.loads(receipt_raw)
     assert hasattr(tag, "tag") and tag.tag == 18
-    protected_bytes, unprotected, payload, sig = tag.value
+    protected_bytes, unprotected, payload, _sig = tag.value
     assert payload is None  # detached payload
     protected = cbor2.loads(protected_bytes)
     assert protected[1] == -8   # alg = EdDSA

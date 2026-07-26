@@ -39,11 +39,12 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import cbor2
 from pydantic import BaseModel
 
+from capsule_anchor.attestation.service import AttestorService
 from capsule_anchor.contracts.protocols import CryptoCore, KeyProvider
 from capsule_anchor.contracts.types import (
     AnchorReceipt,
@@ -52,8 +53,6 @@ from capsule_anchor.contracts.types import (
     Signature,
     TransparencyLogEntry,
 )
-
-from capsule_anchor.attestation.service import AttestorService
 
 from . import ct
 from .store import InMemoryLogStore, SqliteLogStore
@@ -105,7 +104,7 @@ def build_cose_receipt(
     leaf_index: int,
     audit_path: list[bytes],
     root: bytes,
-    sign: "callable",
+    sign: callable,
 ) -> bytes:
     """Assemble a SCITT COSE Receipt (COSE_Sign1, tag 18) -- ~the scitt-cose shape.
 
@@ -137,7 +136,7 @@ def build_cose_receipt(
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _canonical(obj: dict) -> bytes:
@@ -557,9 +556,7 @@ class AnchorerService:
             )
             if not ok:
                 return False
-            if anchored_root_hash is not None and proof.root_hash != anchored_root_hash:
-                return False
-            return True
+            return not (anchored_root_hash is not None and proof.root_hash != anchored_root_hash)
         # Tenant-ledger MerkleProof (original surface).
         return self.verify_inclusion_ledger(proof, anchored_root_hash)
 
@@ -692,9 +689,7 @@ class AnchorerService:
         """
         if not self._crypto.verify_merkle_proof(proof):
             return False
-        if anchored_root_hash is not None and proof.root_hash != anchored_root_hash:
-            return False
-        return True
+        return not (anchored_root_hash is not None and proof.root_hash != anchored_root_hash)
 
     # --- accessors ---------------------------------------------------------
     def authority_pubkey(self) -> bytes:

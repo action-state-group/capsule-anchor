@@ -30,8 +30,7 @@ import statistics
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
-
+from datetime import UTC, datetime
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -64,7 +63,7 @@ def _post_digest(endpoint: str, capsule_id: str, timeout: float = 10.0) -> tuple
             return True, resp.status, (time.perf_counter() - t0) * 1000
     except urllib.error.HTTPError as e:
         return False, e.code, (time.perf_counter() - t0) * 1000
-    except Exception:
+    except Exception:  # noqa: BLE001
         return False, 0, (time.perf_counter() - t0) * 1000
 
 
@@ -105,7 +104,7 @@ def _verify_anchor(base_url: str) -> dict:
             sth = json.loads(r.read())
         results["tree_size"] = sth.get("tree_size", 0)
         results["sth_ok"] = True
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         results["sth_ok"] = False
         results["sth_error"] = str(e)
         return results
@@ -122,7 +121,7 @@ def _verify_anchor(base_url: str) -> dict:
                 proof.get("leaf_index") == leaf_index
                 and len(proof.get("audit_path", [])) >= 0
             )
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             results["inclusion_proof_ok"] = False
             results["inclusion_proof_error"] = str(e)
     return results
@@ -219,7 +218,7 @@ async def run_sweep(endpoint: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 async def main(args: argparse.Namespace) -> None:
-    print(f"Anchor Load Harness — {datetime.now(timezone.utc).isoformat()}")
+    print(f"Anchor Load Harness — {datetime.now(UTC).isoformat()}")
     print(f"Target: {args.url}")
     print("INTERNAL — numbers not for external publication")
     print()
@@ -237,13 +236,13 @@ async def main(args: argparse.Namespace) -> None:
           f"inclusion_proof_ok={verify.get('inclusion_proof_ok', 'skipped')}")
 
     output = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "endpoint": args.url,
         "runs": all_stats,
         "post_run_verify": verify,
     }
-    out_path = args.output or f"load_results_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.json"
-    with open(out_path, "w") as f:
+    out_path = args.output or f"load_results_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.json"
+    with open(out_path, "w") as f:  # noqa: ASYNC230
         json.dump(output, f, indent=2)
     print(f"\nResults written to {out_path} (INTERNAL)")
 
