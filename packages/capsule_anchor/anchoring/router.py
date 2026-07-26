@@ -1,7 +1,7 @@
 """FastAPI router for the anchoring subsystem (prefix ``/anchor``).
 
 This subsystem IS the Action State **Transparency Service (TS)**: a SCITT-style
-(draft-ietf-scitt-architecture) append-only transparency log over an RFC9162
+(RFC 9943) append-only transparency log over an RFC9162
 (RFC6962) Certificate-Transparency Merkle tree, with an Ed25519 authority key.
 
 Endpoints:
