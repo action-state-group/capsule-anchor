@@ -19,12 +19,11 @@ import hashlib
 import os
 
 import pytest
-from fastapi.testclient import TestClient
-
-from capsule_anchor.anchoring.service import AnchorerService, MAX_STATEMENT_BYTES
 from capsule_anchor.anchoring.router import _SlidingWindowLimiter
+from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES, AnchorerService
 from capsule_anchor.anchoring.store import SqliteLogStore
 from capsule_anchor.app import create_app
+from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Postgres helpers — skip gracefully when no DB URL is configured
@@ -237,11 +236,11 @@ class TestIdempotentDedup:
         db = str(tmp_path / "anchor.db")
         svc1 = _fresh_service(db)
         stmt = _digest(7)
-        r1, _, leaf_index1, ts1 = svc1.register_signed_statement(stmt)
+        r1, _, leaf_index1, _ts1 = svc1.register_signed_statement(stmt)
         svc1._store.close()
 
         svc2 = _fresh_service(db)
-        r2, _, leaf_index2, ts2 = svc2.register_signed_statement(stmt)
+        r2, _, leaf_index2, _ts2 = svc2.register_signed_statement(stmt)
         assert r1 == r2, "dedup receipt changed across reopen"
         assert leaf_index1 == leaf_index2
         assert svc2._store.size() == 1, "duplicate added after reopen"

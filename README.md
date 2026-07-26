@@ -12,7 +12,7 @@ COSE Receipt back.
 ## What it does
 
 `capsule-anchor` implements the
-[SCITT Transparency Service](https://datatracker.ietf.org/doc/draft-ietf-scitt-architecture/)
+[SCITT Transparency Service (RFC 9943)](https://www.rfc-editor.org/rfc/rfc9943)
 (TS) interface, backed by an RFC 9162 (RFC 6962) Certificate-Transparency
 Merkle tree:
 
@@ -216,7 +216,7 @@ tier gates, or telemetry are present.
 
 The service implements:
 
-- [draft-ietf-scitt-architecture](https://datatracker.ietf.org/doc/draft-ietf-scitt-architecture/) — SCITT Transparency Service
+- [RFC 9943](https://www.rfc-editor.org/rfc/rfc9943) — SCITT Architecture (Transparency Service)
 - [RFC 9162 / RFC 6962](https://www.rfc-editor.org/rfc/rfc9162) — Certificate Transparency log
 - [draft-ietf-cose-merkle-tree-proofs](https://datatracker.ietf.org/doc/draft-ietf-cose-merkle-tree-proofs/) — COSE Receipt format
 - [RFC 8032](https://www.rfc-editor.org/rfc/rfc8032) / [RFC 9052](https://www.rfc-editor.org/rfc/rfc9052) — Ed25519 / COSE_Sign1

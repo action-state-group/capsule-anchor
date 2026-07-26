@@ -26,7 +26,7 @@ from capsule_anchor.contracts.types import (
 
 def _require_sqlalchemy():
     try:
-        import sqlalchemy as sa  # noqa: F401
+        import sqlalchemy as sa
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised only w/o extra
         raise ModuleNotFoundError(
             "SqlLogStore requires SQLAlchemy. Install the '[postgres]' extra: "
@@ -149,12 +149,12 @@ class SqlLogStore:
                     t.c.tenant_id == root.tenant_id, t.c.root_hash == root.root_hash
                 )
             ).first()
-            vals = dict(
-                seq_from=int(root.seq_range[0]),
-                seq_to=int(root.seq_range[1]),
-                attested_at=root.attested_at.isoformat(),
-                countersignature=_sig_to_json(root.countersignature),
-            )
+            vals = {
+                "seq_from": int(root.seq_range[0]),
+                "seq_to": int(root.seq_range[1]),
+                "attested_at": root.attested_at.isoformat(),
+                "countersignature": _sig_to_json(root.countersignature),
+            }
             if exists is None:
                 conn.execute(
                     t.insert().values(

@@ -356,7 +356,7 @@ class PostgresLogStore:
         """Replace the stale connection with a fresh one."""
         try:
             self._conn.close()
-        except Exception:
+        except Exception:  # noqa: BLE001, S110
             pass
         self._conn = self._pg.connect(self._database_url, autocommit=True)
 

@@ -145,7 +145,7 @@ def post_timestamp_request(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read()
     except (urllib.error.URLError, OSError) as exc:
         raise TsaError(f"TSA request failed: {exc}") from exc

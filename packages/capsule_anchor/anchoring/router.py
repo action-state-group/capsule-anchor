@@ -1,7 +1,7 @@
 """FastAPI router for the anchoring subsystem (prefix ``/anchor``).
 
 This subsystem IS the Action State **Transparency Service (TS)**: a SCITT-style
-(draft-ietf-scitt-architecture) append-only transparency log over an RFC9162
+(RFC 9943) append-only transparency log over an RFC9162
 (RFC6962) Certificate-Transparency Merkle tree, with an Ed25519 authority key.
 
 Endpoints:
@@ -43,7 +43,7 @@ from capsule_anchor.contracts.types import (
     TransparencyLogEntry,
 )
 
-from .service import AnchorerService, MAX_STATEMENT_BYTES
+from .service import MAX_STATEMENT_BYTES, AnchorerService
 
 
 class _SlidingWindowLimiter:
@@ -205,7 +205,7 @@ def get_router() -> APIRouter:
 
     # --- CT monitor routes (Phase 4) ----------------------------------------
 
-    from .service import SignedTreeHead, InclusionProof, ConsistencyProof
+    from .service import ConsistencyProof, InclusionProof, SignedTreeHead
 
     @router.get("/sth", response_model=SignedTreeHead)
     def sth() -> SignedTreeHead:
