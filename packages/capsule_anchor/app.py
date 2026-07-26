@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 _ROOT_HTML = Path(__file__).parent / "static" / "root.html"
@@ -21,6 +22,15 @@ def create_app() -> FastAPI:
             "RFC6962 CT-log inclusion proof. Ed25519 authority key; append-only log."
         ),
         version="0.1.0",
+    )
+
+    # Read-only CORS: allow browsers on the standard site to fetch the public
+    # log endpoints. GET-only so write paths (all POST) are unaffected.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["https://agentactioncapsule.org"],
+        allow_methods=["GET"],
+        allow_headers=[],
     )
 
     from capsule_anchor.anchoring.router import (
