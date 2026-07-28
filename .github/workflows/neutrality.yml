@@ -31,6 +31,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Neutrality scanner self-test (span-based allow-phrase fix)
+        run: python .github/neutrality_scan.py --self-test
+
       - name: Reserved-vocabulary neutrality scan (term list from secret)
         env:
           NEUTRALITY_TERMS: ${{ secrets.NEUTRALITY_TERMS }}
