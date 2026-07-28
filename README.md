@@ -73,6 +73,59 @@ cap = emit(..., anchor=True, anchor_url="https://your-anchor-host/v1/digest")
 
 ---
 
+## Registration Policy and Issuer Binding
+
+### Open registration policy (public instance)
+
+The free public instance at `anchor.agentactioncapsule.org` runs an **open registration
+policy**: any Signed Statement is accepted regardless of the issuer's identity or signing
+key. No authentication of the `iss` claim is enforced at registration time. This is
+intentional for a public neutral service — the log is append-only and the receipt
+guarantees temporal inclusion; it does not attest issuer provenance.
+
+Production deployments SHOULD enforce issuer binding. The open policy is explicitly stated
+here so that relying parties know not to interpret a receipt from the public instance as a
+guarantee that the issuer was authenticated.
+
+### Supported issuer-binding patterns
+
+Three patterns are defined for binding the `iss` claim in a Capsule's CWT protected header
+to a verifiable signing key:
+
+| # | Pattern | What the TS verifies | Stable identifier | Trust anchor |
+|---|---------|----------------------|-------------------|--------------|
+| 1 | **did:web** | Resolves `iss` as a DID URI at registration/verification time to obtain the current signing key; verifies COSE signature against that key. | DID URI (resolution is live — no pinned cert expiry). | DID document (resolution-at-verification). |
+| 2 | **x5chain** | Validates the certificate chain in the COSE `x5chain` protected header; leaf's public key MUST match the signing key; chain MUST terminate at a configured CA trust root. | `iss` distinguished name or subject URI (RP decision). | Pinned CA trust root. |
+| 3 | **SPIFFE SVID** | Variant of x5chain: the leaf certificate MUST carry a SPIFFE ID URI in its Subject Alternative Name; `iss` MUST equal that SPIFFE ID URI; chain terminates at a SPIFFE trust bundle (not a generic CA store). | SPIFFE ID URI (`spiffe://trust-domain/path`) — persists across SPIRE-managed certificate renewals. | SPIFFE trust bundle. |
+
+All three patterns share the same verification entry point: establish the issuer's current
+public key, then verify the COSE signature. They differ in how the key is obtained and
+what makes the issuer identifier stable across key rotations.
+
+### Degraded assurance for bare kid
+
+A Capsule whose signing key is a bare, unresolvable `kid` with no `x5chain` and no
+resolvable DID maps to a **degraded assurance grade** in the registration policy. This
+state MUST be reported explicitly — it is not a silent pass. A relying party that requires
+issuer authentication SHOULD reject or flag Capsules in this state.
+
+### No cross-pattern substitution
+
+Each pattern is verified under its own trust rules. A did:web resolution result does not
+satisfy x5chain trust-chain verification, and neither satisfies SPIFFE trust-bundle
+verification. A registration policy MUST NOT treat a successful verification under one
+pattern as equivalent to verification under another.
+
+### SPIFFE SVID — third binding type
+
+SPIFFE SVID is the third issuer-binding type alongside did:web and x5chain. The mechanism
+sketch — including how the X.509-SVID chain is carried in `x5chain`, why the SPIFFE ID
+persists across SPIRE-managed short-lived cert rotations, and the representation discipline
+for content-addressing the DER cert bytes — is in the internal design note
+`_work/spiffe-who-binding-note.md` and is expected to land in a dedicated profile spec.
+
+---
+
 ## API
 
 ### Simple digest endpoint (capsule-emit default)
