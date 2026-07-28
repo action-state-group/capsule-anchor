@@ -208,6 +208,17 @@ development.
 
 ---
 
+## Third-party usage
+
+Independent parties have registered statements and verified receipts against the
+live public instance. The Microsoft-signed statement at leaf 151 and the
+[examples-repo PR #4](https://github.com/action-state-group/agent-action-capsule/pull/4)
+are on the public record; receipts from that run were verified by an independent
+verifier written on a different COSE stack, confirming the log and receipt format
+interoperate across implementations.
+
+---
+
 ## Provenance, neutrality & governance
 
 `capsule-anchor` is developed by **Action State Group, Inc.** and published as
