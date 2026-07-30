@@ -283,15 +283,17 @@ def get_router() -> APIRouter:
         """Authority public key for out-of-band monitor pinning.
 
         Returns ``pubkey_hex`` (raw 32-byte Ed25519 key as lowercase hex) and
-        ``key_id`` (first 16 hex chars, a stable short handle). The monitor
-        provisions this out-of-band and uses it to independently verify every
-        STH signature -- this is what decouples the monitor from trusting the
-        authority's own claims.
+        ``key_id`` (first 16 hex chars of ``sha256(pubkey)`` -- the SAME
+        derivation used for ``Signature.key_id`` on every STH/receipt, so this
+        value always matches the key_id a relying party sees on a signature).
+        The monitor provisions this out-of-band and uses it to independently
+        verify every STH signature -- this is what decouples the monitor from
+        trusting the authority's own claims.
         """
         svc = get_service()
         raw: bytes = svc.authority_pubkey()
         pubkey_hex = raw.hex()
-        return {"pubkey_hex": pubkey_hex, "key_id": pubkey_hex[:16]}
+        return {"pubkey_hex": pubkey_hex, "key_id": svc.attestor.key_id}
 
     # --- SCITT Transparency Service (TS) ------------------------------------
     # Mounted at the top level (``/transparency``), distinct from the ``/anchor``

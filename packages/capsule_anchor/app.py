@@ -100,13 +100,12 @@ def create_app() -> FastAPI:
     def health() -> dict:
         from capsule_anchor.anchoring.router import get_service
         svc = get_service()
-        pubkey_hex = svc.authority_pubkey().hex()
         tree_size = svc._store.size()
         result: dict = {
             "ok": True,
             "signing_key_source": loaded.source,
             "signing_key_ephemeral": loaded.ephemeral,
-            "key_id": pubkey_hex[:16],
+            "key_id": svc.attestor.key_id,
             "tree_size": tree_size,
             "storage": "postgres" if database_url else "memory",
         }
@@ -128,9 +127,10 @@ def create_app() -> FastAPI:
         encoded as base64url (no padding), per RFC 8037 / JWK OKP.
         """
         from capsule_anchor.anchoring.router import get_service
-        pubkey_bytes = get_service().authority_pubkey()
+        svc = get_service()
+        pubkey_bytes = svc.authority_pubkey()
         pubkey_b64url = base64.urlsafe_b64encode(pubkey_bytes).rstrip(b"=").decode()
-        key_id = pubkey_bytes.hex()[:16]
+        key_id = svc.attestor.key_id
         did = "did:web:anchor.agentactioncapsule.org"
         return {
             "@context": ["https://www.w3.org/ns/did/v1"],

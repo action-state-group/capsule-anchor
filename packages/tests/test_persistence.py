@@ -17,12 +17,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+from datetime import datetime
 
 import pytest
 from capsule_anchor.anchoring.router import _SlidingWindowLimiter
-from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES, AnchorerService
+from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES, AnchorerService, sth_payload
 from capsule_anchor.anchoring.store import SqliteLogStore
 from capsule_anchor.app import create_app
+from capsule_anchor.contracts.crypto_shim import ShimCryptoCore
+from capsule_anchor.contracts.types import Signature
 from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -387,8 +390,12 @@ class TestDIDDocument:
         if padding != 4:
             x_b64url += "=" * padding
         did_key_bytes = base64.urlsafe_b64decode(x_b64url)
-        # First 8 bytes (16 hex chars) of the raw pubkey == key_id in /health
-        assert did_key_bytes.hex()[:16] == health["key_id"]
+        # key_id is sha256(pubkey)[:16] -- the SAME derivation used for
+        # Signature.key_id, NOT the raw pubkey hex. Regression: key_id used to
+        # be computed as did_key_bytes.hex()[:16] (unhashed), which happened to
+        # match /health (same bug on both endpoints) but diverged from the
+        # key_id actually attached to STH/receipt signatures.
+        assert hashlib.sha256(did_key_bytes).hexdigest()[:16] == health["key_id"]
 
     def test_did_key_id_matches_health(self):
         client = TestClient(create_app())
@@ -396,6 +403,76 @@ class TestDIDDocument:
         health = client.get("/health").json()
         vm_id = did_doc["verificationMethod"][0]["id"]
         assert health["key_id"] in vm_id
+
+
+# ---------------------------------------------------------------------------
+# 8b. Cross-surface trust anchor consistency -- STH verifies under the
+#     served did:web / authority-pubkey key (regression: [anchor-sth-key-mismatch])
+# ---------------------------------------------------------------------------
+
+class TestSTHVerifiesUnderPublishedTrustAnchor:
+    """A relying party trusts ONLY the published surfaces (did.json /
+    authority-pubkey), never the signer's internal state. This must hold end
+    to end: fetch the STH over HTTP, fetch the published key over HTTP, and
+    verify one against the other using only what a relying party can see.
+
+    Regression coverage: capsule-anchor once served /anchor/sth signatures
+    under key_id 19a9ab3e02fad55c while /anchor/authority-pubkey and
+    /.well-known/did.json published key_id 39bb654c9dc0afe1 for the SAME
+    underlying key -- a raw-pubkey-hex-vs-sha256-hash derivation mismatch, not
+    a real rotation. A relying party that looks up the key by key_id (the
+    standard "kid" pattern) could not find a match and could not verify our
+    own checkpoints against our own trust anchor.
+    """
+
+    def _get_sth_and_published_key(self, client: TestClient):
+        client.post("/v1/digest", json={"capsule_id": "9" * 64})
+        sth = client.get("/anchor/sth").json()
+        did_doc = client.get("/.well-known/did.json").json()
+        pubkey_resp = client.get("/anchor/authority-pubkey").json()
+        return sth, did_doc, pubkey_resp
+
+    def test_sth_key_id_matches_did_web_key_id(self):
+        client = TestClient(create_app())
+        sth, did_doc, _ = self._get_sth_and_published_key(client)
+        did_key_id = did_doc["verificationMethod"][0]["id"].rsplit("#", 1)[-1]
+        assert sth["signature"]["key_id"] == did_key_id, (
+            "STH signs under a key_id the published did:web document does "
+            "not advertise -- a relying party pinning by key_id cannot find "
+            "the key to verify this checkpoint"
+        )
+
+    def test_sth_key_id_matches_authority_pubkey_endpoint(self):
+        client = TestClient(create_app())
+        sth, _, pubkey_resp = self._get_sth_and_published_key(client)
+        assert sth["signature"]["key_id"] == pubkey_resp["key_id"]
+
+    def test_sth_signature_verifies_under_served_did_web_key(self):
+        """The actual cryptographic check: recompute the STH payload, take
+        ONLY the pubkey bytes served at did:web, and verify the signature."""
+        client = TestClient(create_app())
+        sth, did_doc, _ = self._get_sth_and_published_key(client)
+
+        x_b64url = did_doc["verificationMethod"][0]["publicKeyJwk"]["x"]
+        x_b64url += "=" * (-len(x_b64url) % 4)
+        served_pubkey = base64.urlsafe_b64decode(x_b64url)
+
+        payload = sth_payload(
+            sth["tree_size"],
+            sth["root_hash"],
+            datetime.fromisoformat(sth["timestamp"]),
+        )
+        sig = Signature(
+            signature=sth["signature"]["signature"],
+            key_id=sth["signature"]["key_id"],
+            alg=sth["signature"]["alg"],
+            created_at=datetime.fromisoformat(sth["signature"]["created_at"]),
+        )
+        assert ShimCryptoCore().verify(served_pubkey, payload, sig), (
+            "STH signature does not verify under the public key served at "
+            "/.well-known/did.json -- our own trust anchor cannot check our "
+            "own checkpoints"
+        )
 
 
 # ---------------------------------------------------------------------------
