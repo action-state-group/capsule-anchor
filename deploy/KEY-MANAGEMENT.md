@@ -38,8 +38,13 @@ python3 -c "import os; print(os.urandom(32).hex())"
 ## Key rotation
 
 Rotation does **not** invalidate historical receipts. Each COSE Receipt carries a
-`key_id` (the first 16 hex characters of the public key) in the `Signature` structure.
-Verifiers use the `key_id` to look up the correct public key for verification.
+`key_id` (the first 16 hex characters of `sha256(public_key)`, NOT the raw public
+key bytes -- see `StaticKeyProvider.active_key_id()`) in the `Signature` structure.
+Verifiers use the `key_id` to look up the correct public key for verification. Every
+surface that publishes a `key_id` (`/health`, `/anchor/authority-pubkey`,
+`/.well-known/did.json`) MUST derive it the same way, or a verifier looking up a key
+by `key_id` will fail to find it even though the underlying key is correct
+(regression: `[anchor-sth-key-mismatch]`).
 
 ### Rotation procedure
 
