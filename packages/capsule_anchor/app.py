@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import base64
 import os
+import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -10,6 +12,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 _ROOT_HTML = Path(__file__).parent / "static" / "root.html"
+
+
+def _start_sth_refresh_thread(svc: object, interval_s: float) -> threading.Thread:
+    """Start a daemon thread that periodically re-signs and persists the STH.
+
+    This ensures the STH timestamp advances even during idle periods when no
+    new entries arrive. A monitor can detect a dark log by checking whether
+    ``now - sth.timestamp > MMD_threshold``; without periodic refresh, a
+    log that stops accepting entries looks indistinguishable from a dead one.
+    """
+    def _run() -> None:
+        while True:
+            time.sleep(interval_s)
+            try:
+                if svc._store.size() > 0:  # type: ignore[attr-defined]
+                    svc.refresh_sth()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                pass
+
+    t = threading.Thread(target=_run, daemon=True, name="sth-refresh")
+    t.start()
+    return t
 
 
 def create_app() -> FastAPI:
@@ -84,9 +108,17 @@ def create_app() -> FastAPI:
     if database_url:
         from capsule_anchor.anchoring.store import PostgresLogStore
         _store: object = PostgresLogStore(database_url)
-        cfg_anchor(AnchorerService(attestor=attestor, store=_store))
+        _svc = AnchorerService(attestor=attestor, store=_store)
     else:
-        cfg_anchor(AnchorerService(attestor=attestor))
+        _svc = AnchorerService(attestor=attestor)
+    cfg_anchor(_svc)
+
+    # Background periodic STH refresh — keeps the persisted STH fresh even
+    # during idle periods. Interval defaults to 60 s; override via
+    # CAPSULE_ANCHOR_STH_REFRESH_INTERVAL (seconds). This is a daemon thread
+    # so it never blocks process shutdown.
+    _sth_interval = float(os.environ.get("CAPSULE_ANCHOR_STH_REFRESH_INTERVAL", "60"))
+    _start_sth_refresh_thread(_svc, _sth_interval)
 
     app.include_router(anchor_router())
 

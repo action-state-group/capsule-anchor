@@ -15,6 +15,9 @@ substitutions:
   _REGISTRY: ""
   _SERVICE: "capsule-anchor"
   _SIGNING_KEY_SECRET: "capsule-anchor-signing-key"
+  # Secret Manager secret name for the Postgres connection URL. Required.
+  # The service refuses to start without it (see app.py fail-closed check).
+  _DATABASE_SECRET: "capsule-anchor-database-url"
   _TAG: "latest"
   _MAX_INSTANCES: "1"
 
@@ -48,7 +51,7 @@ steps:
       - "--platform=managed"
       - "--port=8000"
       - "--set-env-vars=CAPSULE_ANCHOR_HOST=0.0.0.0,CAPSULE_ANCHOR_PORT=8000"
-      - "--set-secrets=CAPSULE_ANCHOR_SIGNING_KEY=${_SIGNING_KEY_SECRET}:latest"
+      - "--set-secrets=CAPSULE_ANCHOR_SIGNING_KEY=${_SIGNING_KEY_SECRET}:latest,CAPSULE_ANCHOR_DATABASE_URL=${_DATABASE_SECRET}:latest"
       - "--max-instances=${_MAX_INSTANCES}"
       - "--allow-unauthenticated"
       - "--no-use-http2"
