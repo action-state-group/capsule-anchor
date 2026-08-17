@@ -15,6 +15,7 @@ All backends implement the same interface:
   put_root / get_root
   put_capsule_id / get_capsule_id / entries_for_capsule
   put_statement / get_statement
+  put_sth / get_latest_sth
   close
 
 Only the storage of records lives here; all crypto / chain / CT semantics stay
@@ -54,6 +55,8 @@ class InMemoryLogStore:
         self._capsule_ids: dict[int, str] = {}
         # Idempotent dedup: entry_hash -> (receipt_bytes, leaf_index, tree_size)
         self._statements: dict[str, tuple[bytes, int, int]] = {}
+        # Latest persisted Signed Tree Head (JSON string) or None.
+        self._latest_sth: str | None = None
 
     # --- log ---
     def append_entry(self, entry: TransparencyLogEntry) -> None:
@@ -94,6 +97,13 @@ class InMemoryLogStore:
 
     def get_statement(self, entry_hash: str) -> tuple[bytes, int, int] | None:
         return self._statements.get(entry_hash)
+
+    # --- persisted Signed Tree Head ---
+    def put_sth(self, sth_json: str) -> None:
+        self._latest_sth = sth_json
+
+    def get_latest_sth(self) -> str | None:
+        return self._latest_sth
 
 
 class SqliteLogStore:
@@ -162,6 +172,15 @@ class SqliteLogStore:
                     receipt      BLOB NOT NULL,
                     leaf_index   INTEGER NOT NULL,
                     tree_size    INTEGER NOT NULL
+                )
+                """
+            )
+            # Singleton latest Signed Tree Head (id=1 enforced by CHECK).
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS signed_tree_heads (
+                    id       INTEGER PRIMARY KEY CHECK (id = 1),
+                    sth_json TEXT NOT NULL
                 )
                 """
             )
@@ -308,6 +327,22 @@ class SqliteLogStore:
             return None
         return (bytes(row[0]), int(row[1]), int(row[2]))
 
+    # --- persisted Signed Tree Head ---
+    def put_sth(self, sth_json: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO signed_tree_heads (id, sth_json) VALUES (1, ?)",
+                (sth_json,),
+            )
+
+    def get_latest_sth(self) -> str | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT sth_json FROM signed_tree_heads WHERE id = 1"
+            )
+            row = cur.fetchone()
+        return None if row is None else str(row[0])
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -419,6 +454,13 @@ class PostgresLogStore:
                     receipt     BYTEA NOT NULL,
                     leaf_index  BIGINT NOT NULL,
                     tree_size   BIGINT NOT NULL
+                )
+            """)
+            # Singleton latest Signed Tree Head.
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS signed_tree_heads (
+                    id       INTEGER PRIMARY KEY CHECK (id = 1),
+                    sth_json TEXT NOT NULL
                 )
             """)
 
@@ -579,6 +621,26 @@ class PostgresLogStore:
         if row is None:
             return None
         return (bytes(row[0]), int(row[1]), int(row[2]))
+
+    # --- persisted Signed Tree Head ---
+    def put_sth(self, sth_json: str) -> None:
+        params = (sth_json,)
+        with self._lock:
+            self._transact(
+                lambda: self._conn.execute(
+                    "INSERT INTO signed_tree_heads (id, sth_json) VALUES (1, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET sth_json = EXCLUDED.sth_json",
+                    params,
+                )
+            )
+
+    def get_latest_sth(self) -> str | None:
+        with self._lock:
+            cur = self._read(
+                "SELECT sth_json FROM signed_tree_heads WHERE id = 1"
+            )
+            row = cur.fetchone()
+        return None if row is None else str(row[0])
 
     def close(self) -> None:
         with self._lock:

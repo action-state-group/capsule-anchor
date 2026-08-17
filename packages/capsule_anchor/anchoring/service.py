@@ -479,26 +479,80 @@ class AnchorerService:
                 raise ValueError("tree_size out of range")
             return ct.merkle_tree_hash(leaves[:tree_size])
 
+    def _sign_and_persist_sth(self) -> SignedTreeHead:
+        """Sign the current STH and persist it to the store.
+
+        Caller must hold ``self._lock`` (it is an RLock so re-entrant calls are safe).
+        Persisting the STH means a restart returns the last-known head from the DB
+        rather than an empty/stale value, and GET /anchor/sth is stable across calls
+        within the same tree state instead of producing a fresh timestamp each time.
+        """
+        tree_size = self._store.size()
+        root_hash = ct.merkle_tree_hash(self._ct_leaves()[:tree_size])
+        timestamp = _now()
+        signature = self._attestor.attest(sth_payload(tree_size, root_hash, timestamp))
+        sth = SignedTreeHead(
+            tree_size=tree_size,
+            root_hash=root_hash,
+            timestamp=timestamp,
+            signature=signature,
+        )
+        self._store.put_sth(sth.model_dump_json())
+        return sth
+
     def get_sth(self) -> SignedTreeHead:
-        """Produce and SIGN the current Signed Tree Head (RFC6962).
+        """Return the latest persisted Signed Tree Head (RFC6962).
+
+        Returns the stored STH when it is current (tree_size matches the log).
+        Re-signs and persists a new STH when the log has grown since the last
+        signing — ensuring the head ALWAYS reflects the full log on read.
 
         A monitor pins this STH, fetches new entries, then demands a
-        consistency proof to a later STH -- so the authority cannot rewrite or
+        consistency proof to a later STH — so the authority cannot rewrite or
         fork history without detection.
         """
         with self._lock:
-            tree_size = self._store.size()
-            root_hash = ct.merkle_tree_hash(self._ct_leaves()[:tree_size])
-            timestamp = _now()
-            signature = self._attestor.attest(
-                sth_payload(tree_size, root_hash, timestamp)
-            )
-            return SignedTreeHead(
-                tree_size=tree_size,
-                root_hash=root_hash,
-                timestamp=timestamp,
-                signature=signature,
-            )
+            stored_json = self._store.get_latest_sth()
+            if stored_json is not None:
+                stored = SignedTreeHead.model_validate_json(stored_json)
+                if stored.tree_size >= self._store.size():
+                    return stored
+            return self._sign_and_persist_sth()
+
+    def refresh_sth(self) -> SignedTreeHead:
+        """Force-sign a fresh STH and persist it.
+
+        Called by the background periodic refresh task so the STH advances
+        even during idle periods when no new entries are being registered.
+        A monitor can detect a log that went dark by comparing the STH
+        timestamp to the Maximum Merge Delay threshold.
+        """
+        with self._lock:
+            return self._sign_and_persist_sth()
+
+    @staticmethod
+    def is_sth_stale(
+        sth: SignedTreeHead,
+        current_log_size: int,
+        *,
+        max_age_seconds: float = 86400.0,
+    ) -> bool:
+        """Return True when ``sth`` is detectably stale.
+
+        A head is stale when:
+        * its tree_size is smaller than the current log (entries were appended
+          after the last signing and the head has not yet caught up), OR
+        * its timestamp is older than ``max_age_seconds`` (the MMD has elapsed
+          without a fresh signing, indicating the log may have gone dark).
+
+        Both directions are meaningful: tree_size staleness catches the defect
+        class (head not advancing with the log); timestamp staleness catches a
+        transparency service that stops publishing without removing entries.
+        """
+        if sth.tree_size < current_log_size:
+            return True
+        age = (datetime.now(UTC) - sth.timestamp).total_seconds()
+        return age > max_age_seconds
 
     def verify_sth(self, sth: SignedTreeHead) -> bool:
         """Verify an STH signature against the authority public key."""
@@ -670,6 +724,11 @@ class AnchorerService:
             # 3. Persist for idempotent dedup (still INSERT OR IGNORE as
             #    defence-in-depth across processes / durable backends).
             self._store.put_statement(entry_hash, receipt, leaf_index, tree_size)
+
+            # 4. Advance the persisted STH to cover the new entry.
+            #    This keeps GET /anchor/sth always current after any registration;
+            #    the background refresh task also handles the idle-log case.
+            self._sign_and_persist_sth()
 
         return receipt, entry_hash, leaf_index, tree_size
 
