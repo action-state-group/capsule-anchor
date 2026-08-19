@@ -259,6 +259,10 @@ The `AAC_ANCHOR_URL` environment variable or `anchor_url=` parameter in
 public one, a private self-hosted deployment, or a local instance for
 development.
 
+**See [ADOPT.md](ADOPT.md) for the full adoption ladder** — no anchor, self-hosted,
+public, and the roadmap toward issuer-binding-enforced registration — stated as
+what works today vs. what's still designed, not yet built.
+
 ---
 
 ## Third-party usage
