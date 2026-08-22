@@ -232,7 +232,7 @@ r = verify_receipt(receipt, leaf_entry_hex=leaf,
         <h4><span class="b">THE LOG COMMITS TO</span> Operational guarantees</h4>
         <ul>
           <li>Uptime and durable, append-only storage</li>
-          <li>Non-equivocation — one consistent view for everyone</li>
+          <li>Single-operator non-equivocation — we commit not to show different views to different verifiers; an independent witness is what removes the need to trust that commitment</li>
           <li>A stable signing key, published at /.well-known/did.json</li>
           <li>This service runs the open-source capsule-anchor — auditable in full</li>
         </ul>
