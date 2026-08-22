@@ -36,9 +36,11 @@ key, staying decoupled from the parallel key-custody subsystem.
 
 from __future__ import annotations
 
+import collections.abc
 import hashlib
 import json
 import threading
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import cbor2
@@ -65,9 +67,10 @@ _LOG_KIND_ROOT = "countersigned_root"
 # Signed Statement; small enough to bound memory/log impact from abuse.
 MAX_STATEMENT_BYTES = 64 * 1024  # 64 KB
 # SCITT Signed-Statement registration entries (Transparency Service, RFC9162
-# CT log). Their CT leaf preimage is the raw 32-byte SHA-256 of the COSE_Sign1
-# Signed Statement (NOT the canonical-JSON entry record used by other kinds) --
-# see ``ct_leaf_payload`` / ``register_signed_statement``.
+# CT log). Their CT leaf preimage is ``bytes.fromhex(entry_hash)`` -- the SAME
+# 32-byte value returned to the caller as the entry identifier (NOT the
+# canonical-JSON entry record used by other kinds) -- see ``ct_leaf_payload``
+# / ``compute_entry_hash`` / ``register_signed_statement``.
 _LOG_KIND_SCITT = "scitt_statement"
 
 
@@ -133,6 +136,192 @@ def build_cose_receipt(
         _COSE_SIGN1_TAG, [protected_bstr, unprotected, None, signature]
     )
     return cbor2.dumps(cose_sign1)
+
+
+# --- entry_hash derivation (entry-identity-second-rule-sweep, Option 1) -----
+#
+# ``entry_hash`` is the dedup/idempotency key for ``register_signed_statement``
+# AND -- per the documented interop contract -- the hex a verifier recomputes
+# the RFC6962 CT leaf from (``SHA256(0x00 || bytes.fromhex(entry_hash))``, see
+# ``ct_leaf_payload``'s SCITT case). Those two roles are the SAME stored field
+# in this codebase (``TransparencyLogEntry.payload_hash``), so fixing the
+# entry-identifier necessarily moves the leaf preimage with it -- they cannot
+# be split without breaking offline verification for one of the two roles.
+#
+# Hashing the FULL COSE_Sign1 envelope (signature bytes included) is not a
+# function of the signing act: for any valid ECDSA ``(r, s)``, ``(r, n-s)``
+# also verifies (SEC1 v2.0 SS4.1.3), so a malleated twin of one act used to
+# register as a second, distinct entry (and a second, distinct leaf). The fix
+# hashes the RFC9052 SS4.4 ``Sig_structure`` instead (excludes the signature
+# field), when the submitted bytes are a well-formed COSE_Sign1 with an
+# embedded (non-detached) payload -- exactly the shape a real Signed Statement
+# submission has. Bytes that are not a parseable COSE_Sign1 (e.g. the
+# ``/v1/digest`` surface's raw digest bytes, which were never a signed
+# structure) keep hashing the legacy full bytes -- there is no signature to be
+# malleable, and no behavior change for that surface. Historical leaves
+# (append-only, immutable) keep whatever preimage they were minted with; only
+# NEW registrations of a parseable COSE_Sign1 move to the new scheme.
+ENTRY_HASH_SCHEME_SIG_STRUCTURE = "sig_structure"
+ENTRY_HASH_SCHEME_LEGACY = "legacy"
+
+
+def _decode_cose_sign1(data: bytes) -> tuple[bytes, dict, bytes | None, bytes] | None:
+    """Best-effort COSE_Sign1 (CBOR tag 18) decode. Returns ``None`` on anything
+    that isn't a well-formed 4-element Sign1 array -- never raises."""
+    try:
+        tagged = cbor2.loads(data)
+    except Exception:  # noqa: BLE001 - untrusted input, any decode failure -> None
+        return None
+    if not isinstance(tagged, cbor2.CBORTag) or tagged.tag != _COSE_SIGN1_TAG:
+        return None
+    arr = tagged.value
+    # cbor2 decodes CBOR arrays as list or tuple depending on nesting context,
+    # and CBOR maps as dict or its internal frozendict -- accept both shapes.
+    if not (isinstance(arr, (list, tuple)) and len(arr) == 4):
+        return None
+    protected_bstr, unprotected, payload, signature = arr
+    if not isinstance(protected_bstr, bytes) or not isinstance(signature, bytes):
+        return None
+    if not isinstance(unprotected, collections.abc.Mapping):
+        return None
+    if payload is not None and not isinstance(payload, bytes):
+        return None
+    return protected_bstr, dict(unprotected), payload, signature
+
+
+def _legacy_entry_hash(statement_bytes: bytes) -> str:
+    return hashlib.sha256(statement_bytes).hexdigest()
+
+
+def _entry_hash_preimage(statement_bytes: bytes) -> tuple[bytes, str]:
+    """Return ``(preimage_bytes, scheme)``. ``entry_hash = SHA256(preimage_bytes).hex()``,
+    and ``preimage_bytes`` is exactly what gets appended as the CT leaf's
+    payload_hash input for this entry -- see the module comment above.
+    """
+    decoded = _decode_cose_sign1(statement_bytes)
+    if decoded is not None:
+        protected_bstr, _unprotected, payload, _signature = decoded
+        if payload is not None:
+            sig_structure = cbor2.dumps(["Signature1", protected_bstr, b"", payload])
+            return sig_structure, ENTRY_HASH_SCHEME_SIG_STRUCTURE
+    return statement_bytes, ENTRY_HASH_SCHEME_LEGACY
+
+
+def compute_entry_hash(statement_bytes: bytes) -> tuple[str, str]:
+    """Return ``(entry_hash_hex, scheme)`` for a submitted statement.
+
+    Preferred scheme is ``sig_structure`` (malleability-immune). Falls back to
+    ``legacy`` (full-envelope digest -- the pre-migration behavior, unchanged)
+    when ``statement_bytes`` doesn't decode as a COSE_Sign1 with an embedded
+    payload.
+    """
+    preimage, scheme = _entry_hash_preimage(statement_bytes)
+    return hashlib.sha256(preimage).hexdigest(), scheme
+
+
+# --- checkpoint witness surface (mmr-checkpoint artifact type) --------------
+#
+# A checkpoint capsule is just a Signed Statement -- the SCITT registration
+# path anchors it with zero extra code. What this adds is WITNESS behavior:
+# recognizing the checkpoint automatically from its (signed) payload, then
+# checking it extends the log's own last-witnessed state before co-signing.
+_ARTIFACT_TYPE_MMR_CHECKPOINT = "mmr-checkpoint"
+_CHECKPOINT_REQUIRED_FIELDS = (
+    "log_id",
+    "key_id",
+    "mmr_root",
+    "mmr_size",
+    "prev_size",
+    "timestamp",
+)
+
+
+class CheckpointPayloadError(ValueError):
+    """A statement self-declared ``artifact_type: mmr-checkpoint`` but its
+    payload doesn't match the accepted shape. This is a caller error (400),
+    not a silent pass-through -- a statement that CLAIMS to be a checkpoint
+    and isn't well-formed must not register as an opaque, unwitnessed one."""
+
+
+class RollbackError(RuntimeError):
+    """A checkpoint is inconsistent with the log's last witnessed checkpoint
+    (non-monotonic size, or doesn't chain from it). Registration MUST be
+    refused before any log append / countersignature -- never co-sign a
+    rollback or fork."""
+
+
+def parse_checkpoint_payload(payload: bytes | None) -> dict | None:
+    """Return the checkpoint witness fields if ``payload`` is a self-declared
+    ``mmr-checkpoint`` submission, else ``None`` (unknown/other type -- the
+    caller registers it exactly as before, with no witness behavior).
+
+    Raises ``CheckpointPayloadError`` only when ``artifact_type`` explicitly
+    claims ``mmr-checkpoint`` but the required fields are missing or malformed.
+    """
+    if payload is None:
+        return None
+    try:
+        obj = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(obj, dict) or obj.get("artifact_type") != _ARTIFACT_TYPE_MMR_CHECKPOINT:
+        return None
+
+    missing = [k for k in _CHECKPOINT_REQUIRED_FIELDS if k not in obj]
+    if missing:
+        raise CheckpointPayloadError(
+            f"mmr-checkpoint payload missing required field(s): {missing}"
+        )
+
+    log_id, key_id, mmr_root, mmr_size, prev_size, timestamp = (
+        obj["log_id"],
+        obj["key_id"],
+        obj["mmr_root"],
+        obj["mmr_size"],
+        obj["prev_size"],
+        obj["timestamp"],
+    )
+    if not isinstance(log_id, str) or not log_id:
+        raise CheckpointPayloadError("log_id must be a non-empty string")
+    if not isinstance(key_id, str) or not key_id:
+        raise CheckpointPayloadError("key_id must be a non-empty string")
+    if (
+        not isinstance(mmr_root, str)
+        or len(mmr_root) != 64
+        or not all(c in "0123456789abcdefABCDEF" for c in mmr_root)
+    ):
+        raise CheckpointPayloadError("mmr_root must be a 64-char hex string (32 bytes)")
+    if isinstance(mmr_size, bool) or not isinstance(mmr_size, int) or mmr_size <= 0:
+        raise CheckpointPayloadError("mmr_size must be a positive integer")
+    if isinstance(prev_size, bool) or not isinstance(prev_size, int) or prev_size < 0:
+        raise CheckpointPayloadError("prev_size must be a non-negative integer")
+    if not isinstance(timestamp, str) or not timestamp:
+        raise CheckpointPayloadError("timestamp must be a non-empty string")
+    if prev_size >= mmr_size:
+        raise CheckpointPayloadError("prev_size must be strictly less than mmr_size")
+
+    return {
+        "log_id": log_id,
+        "key_id": key_id,
+        "mmr_root": mmr_root.lower(),
+        "mmr_size": mmr_size,
+        "prev_size": prev_size,
+        "timestamp": timestamp,
+    }
+
+
+@dataclass
+class StatementRegistration:
+    """Full result of registering a Signed Statement -- superset of the
+    ``(receipt, entry_hash, leaf_index, tree_size)`` tuple ``register_signed_statement``
+    returns for backward compatibility."""
+
+    receipt: bytes
+    entry_hash: str
+    leaf_index: int
+    tree_size: int
+    entry_hash_scheme: str
+    checkpoint_witness: dict | None = field(default=None)
 
 
 def _now() -> datetime:
@@ -660,28 +849,61 @@ class AnchorerService:
     ) -> tuple[bytes, str, int, int]:
         """SCITT registration: append a Signed Statement, return a COSE Receipt.
 
+        Thin wrapper over ``register_signed_statement_full`` preserving the
+        original 4-tuple return shape for existing callers. Use
+        ``register_signed_statement_full`` for the entry-hash scheme and
+        checkpoint-witness metadata.
+
+        Returns ``(receipt_bytes, entry_hash_hex, leaf_index, tree_size)``.
+        Raises ``ValueError`` if ``statement_bytes`` exceeds ``MAX_STATEMENT_BYTES``,
+        ``CheckpointPayloadError`` if the statement self-declares a malformed
+        checkpoint, ``RollbackError`` if it's a checkpoint inconsistent with the
+        log's last witnessed checkpoint for its ``log_id``.
+        """
+        result = self.register_signed_statement_full(statement_bytes)
+        return result.receipt, result.entry_hash, result.leaf_index, result.tree_size
+
+    def register_signed_statement_full(self, statement_bytes: bytes) -> StatementRegistration:
+        """SCITT registration with full metadata (entry-hash scheme, checkpoint witness).
+
         The argument is a SCITT Signed Statement = a COSE_Sign1 (CBOR) blob; we
-        treat it as opaque bytes. The CT-log ENTRY hash is
-        ``SHA256(statement_bytes).hex()`` -- the interop contract with the
-        the open verifier, which recomputes the RFC6962 Merkle leaf as
-        ``SHA256(0x00 || SHA256(statement_bytes))``. We append that entry hash to
-        the SAME RFC6962 CT log (``ct.py`` adds the ``0x00`` leaf prefix; see
+        treat it as opaque bytes for anchoring purposes -- the CT-log ENTRY hash
+        is (by default) the malleability-immune Sig_structure digest (see
+        ``compute_entry_hash``), or the legacy full-envelope digest when the
+        bytes aren't a parseable COSE_Sign1. We append that entry hash to the
+        SAME RFC6962 CT log (``ct.py`` adds the ``0x00`` leaf prefix; see
         ``ct_leaf_payload`` for the SCITT leaf-preimage exception) and return a
         COSE Receipt (COSE_Sign1, tag 18) carrying an inclusion proof to the
         current CT root, signed by the authority Ed25519 key.
 
-        Returns ``(receipt_bytes, entry_hash_hex, leaf_index, tree_size)``.
+        Idempotent: a second submission of the same signing act (including a
+        signature-malleated twin, or bytes registered before the entry_hash
+        migration under the legacy scheme -- the dual-lookup window) returns
+        the cached ORIGINAL receipt without appending a duplicate log entry.
 
-        Raises ``ValueError`` if ``statement_bytes`` exceeds ``MAX_STATEMENT_BYTES``.
-        Idempotent: a second submission of the same bytes returns the cached receipt
-        from the first registration without appending a duplicate log entry.
+        A statement that self-declares ``artifact_type: mmr-checkpoint`` in its
+        payload additionally runs the checkpoint witness check (monotonic size +
+        chain-linkage vs. the log's last witnessed checkpoint for that ``log_id``)
+        BEFORE being appended -- a rollback/fork raises ``RollbackError`` and is
+        never co-signed. Any other type registers exactly as before.
         """
         if len(statement_bytes) > MAX_STATEMENT_BYTES:
             raise ValueError(
                 f"statement too large: {len(statement_bytes)} bytes "
                 f"(max {MAX_STATEMENT_BYTES})"
             )
-        entry_hash = hashlib.sha256(statement_bytes).hexdigest()
+        preimage_bytes, scheme = _entry_hash_preimage(statement_bytes)
+        entry_hash = hashlib.sha256(preimage_bytes).hexdigest()
+        legacy_hash = (
+            entry_hash if scheme == ENTRY_HASH_SCHEME_LEGACY else _legacy_entry_hash(statement_bytes)
+        )
+
+        checkpoint_fields: dict | None = None
+        if scheme == ENTRY_HASH_SCHEME_SIG_STRUCTURE:
+            decoded = _decode_cose_sign1(statement_bytes)
+            assert decoded is not None  # scheme==sig_structure implies a decode
+            _protected_bstr, _unprotected, payload, _signature = decoded
+            checkpoint_fields = parse_checkpoint_payload(payload)  # may raise CheckpointPayloadError
 
         logged_at = _now()
         with self._lock:
@@ -693,16 +915,43 @@ class AnchorerService:
             # the lock across check → append → persist makes registration
             # exactly-once per entry_hash.
             cached = self._store.get_statement(entry_hash)
+            cache_scheme = scheme
+            if cached is None and entry_hash != legacy_hash:
+                # Dual-lookup window: bytes registered BEFORE the entry_hash
+                # migration are keyed under the legacy (full-envelope) scheme.
+                cached = self._store.get_statement(legacy_hash)
+                cache_scheme = ENTRY_HASH_SCHEME_LEGACY
             if cached is not None:
                 receipt_bytes, leaf_index, tree_size = cached
-                return receipt_bytes, entry_hash, leaf_index, tree_size
+                returned_hash = legacy_hash if cache_scheme == ENTRY_HASH_SCHEME_LEGACY else entry_hash
+                witness_info = None
+                if checkpoint_fields is not None:
+                    witness_info = {**checkpoint_fields, "status": "already-registered"}
+                return StatementRegistration(
+                    receipt=receipt_bytes,
+                    entry_hash=returned_hash,
+                    leaf_index=leaf_index,
+                    tree_size=tree_size,
+                    entry_hash_scheme=cache_scheme,
+                    checkpoint_witness=witness_info,
+                )
+
+            # Not cached: a genuinely new signing act. If it's a checkpoint,
+            # validate it against the log's last witnessed state BEFORE any
+            # append/countersignature -- never co-sign a rollback or fork.
+            witness_status: str | None = None
+            if checkpoint_fields is not None:
+                witness_status = self._check_checkpoint_consistency(checkpoint_fields)
 
             # 1. Append to the SAME append-only CT log; the entry's payload_hash
             #    IS the SCITT entry hash, and (per ct_leaf_payload) its CT leaf
             #    preimage is the raw 32 bytes of that hash. Build the inclusion
             #    proof + current root under the same lock so the returned
             #    leaf_index/tree_size match the receipt exactly.
-            entry = self._append_log(_LOG_KIND_SCITT, statement_bytes, logged_at)
+            # Feed the SAME bytes we hashed for entry_hash into the leaf
+            # commitment -- entry_hash IS the CT leaf preimage hex (see the
+            # entry_hash derivation comment above), so they must never diverge.
+            entry = self._append_log(_LOG_KIND_SCITT, preimage_bytes, logged_at)
             leaf_index = entry.log_index
             leaves = self._ct_leaves()
             tree_size = len(leaves)
@@ -722,7 +971,8 @@ class AnchorerService:
             )
 
             # 3. Persist for idempotent dedup (still INSERT OR IGNORE as
-            #    defence-in-depth across processes / durable backends).
+            #    defence-in-depth across processes / durable backends), keyed
+            #    under the (preferred) entry_hash computed above.
             self._store.put_statement(entry_hash, receipt, leaf_index, tree_size)
 
             # 4. Advance the persisted STH to cover the new entry.
@@ -730,7 +980,55 @@ class AnchorerService:
             #    the background refresh task also handles the idle-log case.
             self._sign_and_persist_sth()
 
-        return receipt, entry_hash, leaf_index, tree_size
+            # 5. Commit the checkpoint witness state (only after a successful
+            #    append/countersign -- a rejected/failed registration must not
+            #    move the witness's notion of "last checkpoint seen" forward).
+            if checkpoint_fields is not None:
+                self._store.put_checkpoint_witness(
+                    checkpoint_fields["log_id"],
+                    mmr_size=checkpoint_fields["mmr_size"],
+                    mmr_root=checkpoint_fields["mmr_root"],
+                    key_id=checkpoint_fields["key_id"],
+                    timestamp=checkpoint_fields["timestamp"],
+                )
+
+        witness_info = (
+            {**checkpoint_fields, "status": witness_status} if checkpoint_fields is not None else None
+        )
+        return StatementRegistration(
+            receipt=receipt,
+            entry_hash=entry_hash,
+            leaf_index=leaf_index,
+            tree_size=tree_size,
+            entry_hash_scheme=scheme,
+            checkpoint_witness=witness_info,
+        )
+
+    def _check_checkpoint_consistency(self, cp: dict) -> str:
+        """Validate ``cp`` against the log's last witnessed checkpoint for
+        ``cp['log_id']``. Returns ``"first-seen"`` (nothing to be consistent
+        with -- honestly graded, no continuity implied) or ``"witnessed"``.
+        Raises ``RollbackError`` -- caller must not append/countersign on that
+        path. Caller holds ``self._lock``.
+        """
+        prev = self._store.get_checkpoint_witness(cp["log_id"])
+        if prev is None:
+            return "first-seen"
+        # Peak-consistency, given the accepted wire shape (no prev_root is
+        # transmitted): the new checkpoint's prev_size must chain exactly from
+        # the size we last witnessed, and mmr_size must strictly increase.
+        # This is the strongest check available without re-deriving peaks
+        # ourselves -- it rejects both a rollback (mmr_size not increasing)
+        # and a fork/gap (prev_size pointing anywhere other than our last
+        # witnessed state).
+        if cp["prev_size"] != prev["mmr_size"] or cp["mmr_size"] <= prev["mmr_size"]:
+            raise RollbackError(
+                f"checkpoint for log_id={cp['log_id']!r} does not extend the last "
+                f"witnessed checkpoint (witnessed mmr_size={prev['mmr_size']}, "
+                f"submitted prev_size={cp['prev_size']}, mmr_size={cp['mmr_size']}) "
+                "-- refusing to co-sign a rollback or fork"
+            )
+        return "witnessed"
 
     def get_registered_statement(
         self, entry_hash: str

@@ -46,7 +46,7 @@ def _pg_store():
     with store._lock, store._conn.transaction():
         store._conn.execute(
             "TRUNCATE TABLE submitted_statements, log_capsule_bindings, "
-            "countersigned_roots, log_entries RESTART IDENTITY CASCADE"
+            "countersigned_roots, log_entries, checkpoint_witnesses RESTART IDENTITY CASCADE"
         )
     return store
 
