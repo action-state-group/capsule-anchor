@@ -15,6 +15,7 @@ All backends implement the same interface:
   put_root / get_root
   put_capsule_id / get_capsule_id / entries_for_capsule
   put_statement / get_statement
+  put_checkpoint_witness / get_checkpoint_witness
   put_sth / get_latest_sth
   close
 
@@ -55,6 +56,8 @@ class InMemoryLogStore:
         self._capsule_ids: dict[int, str] = {}
         # Idempotent dedup: entry_hash -> (receipt_bytes, leaf_index, tree_size)
         self._statements: dict[str, tuple[bytes, int, int]] = {}
+        # Checkpoint witness state: log_id -> last-witnessed checkpoint fields.
+        self._checkpoint_witnesses: dict[str, dict] = {}
         # Latest persisted Signed Tree Head (JSON string) or None.
         self._latest_sth: str | None = None
 
@@ -97,6 +100,21 @@ class InMemoryLogStore:
 
     def get_statement(self, entry_hash: str) -> tuple[bytes, int, int] | None:
         return self._statements.get(entry_hash)
+
+    # --- checkpoint witness state ---
+    def put_checkpoint_witness(
+        self, log_id: str, *, mmr_size: int, mmr_root: str, key_id: str, timestamp: str
+    ) -> None:
+        self._checkpoint_witnesses[log_id] = {
+            "mmr_size": mmr_size,
+            "mmr_root": mmr_root,
+            "key_id": key_id,
+            "timestamp": timestamp,
+        }
+
+    def get_checkpoint_witness(self, log_id: str) -> dict | None:
+        w = self._checkpoint_witnesses.get(log_id)
+        return dict(w) if w is not None else None
 
     # --- persisted Signed Tree Head ---
     def put_sth(self, sth_json: str) -> None:
@@ -181,6 +199,21 @@ class SqliteLogStore:
                 CREATE TABLE IF NOT EXISTS signed_tree_heads (
                     id       INTEGER PRIMARY KEY CHECK (id = 1),
                     sth_json TEXT NOT NULL
+                )
+                """
+            )
+            # Checkpoint witness state: one row per log_id, the last-witnessed
+            # checkpoint. Only ever INSERT OR REPLACE -- prior witness history
+            # isn't retained, only the current chain-tip needed for the next
+            # monotonic/chain-linkage check.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS checkpoint_witnesses (
+                    log_id     TEXT PRIMARY KEY,
+                    mmr_size   INTEGER NOT NULL,
+                    mmr_root   TEXT NOT NULL,
+                    key_id     TEXT NOT NULL,
+                    timestamp  TEXT NOT NULL
                 )
                 """
             )
@@ -327,6 +360,34 @@ class SqliteLogStore:
             return None
         return (bytes(row[0]), int(row[1]), int(row[2]))
 
+    # --- checkpoint witness state ---
+    def put_checkpoint_witness(
+        self, log_id: str, *, mmr_size: int, mmr_root: str, key_id: str, timestamp: str
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO checkpoint_witnesses "
+                "(log_id, mmr_size, mmr_root, key_id, timestamp) VALUES (?, ?, ?, ?, ?)",
+                (log_id, int(mmr_size), mmr_root, key_id, timestamp),
+            )
+
+    def get_checkpoint_witness(self, log_id: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT mmr_size, mmr_root, key_id, timestamp FROM checkpoint_witnesses "
+                "WHERE log_id = ?",
+                (log_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "mmr_size": int(row[0]),
+            "mmr_root": str(row[1]),
+            "key_id": str(row[2]),
+            "timestamp": str(row[3]),
+        }
+
     # --- persisted Signed Tree Head ---
     def put_sth(self, sth_json: str) -> None:
         with self._lock, self._conn:
@@ -461,6 +522,17 @@ class PostgresLogStore:
                 CREATE TABLE IF NOT EXISTS signed_tree_heads (
                     id       INTEGER PRIMARY KEY CHECK (id = 1),
                     sth_json TEXT NOT NULL
+                )
+            """)
+            # Checkpoint witness state: one row per log_id, the last-witnessed
+            # checkpoint (chain-tip only, no history retained).
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_witnesses (
+                    log_id     TEXT PRIMARY KEY,
+                    mmr_size   BIGINT NOT NULL,
+                    mmr_root   TEXT NOT NULL,
+                    key_id     TEXT NOT NULL,
+                    timestamp  TEXT NOT NULL
                 )
             """)
 
@@ -621,6 +693,41 @@ class PostgresLogStore:
         if row is None:
             return None
         return (bytes(row[0]), int(row[1]), int(row[2]))
+
+    # --- checkpoint witness state ---
+    def put_checkpoint_witness(
+        self, log_id: str, *, mmr_size: int, mmr_root: str, key_id: str, timestamp: str
+    ) -> None:
+        params = (log_id, int(mmr_size), mmr_root, key_id, timestamp)
+        with self._lock:
+            self._transact(
+                lambda: self._conn.execute(
+                    "INSERT INTO checkpoint_witnesses "
+                    "(log_id, mmr_size, mmr_root, key_id, timestamp) "
+                    "VALUES (%s, %s, %s, %s, %s) "
+                    "ON CONFLICT (log_id) DO UPDATE SET "
+                    "mmr_size = EXCLUDED.mmr_size, mmr_root = EXCLUDED.mmr_root, "
+                    "key_id = EXCLUDED.key_id, timestamp = EXCLUDED.timestamp",
+                    params,
+                )
+            )
+
+    def get_checkpoint_witness(self, log_id: str) -> dict | None:
+        with self._lock:
+            cur = self._read(
+                "SELECT mmr_size, mmr_root, key_id, timestamp FROM checkpoint_witnesses "
+                "WHERE log_id = %s",
+                (log_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "mmr_size": int(row[0]),
+            "mmr_root": str(row[1]),
+            "key_id": str(row[2]),
+            "timestamp": str(row[3]),
+        }
 
     # --- persisted Signed Tree Head ---
     def put_sth(self, sth_json: str) -> None:

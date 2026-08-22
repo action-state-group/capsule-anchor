@@ -13,7 +13,15 @@ Endpoints:
 
   --- SCITT Transparency Service (TS) ---
   POST /transparency/register-statement -> register a SCITT Signed Statement
-                                           (COSE_Sign1) and issue a COSE Receipt
+                                           (COSE_Sign1) and issue a COSE Receipt.
+                                           Also the checkpoint WITNESS surface: a
+                                           statement whose payload self-declares
+                                           artifact_type: mmr-checkpoint is
+                                           auto-recognized here (no new route) --
+                                           monotonic-size + chain-linkage checked
+                                           against the log's last witnessed
+                                           checkpoint per log_id before co-signing;
+                                           see AnchorerService._check_checkpoint_consistency.
   POST /v1/digest                       -> register a capsule_id digest, issue a Receipt
   GET  /v1/inclusion/{capsule_id}       -> read-only resolve: capsule_id -> inclusion
                                            proof + Receipt (200 present / 404 absent)
@@ -47,7 +55,12 @@ from capsule_anchor.contracts.types import (
     TransparencyLogEntry,
 )
 
-from .service import MAX_STATEMENT_BYTES, AnchorerService
+from .service import (
+    MAX_STATEMENT_BYTES,
+    AnchorerService,
+    CheckpointPayloadError,
+    RollbackError,
+)
 
 
 class _SlidingWindowLimiter:
@@ -144,19 +157,47 @@ class DigestRequest(BaseModel):
     capsule_id: str
 
 
+class CheckpointWitnessInfo(BaseModel):
+    """Witness outcome for a submitted ``mmr-checkpoint`` statement.
+
+    ``status`` is ``"first-seen"`` (unknown ``log_id`` -- nothing to be
+    consistent with; no continuity is implied), ``"witnessed"`` (extends the
+    last checkpoint we saw for this ``log_id``), or ``"already-registered"``
+    (idempotent resubmission of a previously-accepted checkpoint).
+    """
+
+    log_id: str
+    key_id: str
+    mmr_root: str
+    mmr_size: int
+    prev_size: int
+    timestamp: str
+    status: str
+
+
 class RegisterStatementResponse(BaseModel):
     """COSE Receipt issued by the Transparency Service for a Signed Statement.
 
     ``receipt_b64`` is the base64 of the COSE Receipt (COSE_Sign1, CBOR tag 18)
-    over the RFC9162 CT log. ``entry_hash`` is the CT-log entry hash,
-    ``SHA256(statement_bytes).hex()`` -- the interop contract: verifiers
-    recompute the Merkle leaf as ``SHA256(0x00 || SHA256(statement_bytes))``.
+    over the RFC9162 CT log. ``entry_hash`` is the CT-log entry hash;
+    ``entry_hash_scheme`` signals how it was derived: ``"sig_structure"``
+    (``SHA256`` of the RFC9052 Sig_structure -- malleability-immune, the
+    default for a parseable COSE_Sign1 with an embedded payload) or
+    ``"legacy"`` (``SHA256`` of the raw submitted bytes -- unchanged behavior
+    for non-COSE_Sign1 input, e.g. the ``/v1/digest`` surface, and for any
+    statement matched via the entry_hash migration's dual-lookup window). See
+    the README's Entry identifier derivation section.
+
+    ``checkpoint_witness`` is populated only when the statement self-declared
+    ``artifact_type: mmr-checkpoint``; ``None`` for every other statement.
     """
 
     receipt_b64: str
     entry_hash: str
+    entry_hash_scheme: str
     leaf_index: int
     tree_size: int
+    checkpoint_witness: CheckpointWitnessInfo | None = None
 
 
 class InclusionResolveResponse(BaseModel):
@@ -309,11 +350,18 @@ def get_router() -> APIRouter:
 
         Accepts a SCITT Signed Statement (a COSE_Sign1 CBOR blob) as base64 in
         ``signed_statement_b64``. The Transparency Service computes the CT-log
-        entry hash ``SHA256(statement_bytes).hex()``, appends it to the RFC9162
-        (RFC6962) CT log, and returns a COSE Receipt (COSE_Sign1, CBOR tag 18)
-        carrying an RFC6962 inclusion proof to the current signed CT root.
+        entry hash (see ``RegisterStatementResponse.entry_hash_scheme``), appends
+        it to the RFC9162 (RFC6962) CT log, and returns a COSE Receipt
+        (COSE_Sign1, CBOR tag 18) carrying an RFC6962 inclusion proof to the
+        current signed CT root.
 
-        Idempotent: submitting the same bytes twice returns the original receipt.
+        Idempotent: submitting the same signing act twice (including a
+        signature-malleated twin) returns the original receipt.
+
+        A statement whose payload self-declares ``artifact_type: mmr-checkpoint``
+        additionally goes through the checkpoint witness surface: 400 if the
+        checkpoint payload is malformed, 409 if it doesn't extend the log's last
+        witnessed checkpoint for its ``log_id`` (rollback/fork -- never co-signed).
         """
         if not _POST_LIMITER.is_allowed():
             raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
@@ -332,14 +380,23 @@ def get_router() -> APIRouter:
             )
 
         svc = get_service()
-        receipt, entry_hash, leaf_index, tree_size = svc.register_signed_statement(
-            statement_bytes
-        )
+        try:
+            result = svc.register_signed_statement_full(statement_bytes)
+        except CheckpointPayloadError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RollbackError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RegisterStatementResponse(
-            receipt_b64=base64.b64encode(receipt).decode("ascii"),
-            entry_hash=entry_hash,
-            leaf_index=leaf_index,
-            tree_size=tree_size,
+            receipt_b64=base64.b64encode(result.receipt).decode("ascii"),
+            entry_hash=result.entry_hash,
+            entry_hash_scheme=result.entry_hash_scheme,
+            leaf_index=result.leaf_index,
+            tree_size=result.tree_size,
+            checkpoint_witness=(
+                CheckpointWitnessInfo(**result.checkpoint_witness)
+                if result.checkpoint_witness is not None
+                else None
+            ),
         )
 
     # --- Simple digest surface (/v1/digest) ------------------------------------
@@ -371,14 +428,13 @@ def get_router() -> APIRouter:
             )
         statement_bytes = bytes.fromhex(cid)
         svc = get_service()
-        receipt, entry_hash, leaf_index, tree_size = svc.register_signed_statement(
-            statement_bytes
-        )
+        result = svc.register_signed_statement_full(statement_bytes)
         return RegisterStatementResponse(
-            receipt_b64=base64.b64encode(receipt).decode("ascii"),
-            entry_hash=entry_hash,
-            leaf_index=leaf_index,
-            tree_size=tree_size,
+            receipt_b64=base64.b64encode(result.receipt).decode("ascii"),
+            entry_hash=result.entry_hash,
+            entry_hash_scheme=result.entry_hash_scheme,
+            leaf_index=result.leaf_index,
+            tree_size=result.tree_size,
         )
 
     @v1.get("/inclusion/{capsule_id}", response_model=InclusionResolveResponse)

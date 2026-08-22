@@ -40,6 +40,10 @@ https://anchor.agentactioncapsule.org
 - Stable Ed25519 authority key; resolve the current `key_id` at [`/.well-known/did.json`](https://anchor.agentactioncapsule.org/.well-known/did.json)
 - Interactive API docs: [`/docs`](https://anchor.agentactioncapsule.org/docs)
 - Health: [`/health`](https://anchor.agentactioncapsule.org/health)
+- **Rate limit**: 300 POST registrations/minute globally — abuse control, not a metering
+  quota. The limiter is per-process; a multi-instance deployment's effective limit is
+  `300 × instance count` unless a cluster-wide layer (Cloud Armor) is added in front — see
+  `deploy/DEPLOY.md`. Exceeding the limit returns `429`.
 
 `ts.agentactioncapsule.org` resolves to the same service.
 
@@ -143,6 +147,7 @@ Returns:
 {
   "receipt_b64": "<base64-encoded COSE Receipt>",
   "entry_hash": "<SHA-256 of the raw digest bytes>",
+  "entry_hash_scheme": "legacy",
   "leaf_index": 0,
   "tree_size": 1
 }
@@ -159,6 +164,80 @@ curl -s -X POST https://anchor.agentactioncapsule.org/transparency/register-stat
   -d '{"signed_statement_b64": "<base64-COSE_Sign1>"}' \
   | python3 -m json.tool
 ```
+
+Returns:
+
+```json
+{
+  "receipt_b64": "<base64-encoded COSE Receipt>",
+  "entry_hash": "<CT-log entry hash>",
+  "entry_hash_scheme": "sig_structure",
+  "leaf_index": 0,
+  "tree_size": 1,
+  "checkpoint_witness": null
+}
+```
+
+**Entry identifier derivation.** `entry_hash` is `SHA256` of the RFC 9052 SS4.4
+`Sig_structure` (the signed-over bytes, excluding the signature) when the submitted bytes
+are a well-formed COSE_Sign1 with an embedded payload — `entry_hash_scheme:
+"sig_structure"`. This is malleability-immune: an ECDSA signature is not a function of the
+signing act (for any valid `(r, s)`, `(r, n−s)` also verifies with no private key needed),
+so a signature-malleated re-encoding of the same signed statement now registers as the
+SAME entry and returns the ORIGINAL receipt, instead of minting a second leaf. Statements
+that aren't a parseable COSE_Sign1 (e.g. the `/v1/digest` surface's raw digest bytes, which
+were never a signed structure) keep hashing the raw bytes — `entry_hash_scheme: "legacy"`,
+unchanged behavior. `entry_hash` doubles as the CT leaf preimage hex
+(`SHA256(0x00 || bytes.fromhex(entry_hash))` is the leaf a monitor recomputes) for
+whichever scheme minted that entry — historical leaves keep the scheme they were minted
+with; only new registrations of a parseable COSE_Sign1 move to `sig_structure`.
+
+**Dual-lookup window.** Resubmitting bytes that were registered before this migration
+(under the legacy full-envelope scheme) still returns the original receipt: on a
+new-scheme cache miss, the service falls back to a legacy-scheme lookup before deciding a
+submission is genuinely new. No leaf is lost and no signature is invalidated by this
+migration — only the identifier surface for new registrations changed shape.
+
+### Checkpoint witness surface (`mmr-checkpoint`)
+
+A checkpoint capsule — a signed snapshot of one log's MMR peak set, e.g. from
+[`capsule-emit`'s `checkpoint` module](https://github.com/action-state-group/capsule-emit)
+— is just a Signed Statement, so it registers through the SAME
+`/transparency/register-statement` endpoint above with zero new routes. What's different
+is WITNESS behavior: a statement whose payload self-declares `"artifact_type":
+"mmr-checkpoint"` is auto-recognized and checked against the log's own last-witnessed
+checkpoint for its `log_id` before being co-signed. Any other `artifact_type` (or none)
+registers exactly as an ordinary Signed Statement — `checkpoint_witness` stays `null`.
+
+Payload shape (JSON, embedded as the COSE_Sign1's payload):
+
+```json
+{
+  "artifact_type": "mmr-checkpoint",
+  "log_id": "<caller-chosen log identifier>",
+  "key_id": "<signer's key id -- doubles as a peer id>",
+  "mmr_root": "<64-hex, 32-byte MMR root at mmr_size>",
+  "mmr_size": 250,
+  "prev_size": 100,
+  "timestamp": "2026-08-22T00:00:00Z"
+}
+```
+
+Checks performed, in order:
+
+1. **Self-consistency** (400 on failure): `prev_size` strictly less than `mmr_size`,
+   `mmr_root` is 64-hex, `log_id`/`key_id`/`timestamp` are non-empty strings.
+2. **Witness consistency** (409 on failure, response `detail` explains why): unknown
+   `log_id` → accepted and graded `"first-seen"` — honestly, since there is nothing yet to
+   be consistent with, no continuity is implied. A known `log_id` must chain exactly from
+   the last checkpoint this service witnessed (`prev_size` equal to that checkpoint's
+   `mmr_size`, and `mmr_size` strictly greater) → graded `"witnessed"`. Anything else — a
+   rollback, a fork, a gap — is refused and **never co-signed**: no log append, no
+   signature, `tree_size` does not change.
+
+This is a chain-linkage check against what THIS service has witnessed, not an independent
+recomputation of the MMR's peaks (the witness never sees the raw log) — the strongest
+check available given the accepted wire shape above.
 
 ### CT monitor endpoints
 

@@ -6,6 +6,26 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Checkpoint witness surface**: `POST /transparency/register-statement` now
+  auto-recognizes a self-declared `artifact_type: mmr-checkpoint` payload (no new route)
+  and checks it against the log's last-witnessed checkpoint for its `log_id` before
+  co-signing — monotonic size + chain-linkage, honest `"first-seen"` grading for an
+  unknown `log_id`, and a `409` (never co-signed) on rollback/fork. Response gains a
+  `checkpoint_witness` field (`null` for non-checkpoint statements).
+
+### Changed
+
+- **`entry_hash` derivation (entry-identity-second-rule-sweep, Option 1)**: now
+  `SHA256(Sig_structure)` — malleability-immune — for any submitted statement that decodes
+  as a COSE_Sign1 with an embedded payload; unchanged (`SHA256` of the raw bytes) for
+  everything else, including `/v1/digest`. A signature-malleated resubmission of the same
+  signing act now returns the ORIGINAL receipt instead of minting a second CT leaf. A
+  dual-lookup window keeps statements registered before this change resolving as the same
+  entry. `RegisterStatementResponse` gains an `entry_hash_scheme` field
+  (`"sig_structure"` | `"legacy"`) signaling which derivation produced `entry_hash`.
+
 ## [0.1.1] — production hardening
 
 ### Changed

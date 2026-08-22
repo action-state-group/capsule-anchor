@@ -11,16 +11,24 @@ envelope (signature included), and that value is the dedup/idempotency key
 on ``register_statement``) and is returned to the caller as an entry
 identifier.
 
-This is measured, not argued: two malleated encodings of ONE signing act
-register as TWO distinct entries.
+This was measured, not argued: two malleated encodings of ONE signing act used
+to register as TWO distinct entries.
 
 capsule-anchor is a LIVE public service (anchor.agentactioncapsule.org).
 Changing entry_hash's derivation changes what every past registration's
 identifier means — a data-migration question, not a code fix — so this test
-is deliberately left ``xfail(strict=True)`` rather than "fixed": it exists to
-make the live defect executable evidence, tied to the outbox
-``## Needs decision`` entry. Flip it to a plain assertion (drop the xfail
-mark) only once that decision lands and the derivation changes.
+was deliberately left ``xfail(strict=True)`` rather than "fixed" until the
+``## Needs decision`` entry resolved.
+
+**FIXED (entry-identity-second-rule-sweep Option 1, bundled into
+anchor-peaks-endpoint):** ``entry_hash`` now derives from the RFC9052 SS4.4
+``Sig_structure`` (excludes the signature field) when the submitted bytes are
+a parseable COSE_Sign1 with an embedded payload -- see
+``compute_entry_hash``/``register_signed_statement_full`` in ``service.py``.
+The xfail mark is dropped; this is now a plain, must-pass assertion. A
+dual-lookup window keeps statements registered under the old (legacy,
+full-envelope) scheme resolving as the SAME entry after this migration --
+see ``test_dual_lookup_window`` in ``test_checkpoint_witness.py``.
 """
 from __future__ import annotations
 
@@ -96,17 +104,6 @@ def _register(client, statement_bytes: bytes) -> dict:
     return resp.json()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "KNOWN LIVE DEFECT, not yet fixed: entry_hash = SHA256(full COSE_Sign1 "
-        "envelope) is signature-malleable, so one signing act registers as two "
-        "entries. Fixing this changes capsule-anchor's live entry identifier — "
-        "see neutral/outbox.md ## Needs decision "
-        "[entry-identity-second-rule-sweep / capsule-anchor entry_hash migration]. "
-        "Remove this xfail mark once that decision lands and the fix ships."
-    ),
-)
 def test_malleated_twin_registers_as_same_entry(client):
     """One signing act must yield one entry_hash — currently FAILS (2 entries)."""
     key = ec.generate_private_key(ec.SECP256R1())
