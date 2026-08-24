@@ -138,6 +138,7 @@
     <div class="host">POST your signed statement → <b>anchor.agentactioncapsule.org</b></div>
     <div class="sth-strip" id="sth-strip"></div>
     <p class="sth-note">Early access — tree includes initial test submissions.</p>
+    <p class="sth-note">Canonical name: <span class="mono">witness.agentactioncapsule.org</span> [CNAME pending — currently served via <span class="mono">anchor.agentactioncapsule.org</span>, which is preserved and will keep working]. Same free public-good log either way.</p>
   </div>
 </header>
 
@@ -170,14 +171,14 @@
   <div class="wrap">
     <div class="sec-eyebrow">API</div>
     <h2 class="sec-title">Endpoints</h2>
-    <p class="sec-sub">Read-only endpoints are public. The service is the open-source <span class="mono">capsule-anchor</span>; interactive API docs (Swagger UI) are at <span class="mono">/docs</span>, and the OpenAPI schema is at <span class="mono">/openapi.json</span>.</p>
+    <p class="sec-sub">Read-only endpoints are public. The service is the open-source <span class="mono">capsule-anchor</span>; interactive API docs (Swagger UI) are at <span class="mono">/docs</span>, and the OpenAPI schema is at <span class="mono">/openapi.json</span>. Paths below are host-relative — they resolve the same whether you're on <span class="mono">witness.agentactioncapsule.org</span> or <span class="mono">anchor.agentactioncapsule.org</span>.</p>
     <div class="ep">
-      <a class="eprow" href="https://anchor.agentactioncapsule.org/health"><span class="verbtag get">GET</span><span><span class="eppath">/health</span><div class="epdesc">Liveness / readiness of the service.</div></span></a>
-      <a class="eprow" href="https://anchor.agentactioncapsule.org/.well-known/did.json"><span class="verbtag get">GET</span><span><span class="eppath">/.well-known/did.json</span><div class="epdesc">The service's identity + log public key — what receipts verify against.</div></span></a>
-      <a class="eprow" href="https://anchor.agentactioncapsule.org/anchor/sth"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/sth</span><div class="epdesc">Signed Tree Head — the current Merkle root and tree size, signed.</div></span></a>
-      <a class="eprow" href="https://anchor.agentactioncapsule.org/anchor/transparency-log"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/transparency-log</span><div class="epdesc">The public log entries.</div></span></a>
-      <a class="eprow" href="https://anchor.agentactioncapsule.org/anchor/inclusion-proof-ct"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/inclusion-proof-ct</span><div class="epdesc">Inclusion proof for a leaf at a given tree size.</div></span></a>
-      <a class="eprow" href="https://anchor.agentactioncapsule.org/anchor/consistency-proof"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/consistency-proof</span><div class="epdesc">Append-only consistency proof between two tree sizes.</div></span></a>
+      <a class="eprow" href="/health"><span class="verbtag get">GET</span><span><span class="eppath">/health</span><div class="epdesc">Liveness / readiness of the service.</div></span></a>
+      <a class="eprow" href="/.well-known/did.json"><span class="verbtag get">GET</span><span><span class="eppath">/.well-known/did.json</span><div class="epdesc">The service's identity + log public key — what receipts verify against.</div></span></a>
+      <a class="eprow" href="/anchor/sth"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/sth</span><div class="epdesc">Signed Tree Head — the current Merkle root and tree size, signed.</div></span></a>
+      <a class="eprow" href="/anchor/transparency-log"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/transparency-log</span><div class="epdesc">The public log entries.</div></span></a>
+      <a class="eprow" href="/anchor/inclusion-proof-ct"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/inclusion-proof-ct</span><div class="epdesc">Inclusion proof for a leaf at a given tree size.</div></span></a>
+      <a class="eprow" href="/anchor/consistency-proof"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/consistency-proof</span><div class="epdesc">Append-only consistency proof between two tree sizes.</div></span></a>
       <div class="eprow"><span class="verbtag post">POST</span><span><span class="eppath">/transparency/register-statement</span><div class="epdesc">Register a COSE_Sign1 signed statement; returns a COSE receipt.</div></span></div>
     </div>
   </div>
@@ -192,7 +193,8 @@
     <div class="use-grid">
       <div class="use">
         <h4># register a signed statement</h4>
-<pre class="code"><span class="c"># POST your COSE_Sign1 statement</span>
+<pre class="code"><span class="c"># POST your COSE_Sign1 statement (witness.agentactioncapsule.org is canonical;</span>
+<span class="c"># anchor.agentactioncapsule.org shown below since it's the name live today)</span>
 curl -X POST \
   https://anchor.agentactioncapsule.org/transparency/register-statement \
   -H <span class="s">"Content-Type: application/json"</span> \
