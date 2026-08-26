@@ -25,6 +25,10 @@ Endpoints:
   POST /v1/digest                       -> register a capsule_id digest, issue a Receipt
   GET  /v1/inclusion/{capsule_id}       -> read-only resolve: capsule_id -> inclusion
                                            proof + Receipt (200 present / 404 absent)
+  POST /v1/checkpoint                   -> the WITNESS surface (checkpoint-only, stateless):
+                                           accepts a CLL CheckpointRecord verbatim, refuses
+                                           anything else, verifies its Ed25519 signature, and
+                                           counter-signs -- see AnchorerService.witness_checkpoint.
 
   --- CT monitor routes (Phase 4) ---
   GET  /anchor/sth                    -> current Signed Tree Head (RFC6962)
@@ -59,7 +63,11 @@ from .service import (
     MAX_STATEMENT_BYTES,
     AnchorerService,
     CheckpointPayloadError,
+    CheckpointSignatureError,
+    NotACheckpointError,
     RollbackError,
+    parse_checkpoint_record,
+    verify_checkpoint_record_signature,
 )
 
 
@@ -219,6 +227,29 @@ class InclusionResolveResponse(BaseModel):
     audit_path: list[str]
     root_hash: str
     receipt_b64: str
+
+
+class CheckpointStampResponse(BaseModel):
+    """The stamp the witness issues for a registered CLL checkpoint.
+
+    Same COSE Receipt shape as every other registration surface here.
+    ``entry_hash`` is ``SHA256(bytes.fromhex(digest))`` where ``digest`` is
+    ``SHA256`` of the checkpoint's own canonical signing body (``v, kind,
+    log_id, mmr_size, root, prev_size, prev_root, key_id, timestamp``,
+    sorted-key compact JSON) — any relying party who holds the checkpoint
+    record can recompute ``entry_hash`` independently and doesn't need to
+    trust this response's claim of it.
+
+    This is existence-and-time evidence for THIS checkpoint only — it does
+    not attest that the log wasn't rewritten around it (no per-log_id
+    continuity is checked here; see the module docstring).
+    """
+
+    receipt_b64: str
+    entry_hash: str
+    entry_hash_scheme: str
+    leaf_index: int
+    tree_size: int
 
 
 def get_router() -> APIRouter:
@@ -472,6 +503,60 @@ def get_router() -> APIRouter:
             audit_path=proof.audit_path,
             root_hash=proof.root_hash,
             receipt_b64=base64.b64encode(receipt_bytes).decode("ascii"),
+        )
+
+    # --- Checkpoint-only witness surface (/v1/checkpoint) -----------------
+    # Stage 1 of the CLL checkpoint witness: register a checkpoint, get a
+    # stamp back. Deliberately narrower than /transparency/register-statement
+    # (which accepts any Signed Statement and only optionally notices a
+    # checkpoint) -- this route accepts CHECKPOINTS ONLY and verifies the
+    # checkpoint's own signature before ever counter-signing. Stateless: see
+    # AnchorerService.witness_checkpoint for the stage-2 per-log_id seam.
+
+    @v1.post("/checkpoint", response_model=CheckpointStampResponse)
+    def checkpoint(req: dict, request: Request) -> CheckpointStampResponse:
+        """Register a CLL checkpoint with the witness; receive a stamp.
+
+        Accepts a CLL (Checkpointed Local Log,
+        draft-mih-scitt-checkpointed-local-log) ``CheckpointRecord`` verbatim
+        as JSON: ``{v, kind, log_id, mmr_size, root, prev_size, prev_root,
+        key_id, timestamp, signature}``. This is a checkpoint-only surface --
+        any other artifact is refused with **400** ("not a checkpoint")
+        before any signature check or log write; the request body is parsed
+        as a raw JSON object rather than a typed model precisely so every
+        non-checkpoint shape funnels through this ONE named rejection path.
+
+        The checkpoint's Ed25519 ``signature`` (by ``key_id``, the raw public
+        key hex, over the checkpoint's own canonical signing body) is then
+        verified server-side; a checkpoint that doesn't verify is refused
+        with **401** and is never counter-signed.
+
+        STATELESS: this stamp proves existence-and-time for THIS checkpoint
+        only. It does not check monotonicity or chain-linkage against any
+        checkpoint previously seen for the same ``log_id`` -- so on its own
+        it does not prove the stream wasn't rewritten around it.
+
+        Idempotent: resubmitting the same checkpoint returns the original stamp.
+        """
+        if not _POST_LIMITER.is_allowed():
+            raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
+        try:
+            cp = parse_checkpoint_record(req)
+        except NotACheckpointError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not verify_checkpoint_record_signature(cp):
+            exc = CheckpointSignatureError(
+                f"checkpoint signature does not verify against key_id={cp['key_id']!r}"
+            )
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        svc = get_service()
+        result = svc.witness_checkpoint(cp)
+        return CheckpointStampResponse(
+            receipt_b64=base64.b64encode(result.receipt).decode("ascii"),
+            entry_hash=result.entry_hash,
+            entry_hash_scheme=result.entry_hash_scheme,
+            leaf_index=result.leaf_index,
+            tree_size=result.tree_size,
         )
 
     parent = APIRouter()
