@@ -171,6 +171,59 @@ With Postgres as the backing store, multiple Cloud Run instances are safe:
   ```
   `--min-instances=1` avoids cold-start latency for the first request on a new instance.
 
+## Second domain: witness.agentactioncapsule.org (checkpoint-witness role)
+
+`capsule-anchor` is a conforming SCITT Transparency Service and already answers
+`POST /v1/digest` + `GET /anchor/authority-pubkey` — the exact surface a
+checkpoint witness needs (see `capsule-ledger/capsule_ledger/mmr/checkpoint.py`
+and `capsule-emit/capsule_emit/checkpoint/emit.py`, both of which register
+checkpoint digests through this same route). `witness.agentactioncapsule.org`
+is a second custom domain mapped onto this **same** service — not a second
+deployment, not a second signing key, not a second database. The
+anchor-vs-witness distinction is purely which name a caller uses for which
+purpose (per-capsule anchor vs. per-stream checkpoint witness); there is no
+server-side role flag.
+
+```bash
+# One-time, if not already covered by an apex/wildcard verification for
+# agentactioncapsule.org in Search Console:
+#   gcloud domains verify witness.agentactioncapsule.org
+
+gcloud run domain-mappings create \
+  --service=capsule-anchor \
+  --domain=witness.agentactioncapsule.org \
+  --region=us-central1 \
+  --project=PROJECT_ID
+```
+
+`gcloud` prints the DNS record(s) to add at the registrar — add exactly what
+it prints (same procedure already used for `anchor.agentactioncapsule.org`).
+No `--set-secrets`, no new Cloud SQL grants, no new signing key: this mapping
+points at the identical running service, so it inherits
+`CAPSULE_ANCHOR_SIGNING_KEY` / `CAPSULE_ANCHOR_DATABASE_URL` and answers with
+the same `key_id`.
+
+Add a second uptime check alongside the existing `anchor.aac` one (same
+`/health` path, same alerting policy):
+
+```bash
+gcloud monitoring uptime create "capsule-anchor /health (witness)" \
+  --resource-type=uptime-url \
+  --resource-labels="host=witness.agentactioncapsule.org,project_id=PROJECT_ID" \
+  --path=/health \
+  --period=1 \
+  --timeout=10 \
+  --project=PROJECT_ID
+```
+
+Both hostnames stay live indefinitely — `anchor.aac` remains the legacy
+per-capsule default and the CT-log browse/verify surface existing receipts
+depend on; `witness.aac` is the per-stream checkpoint default since
+capsule-emit 0.5.0. Neither redirects to the other; they are two names for
+the same log. See `~/dev/asg/_work/witness-aac-deploy-spec.md` for the full
+spec (checkpoint-witness API surface, trust-tier upgrade path, and the DNS
+ruling) this section summarizes.
+
 ## Key management and rotation
 
 See [deploy/KEY-MANAGEMENT.md](KEY-MANAGEMENT.md) for the full key rotation story,
