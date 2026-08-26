@@ -7,11 +7,39 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 _ROOT_HTML = Path(__file__).parent / "static" / "root.html"
+
+# --- WITNESS_ONLY deployment mode -------------------------------------------
+# When WITNESS_ONLY is truthy, this process serves ONLY the checkpoint-witness
+# surface: nothing open-registration-shaped (``/v1/digest``,
+# ``/transparency/*``, ``/anchor/*`` browse/inspect routes, ...) is reachable.
+# This is what makes a SEPARATE Cloud Run deployment (``capsule-witness``)
+# genuinely checkpoint-only rather than the full anchor service with an
+# unused surface still listening. Every rejection funnels through this ONE
+# named path -- same discipline as ``NotACheckpointError`` on the checkpoint
+# route itself.
+_WITNESS_ONLY_ALLOWED_EXACT = {
+    ("POST", "/v1/checkpoint"),
+    ("GET", "/health"),
+    ("GET", "/healthz"),
+    ("GET", "/livez"),
+    ("GET", "/anchor/authority-pubkey"),
+}
+_WITNESS_ONLY_WELL_KNOWN_PREFIX = "/.well-known/"
+
+
+def _witness_only_enabled() -> bool:
+    return os.environ.get("WITNESS_ONLY", "").strip().lower() not in ("", "0", "false")
+
+
+def _witness_only_allowed(method: str, path: str) -> bool:
+    if (method, path) in _WITNESS_ONLY_ALLOWED_EXACT:
+        return True
+    return method == "GET" and path.startswith(_WITNESS_ONLY_WELL_KNOWN_PREFIX)
 
 
 def _start_sth_refresh_thread(svc: object, interval_s: float) -> threading.Thread:
@@ -56,6 +84,24 @@ def create_app() -> FastAPI:
         allow_methods=["GET"],
         allow_headers=[],
     )
+
+    if _witness_only_enabled():
+
+        @app.middleware("http")
+        async def _witness_only_gate(request: Request, call_next):
+            if _witness_only_allowed(request.method, request.url.path):
+                return await call_next(request)
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "detail": (
+                        "witness-only deployment (WITNESS_ONLY=1): "
+                        f"{request.method} {request.url.path} is not served here -- "
+                        "only POST /v1/checkpoint, GET /health, GET /.well-known/*, "
+                        "and GET /anchor/authority-pubkey are available"
+                    )
+                },
+            )
 
     from capsule_anchor.anchoring.router import (
         configure_service as cfg_anchor,
