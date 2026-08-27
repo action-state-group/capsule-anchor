@@ -68,6 +68,89 @@ No `--max-instances` cap is needed when using Postgres: all instances share the 
 and the rate limiter is per-instance (see HA notes below). Remove `--max-instances=1` from any
 prior deploy commands — it was only safe with in-memory storage.
 
+## Domain mapping: witness.aac (primary) + anchor.aac (legacy alias)
+
+**Ruling (2026-08-27, Steven): ONE witness endpoint, ONE Cloud Run service, TWO domain
+mappings.** This supersedes the earlier "separate `capsule-witness` deployment +
+`WITNESS_ONLY` env flag" plan — that mode is removed from the code (see CHANGELOG). There
+is no server-side role flag and no second deployment: `witness.agentactioncapsule.org`
+becomes the CLL/checkpoint-primary name (`POST /checkpoints` default, `POST /register`
+opt-in) and `anchor.agentactioncapsule.org` retires to a plain alias of the exact same
+service, still answering its legacy routes (`/v1/digest`, `/transparency/register-statement`,
+`/anchor/*`) for existing callers.
+
+**These are Steven's clicks — nothing below goes live without running it.**
+
+```bash
+# (once) verify the subdomain if not already covered by an apex verification
+# in Search Console for agentactioncapsule.org:
+gcloud domains verify witness.agentactioncapsule.org      # skip if already verified
+
+# Map witness.aac onto the EXISTING capsule-anchor Cloud Run service (not a new one):
+gcloud run domain-mappings create \
+  --service=capsule-anchor \
+  --domain=witness.agentactioncapsule.org \
+  --region=us-central1 \
+  --project=PROJECT_ID
+```
+
+`gcloud` prints the DNS record(s) to add at the registrar/zone for
+`agentactioncapsule.org` — add exactly what it prints, the same procedure already used
+for `anchor.aac`. For a Cloud Run subdomain mapping this is normally a single:
+
+```
+Type: CNAME   Name: witness   Value: ghs.googlehosted.com.
+```
+
+(If it instead lists 4×A + 4×AAAA, add those.) TLS provisions automatically once DNS
+resolves (a few minutes to ~an hour). No `--set-secrets`, no new Cloud SQL grants, no new
+signing key — this mapping points at the identical running service, so it inherits
+`CAPSULE_ANCHOR_SIGNING_KEY` / `CAPSULE_ANCHOR_DATABASE_URL` and answers with the same
+`key_id`.
+
+**`anchor.agentactioncapsule.org` keeps its existing domain mapping unchanged** — it is
+already mapped to `capsule-anchor`; nothing to redo. It becomes vocabulary-deprecated
+(docs mark its registration routes "record registration (legacy)"; "anchor" never
+appears as service vocabulary in new docs) — its removal is its own, later decision
+(~a quarter out), not part of this change.
+
+Add a second uptime check alongside the existing `anchor.aac` one (same `/health` path,
+same alerting policy):
+
+```bash
+gcloud monitoring uptime create "capsule-anchor /health (witness)" \
+  --resource-type=uptime-url \
+  --resource-labels="host=witness.agentactioncapsule.org,project_id=PROJECT_ID" \
+  --path=/health \
+  --period=1 \
+  --timeout=10 \
+  --project=PROJECT_ID
+```
+
+Verify after DNS resolves:
+
+```bash
+curl -s https://witness.agentactioncapsule.org/health | python3 -m json.tool
+
+# a checkpoint registers and gets a stamp:
+curl -s -X POST https://witness.agentactioncapsule.org/checkpoints \
+  -H 'content-type: application/json' -d '{ ...a real CLL checkpoint... }'
+
+# a non-checkpoint is refused via the ONE named rejection path (never counter-signed):
+curl -s -X POST https://witness.agentactioncapsule.org/checkpoints \
+  -H 'content-type: application/json' -d '{"not":"a checkpoint"}'
+
+# opt-in registration still works on the same host:
+curl -s -X POST https://witness.agentactioncapsule.org/register \
+  -H 'content-type: application/json' \
+  -d '{"capsule_id":"0000000000000000000000000000000000000000000000000000000000000001"}'
+
+# anchor.aac keeps answering its legacy route, unchanged:
+curl -s -X POST https://anchor.agentactioncapsule.org/v1/digest \
+  -H 'content-type: application/json' \
+  -d '{"capsule_id":"0000000000000000000000000000000000000000000000000000000000000002"}'
+```
+
 ## High-availability (HA)
 
 With Postgres as the backing store, multiple Cloud Run instances are safe:

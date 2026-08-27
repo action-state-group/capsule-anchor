@@ -8,12 +8,32 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Added
 
+- **Witness-host canonical routes, `POST /checkpoints` (default) + `POST /register`
+  (opt-in)**: single-host reconciliation (2026-08-27) of the checkpoint-only witness
+  surface added in `witness-checkpoint-only-stage1`. `/checkpoints` is a rename of that
+  PR's `POST /v1/checkpoint` (never documented, never called by any client — renamed
+  outright, no dual-mount) to its canonical witness-host name: accepts a CLL
+  `CheckpointRecord` verbatim, refuses anything else with a named `400`, verifies the
+  checkpoint's own Ed25519 signature before ever counter-signing (`401` on failure), and
+  is stage-1 stateless. `POST /register` is the new canonical name for the existing
+  `POST /v1/digest` digest-registration surface (same handler, kept as a legacy alias) —
+  the explicit opt-in, plain-SCITT-interop per-record registration path. Privacy is now
+  enforced at the ROUTE level, not a host-level gate: both routes are always reachable on
+  one deployment.
 - **Checkpoint witness surface**: `POST /transparency/register-statement` now
   auto-recognizes a self-declared `artifact_type: mmr-checkpoint` payload (no new route)
   and checks it against the log's last-witnessed checkpoint for its `log_id` before
   co-signing — monotonic size + chain-linkage, honest `"first-seen"` grading for an
   unknown `log_id`, and a `409` (never co-signed) on rollback/fork. Response gains a
   `checkpoint_witness` field (`null` for non-checkpoint statements).
+
+### Removed
+
+- **`WITNESS_ONLY` deployment mode**, added in `witness-checkpoint-only-stage1` for a
+  separate checkpoint-only `capsule-witness` Cloud Run deployment — that plan is
+  superseded by the single-host, two-route model above (one deployment answers both
+  `/checkpoints` and `/register`, differentiated by route rather than a host-level env
+  gate). The env var is now a no-op; no separate deployment is planned.
 
 ### Changed
 
