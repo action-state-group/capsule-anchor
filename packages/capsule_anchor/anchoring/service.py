@@ -327,7 +327,6 @@ def parse_checkpoint_payload(payload: bytes | None) -> dict | None:
 # COSE_Sign1, so it can never trigger ``_check_checkpoint_consistency`` --
 # no per-``log_id`` state is read or written here. See
 # ``AnchorerService.witness_checkpoint`` for the stage-2 seam.
-_CHECKPOINT_KIND = "mmr_checkpoint"
 _CHECKPOINT_RECORD_FIELDS = (
     "v",
     "kind",
@@ -367,110 +366,6 @@ def _checkpoint_digest(cp: dict) -> str:
     """64-char hex sha256 of the signing body -- what gets registered with
     the CT log, mirroring ``CheckpointRecord.digest()``."""
     return hashlib.sha256(_checkpoint_signing_body(cp)).hexdigest()
-
-
-def parse_checkpoint_record(obj: dict) -> dict:
-    """Validate ``obj`` as a CLL ``CheckpointRecord`` and return its
-    normalized fields (including ``signature``). Raises
-    ``NotACheckpointError`` on anything that isn't one -- this is the
-    checkpoint-only gate for ``POST /v1/checkpoint``: no artifact_type
-    sniffing, no silent pass-through for other statement types.
-    """
-    if not isinstance(obj, dict):
-        raise NotACheckpointError("checkpoint submission must be a JSON object")
-
-    required = (*_CHECKPOINT_RECORD_FIELDS, "signature")
-    missing = [k for k in required if k not in obj]
-    if missing:
-        raise NotACheckpointError(f"checkpoint record missing required field(s): {missing}")
-
-    v, kind, log_id, mmr_size, root, prev_size, prev_root, key_id, timestamp, signature = (
-        obj["v"],
-        obj["kind"],
-        obj["log_id"],
-        obj["mmr_size"],
-        obj["root"],
-        obj["prev_size"],
-        obj["prev_root"],
-        obj["key_id"],
-        obj["timestamp"],
-        obj["signature"],
-    )
-
-    if isinstance(v, bool) or not isinstance(v, int) or v < 1:
-        raise NotACheckpointError("v must be a positive integer")
-    if kind != _CHECKPOINT_KIND:
-        raise NotACheckpointError(
-            f"not a CLL checkpoint: kind must be {_CHECKPOINT_KIND!r}, got {kind!r}"
-        )
-    if not isinstance(log_id, str) or not log_id:
-        raise NotACheckpointError("log_id must be a non-empty string")
-    if not isinstance(key_id, str) or not key_id:
-        raise NotACheckpointError("key_id must be a non-empty string")
-    if (
-        not isinstance(root, str)
-        or len(root) != 64
-        or not all(c in "0123456789abcdefABCDEF" for c in root)
-    ):
-        raise NotACheckpointError("root must be a 64-char hex string (32 bytes)")
-    if isinstance(mmr_size, bool) or not isinstance(mmr_size, int) or mmr_size <= 0:
-        raise NotACheckpointError("mmr_size must be a positive integer")
-    if isinstance(prev_size, bool) or not isinstance(prev_size, int) or prev_size < 0:
-        raise NotACheckpointError("prev_size must be a non-negative integer")
-    if prev_size >= mmr_size:
-        raise NotACheckpointError("prev_size must be strictly less than mmr_size")
-    if prev_size == 0:
-        if prev_root not in ("",):
-            if (
-                not isinstance(prev_root, str)
-                or len(prev_root) != 64
-                or not all(c in "0123456789abcdefABCDEF" for c in prev_root)
-            ):
-                raise NotACheckpointError(
-                    "prev_root must be empty (first checkpoint) or 64-char hex"
-                )
-    elif (
-        not isinstance(prev_root, str)
-        or len(prev_root) != 64
-        or not all(c in "0123456789abcdefABCDEF" for c in prev_root)
-    ):
-        raise NotACheckpointError("prev_root must be a 64-char hex string when prev_size > 0")
-    if not isinstance(timestamp, str) or not timestamp:
-        raise NotACheckpointError("timestamp must be a non-empty string")
-    if not isinstance(signature, str) or not signature:
-        raise NotACheckpointError("signature must be a non-empty string")
-
-    return {
-        "v": v,
-        "kind": kind,
-        "log_id": log_id,
-        "mmr_size": mmr_size,
-        "root": root.lower(),
-        "prev_size": prev_size,
-        "prev_root": prev_root.lower(),
-        "key_id": key_id,
-        "timestamp": timestamp,
-        "signature": signature,
-    }
-
-
-def verify_checkpoint_record_signature(cp: dict) -> bool:
-    """Verify ``cp["signature"]`` as an Ed25519 signature by ``cp["key_id"]``
-    (the raw 32-byte public key, hex) over ``_checkpoint_digest(cp)`` --
-    mirrors ``capsule_emit.checkpoint.emit.verify_checkpoint_signature_offline``
-    exactly, so a checkpoint that verifies offline for a relying party also
-    verifies here, and vice versa. Never raises -- any malformed key_id or
-    signature is a verification failure, not an exception.
-    """
-    try:
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-
-        public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(cp["key_id"]))
-        digest = _checkpoint_digest(cp)
-        public_key.verify(bytes.fromhex(cp["signature"]), digest.encode("ascii"))
-        return True
-    except Exception:  # noqa: BLE001
-        return False
 
 
 @dataclass

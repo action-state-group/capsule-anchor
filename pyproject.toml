@@ -28,6 +28,12 @@ dependencies = [
     # SCITT COSE Receipt: COSE_Sign1 / inclusion-proof CBOR encoding
     # (draft-ietf-cose-merkle-tree-proofs). Pure-Python, no native deps.
     "cbor2>=5.5",
+    # Independent COSE_Sign1 decode + verify for the /checkpoints witness
+    # route ([cll-checkpoint-cose-wire] wire alignment) -- generic SCITT
+    # Signed Statement machinery only; capsule-anchor never imports
+    # capsule-emit (boundary rule: the witness verifies what a stranger's
+    # bytes claim, not what a trusted co-deployed library says about them).
+    "scitt-cose>=0.2.2",
 ]
 
 [project.urls]

@@ -81,6 +81,7 @@ from capsule_anchor.contracts.types import (
     TransparencyLogEntry,
 )
 
+from .checkpoint_cose import parse_and_verify_checkpoint_cose
 from .service import (
     MAX_STATEMENT_BYTES,
     AnchorerService,
@@ -88,8 +89,6 @@ from .service import (
     CheckpointSignatureError,
     NotACheckpointError,
     RollbackError,
-    parse_checkpoint_record,
-    verify_checkpoint_record_signature,
 )
 
 
@@ -542,17 +541,14 @@ def get_router() -> APIRouter:
     # opt-in, plain-SCITT-interop case. See the module docstring.
     canonical = APIRouter(tags=["witness-host"])
 
-    def _witness_checkpoint(req: dict) -> CheckpointStampResponse:
+    def _witness_checkpoint(cose_bytes: bytes) -> CheckpointStampResponse:
         if not _POST_LIMITER.is_allowed():
             raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
         try:
-            cp = parse_checkpoint_record(req)
+            cp = parse_and_verify_checkpoint_cose(cose_bytes)
         except NotACheckpointError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if not verify_checkpoint_record_signature(cp):
-            exc = CheckpointSignatureError(
-                f"checkpoint signature does not verify against key_id={cp['key_id']!r}"
-            )
+        except CheckpointSignatureError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
         svc = get_service()
         result = svc.witness_checkpoint(cp)
@@ -565,38 +561,56 @@ def get_router() -> APIRouter:
         )
 
     @canonical.post("/checkpoints", response_model=CheckpointStampResponse)
-    def checkpoints(req: dict, request: Request) -> CheckpointStampResponse:
+    async def checkpoints(request: Request) -> CheckpointStampResponse:
         """DEFAULT witness-host route: register a CLL checkpoint, receive a stamp.
 
         Accepts a CLL (Checkpointed Local Log,
-        draft-mih-scitt-checkpointed-local-log) ``CheckpointRecord`` verbatim
-        as JSON: ``{v, kind, log_id, mmr_size, root, prev_size, prev_root,
-        key_id, timestamp, signature}``. This is a checkpoint-only surface --
-        any other artifact is refused with **400** ("not a checkpoint")
-        before any signature check or log write; the request body is parsed
-        as a raw JSON object rather than a typed model precisely so every
-        non-checkpoint shape funnels through this ONE named rejection path.
-        This is the property that makes the default emit path egress
-        checkpoint-only WITHOUT a host-level gate: any other artifact simply
-        cannot be registered here, whether or not the caller intended to.
+        draft-mih-scitt-checkpointed-local-log) checkpoint as a COSE_Sign1
+        statement ([cll-checkpoint-cose-wire] wire form, single-host witness
+        ruling 2026-08-27 -- supersedes the earlier plain-JSON
+        ``CheckpointRecord`` body): a CBOR claims map (``kind: cll-checkpoint,
+        log_size, commitment, prev_size, prev_commitment, issued_at, ...``)
+        wrapped in a COSE_Sign1 envelope whose protected header carries a CWT
+        issuer/subject and content type ``application/cll-checkpoint+cbor``.
+        The raw request body IS the COSE bytes -- no base64, no JSON
+        envelope. This is a checkpoint-only surface -- any other artifact
+        (including a well-formed COSE_Sign1 for a different content type) is
+        refused with **400** ("not a checkpoint") before any signature check
+        or log write; content-type sniffing on the UNAUTHENTICATED protected
+        header is what funnels every non-checkpoint shape through this ONE
+        named rejection path. This is the property that makes the default
+        emit path egress checkpoint-only WITHOUT a host-level gate: any
+        other artifact simply cannot be registered here, whether or not the
+        caller intended to.
 
-        The checkpoint's Ed25519 ``signature`` (by ``key_id``, the raw public
-        key hex, over the checkpoint's own canonical signing body) is then
-        verified server-side; a checkpoint that doesn't verify is refused
-        with **401** and is never counter-signed.
+        The COSE_Sign1 signature is independently verified server-side
+        (``scitt_cose``, against the Ed25519 public key reconstructed from
+        the envelope's own ``kid`` -- capsule-anchor never imports
+        capsule-emit for this); a checkpoint whose signature doesn't verify
+        is refused with **401** and is never counter-signed.
 
         STATELESS (stage 1): this stamp proves existence-and-time for THIS
         checkpoint only. It does not check monotonicity or chain-linkage
         against any checkpoint previously seen for the same ``log_id`` -- so
-        on its own it does not prove the stream wasn't rewritten around it.
-        Nothing about this route's storage or keying choices precludes the
-        stage-2 checkpoint-aware upgrade (two-check continuity: ``prev_*``
-        equality AND consistency-proof verification) -- see
+        on its own it does not prove the stream wasn't rewritten around it
+        (nor does it verify an attached ``consistency_proof`` claim, if
+        present -- that is a stage-2 concern). Nothing about this route's
+        storage or keying choices precludes the stage-2 checkpoint-aware
+        upgrade (two-check continuity: ``prev_*`` equality AND
+        consistency-proof verification) -- see
         ``AnchorerService.witness_checkpoint``'s docstring for the seam.
 
         Idempotent: resubmitting the same checkpoint returns the original stamp.
         """
-        return _witness_checkpoint(req)
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="empty checkpoint submission")
+        if len(body) > MAX_STATEMENT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"checkpoint too large ({len(body)} bytes; max {MAX_STATEMENT_BYTES})",
+            )
+        return _witness_checkpoint(body)
 
     @canonical.post("/register", response_model=RegisterStatementResponse)
     def register(req: DigestRequest, request: Request) -> RegisterStatementResponse:
