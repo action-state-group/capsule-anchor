@@ -1089,12 +1089,12 @@ class AnchorerService:
         return "witnessed"
 
     def witness_checkpoint(self, cp: dict) -> StatementRegistration:
-        """Stateless checkpoint-only registration for ``POST /v1/checkpoint``.
+        """Stateless checkpoint-only registration for ``POST /checkpoints``.
 
-        ``cp`` is the output of ``parse_checkpoint_record`` (already
-        structurally validated) whose ``signature`` has already been verified
-        by the caller via ``verify_checkpoint_record_signature`` -- this
-        method does not re-check either, it only registers.
+        ``cp`` is the output of ``checkpoint_cose.parse_and_verify_checkpoint_cose``
+        (already structurally validated, with its COSE_Sign1 signature
+        already independently verified by the caller) -- this method does
+        not re-check either, it only registers.
 
         Dispatches as a bare digest (``bytes.fromhex(_checkpoint_digest(cp))``)
         through the SAME CT-log append/dedup/counter-sign path as
