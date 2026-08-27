@@ -5,6 +5,22 @@ This subsystem IS the Action State **Transparency Service (TS)**: a SCITT-style
 (RFC6962) Certificate-Transparency Merkle tree, with an Ed25519 authority key.
 
 Endpoints:
+  --- Witness-host canonical surface (witness.agentactioncapsule.org) ---
+  POST /checkpoints                     -> DEFAULT route: the checkpoint-only WITNESS
+                                           surface (stateless). Accepts a CLL
+                                           CheckpointRecord verbatim, refuses anything
+                                           else with a NAMED error, verifies its Ed25519
+                                           signature, and counter-signs -- see
+                                           AnchorerService.witness_checkpoint. This is
+                                           the only route a default capsule-emit client
+                                           ever calls.
+  POST /register                        -> EXPLICIT OPT-IN route: per-record digest
+                                           registration -> full SCITT Receipt (the
+                                           plain-SCITT-interop case). Identical
+                                           behavior to the legacy /v1/digest route --
+                                           NEVER called by any default client path.
+
+  --- Legacy routes (kept for existing callers registered against anchor.aac) ---
   POST /anchor/anchor                 -> countersign a root + append to log
   GET  /anchor/countersigned-root     -> fetch a stored CountersignedRoot
   GET  /anchor/transparency-log       -> append-only log feed (for monitors)
@@ -22,13 +38,10 @@ Endpoints:
                                            against the log's last witnessed
                                            checkpoint per log_id before co-signing;
                                            see AnchorerService._check_checkpoint_consistency.
-  POST /v1/digest                       -> register a capsule_id digest, issue a Receipt
+  POST /v1/digest                       -> legacy alias of /register: register a
+                                           capsule_id digest, issue a Receipt.
   GET  /v1/inclusion/{capsule_id}       -> read-only resolve: capsule_id -> inclusion
                                            proof + Receipt (200 present / 404 absent)
-  POST /v1/checkpoint                   -> the WITNESS surface (checkpoint-only, stateless):
-                                           accepts a CLL CheckpointRecord verbatim, refuses
-                                           anything else, verifies its Ed25519 signature, and
-                                           counter-signs -- see AnchorerService.witness_checkpoint.
 
   --- CT monitor routes (Phase 4) ---
   GET  /anchor/sth                    -> current Signed Tree Head (RFC6962)
@@ -39,6 +52,15 @@ Endpoints:
 One signing root: the authority Ed25519 key signs all STHs, COSE Receipts,
 and countersigned roots.  The public key is exposed at ``/.well-known/did.json``
 (no sign-oracle endpoint is provided).
+
+Privacy is enforced at the ROUTE level, not the host level: both /checkpoints and
+/register are always reachable on the same witness-host deployment -- there is no
+WITNESS_ONLY host gate (superseded; see CHANGELOG). What keeps the default egress
+checkpoint-only is (a) /checkpoints' own named-rejection policy (anything that
+isn't a CLL checkpoint is refused before any signature check or log write) and
+(b) the CLIENT (capsule-emit) never calling /register from its default emit()
+path -- pinned there by a no-egress CI test, mirroring the existing "default emit
+never imports the checkpoint subpackage" test.
 """
 
 from __future__ import annotations
@@ -430,25 +452,14 @@ def get_router() -> APIRouter:
             ),
         )
 
-    # --- Simple digest surface (/v1/digest) ------------------------------------
-    # The capsule-emit default endpoint: POST {"capsule_id": "<64-hex>"}.
-    # Derives statement_bytes = bytes.fromhex(capsule_id) — deterministic, so
-    # the offline verifier can recompute the CT leaf from the capsule_id alone —
-    # then registers through the identical SCITT CT-log path. Same receipt shape.
-    v1 = APIRouter(prefix="/v1", tags=["digest"])
-
-    @v1.post("/digest", response_model=RegisterStatementResponse)
-    def digest(req: DigestRequest, request: Request) -> RegisterStatementResponse:
-        """Register a capsule digest and receive an RFC9162 COSE Receipt.
-
-        Accepts a 64-hex SHA-256 capsule_id. The service converts it to 32 raw
-        bytes and registers them through the same SCITT CT-log path used by
-        ``/transparency/register-statement``, issuing an identical COSE Receipt.
-
-        Idempotent: submitting the same capsule_id twice returns the original receipt.
-        Offline verification: ``entry_hash = SHA256(bytes.fromhex(capsule_id))``
-        — that is the CT log entry hash the inclusion proof covers.
-        """
+    # --- Digest registration (/register, canonical; /v1/digest, legacy alias) --
+    # The explicit-opt-in surface: POST {"capsule_id": "<64-hex>"}. Derives
+    # statement_bytes = bytes.fromhex(capsule_id) — deterministic, so the offline
+    # verifier can recompute the CT leaf from the capsule_id alone — then
+    # registers through the identical SCITT CT-log path. Same receipt shape.
+    # Both routes share this one handler so /register and /v1/digest can never
+    # drift apart.
+    def _register_digest(req: DigestRequest) -> RegisterStatementResponse:
         if not _POST_LIMITER.is_allowed():
             raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
         cid = req.capsule_id.lower().strip()
@@ -467,6 +478,25 @@ def get_router() -> APIRouter:
             leaf_index=result.leaf_index,
             tree_size=result.tree_size,
         )
+
+    v1 = APIRouter(prefix="/v1", tags=["digest"])
+
+    @v1.post("/digest", response_model=RegisterStatementResponse)
+    def digest(req: DigestRequest, request: Request) -> RegisterStatementResponse:
+        """Legacy alias of ``POST /register`` — register a capsule digest and
+        receive an RFC9162 COSE Receipt. Kept for existing callers registered
+        against ``anchor.agentactioncapsule.org``; ``/register`` is the
+        canonical name on the witness host (see module docstring).
+
+        Accepts a 64-hex SHA-256 capsule_id. The service converts it to 32 raw
+        bytes and registers them through the same SCITT CT-log path used by
+        ``/transparency/register-statement``, issuing an identical COSE Receipt.
+
+        Idempotent: submitting the same capsule_id twice returns the original receipt.
+        Offline verification: ``entry_hash = SHA256(bytes.fromhex(capsule_id))``
+        — that is the CT log entry hash the inclusion proof covers.
+        """
+        return _register_digest(req)
 
     @v1.get("/inclusion/{capsule_id}", response_model=InclusionResolveResponse)
     def inclusion(capsule_id: str) -> InclusionResolveResponse:
@@ -505,39 +535,14 @@ def get_router() -> APIRouter:
             receipt_b64=base64.b64encode(receipt_bytes).decode("ascii"),
         )
 
-    # --- Checkpoint-only witness surface (/v1/checkpoint) -----------------
-    # Stage 1 of the CLL checkpoint witness: register a checkpoint, get a
-    # stamp back. Deliberately narrower than /transparency/register-statement
-    # (which accepts any Signed Statement and only optionally notices a
-    # checkpoint) -- this route accepts CHECKPOINTS ONLY and verifies the
-    # checkpoint's own signature before ever counter-signing. Stateless: see
-    # AnchorerService.witness_checkpoint for the stage-2 per-log_id seam.
+    # --- Witness-host canonical routes: /checkpoints (default) + /register ----
+    # (opt-in) -- both top-level, no prefix, so this is the vocabulary
+    # witness.agentactioncapsule.org teaches: /checkpoints is the only route a
+    # default capsule-emit client ever calls; /register is the explicit
+    # opt-in, plain-SCITT-interop case. See the module docstring.
+    canonical = APIRouter(tags=["witness-host"])
 
-    @v1.post("/checkpoint", response_model=CheckpointStampResponse)
-    def checkpoint(req: dict, request: Request) -> CheckpointStampResponse:
-        """Register a CLL checkpoint with the witness; receive a stamp.
-
-        Accepts a CLL (Checkpointed Local Log,
-        draft-mih-scitt-checkpointed-local-log) ``CheckpointRecord`` verbatim
-        as JSON: ``{v, kind, log_id, mmr_size, root, prev_size, prev_root,
-        key_id, timestamp, signature}``. This is a checkpoint-only surface --
-        any other artifact is refused with **400** ("not a checkpoint")
-        before any signature check or log write; the request body is parsed
-        as a raw JSON object rather than a typed model precisely so every
-        non-checkpoint shape funnels through this ONE named rejection path.
-
-        The checkpoint's Ed25519 ``signature`` (by ``key_id``, the raw public
-        key hex, over the checkpoint's own canonical signing body) is then
-        verified server-side; a checkpoint that doesn't verify is refused
-        with **401** and is never counter-signed.
-
-        STATELESS: this stamp proves existence-and-time for THIS checkpoint
-        only. It does not check monotonicity or chain-linkage against any
-        checkpoint previously seen for the same ``log_id`` -- so on its own
-        it does not prove the stream wasn't rewritten around it.
-
-        Idempotent: resubmitting the same checkpoint returns the original stamp.
-        """
+    def _witness_checkpoint(req: dict) -> CheckpointStampResponse:
         if not _POST_LIMITER.is_allowed():
             raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
         try:
@@ -559,8 +564,61 @@ def get_router() -> APIRouter:
             tree_size=result.tree_size,
         )
 
+    @canonical.post("/checkpoints", response_model=CheckpointStampResponse)
+    def checkpoints(req: dict, request: Request) -> CheckpointStampResponse:
+        """DEFAULT witness-host route: register a CLL checkpoint, receive a stamp.
+
+        Accepts a CLL (Checkpointed Local Log,
+        draft-mih-scitt-checkpointed-local-log) ``CheckpointRecord`` verbatim
+        as JSON: ``{v, kind, log_id, mmr_size, root, prev_size, prev_root,
+        key_id, timestamp, signature}``. This is a checkpoint-only surface --
+        any other artifact is refused with **400** ("not a checkpoint")
+        before any signature check or log write; the request body is parsed
+        as a raw JSON object rather than a typed model precisely so every
+        non-checkpoint shape funnels through this ONE named rejection path.
+        This is the property that makes the default emit path egress
+        checkpoint-only WITHOUT a host-level gate: any other artifact simply
+        cannot be registered here, whether or not the caller intended to.
+
+        The checkpoint's Ed25519 ``signature`` (by ``key_id``, the raw public
+        key hex, over the checkpoint's own canonical signing body) is then
+        verified server-side; a checkpoint that doesn't verify is refused
+        with **401** and is never counter-signed.
+
+        STATELESS (stage 1): this stamp proves existence-and-time for THIS
+        checkpoint only. It does not check monotonicity or chain-linkage
+        against any checkpoint previously seen for the same ``log_id`` -- so
+        on its own it does not prove the stream wasn't rewritten around it.
+        Nothing about this route's storage or keying choices precludes the
+        stage-2 checkpoint-aware upgrade (two-check continuity: ``prev_*``
+        equality AND consistency-proof verification) -- see
+        ``AnchorerService.witness_checkpoint``'s docstring for the seam.
+
+        Idempotent: resubmitting the same checkpoint returns the original stamp.
+        """
+        return _witness_checkpoint(req)
+
+    @canonical.post("/register", response_model=RegisterStatementResponse)
+    def register(req: DigestRequest, request: Request) -> RegisterStatementResponse:
+        """EXPLICIT OPT-IN witness-host route: per-record digest registration,
+        full SCITT Receipt back -- the plain-SCITT-interop case.
+
+        Identical behavior to the legacy ``/v1/digest`` route (same handler);
+        this is the canonical name on the witness host. A bundle (capsule +
+        inclusion proof + stamped checkpoint) is already per-record proof --
+        this route exists for verifiers that require a per-record SCITT
+        Receipt specifically, not as an upgrade path from a checkpoint stamp.
+
+        NEVER called by any default capsule-emit path -- registering a
+        record here is a deliberate, separate act by the caller, pinned by a
+        no-egress CI test on the client (mirroring the existing "default
+        emit never imports the checkpoint subpackage" test).
+        """
+        return _register_digest(req)
+
     parent = APIRouter()
     parent.include_router(router)
     parent.include_router(ts)
     parent.include_router(v1)
+    parent.include_router(canonical)
     return parent

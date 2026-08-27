@@ -135,10 +135,10 @@
     <div class="live"><span class="pulse"></span> Live · public SCITT log</div>
     <h1>A neutral transparency service for agent actions.</h1>
     <p>This service registers Agent Action Capsule signed statements, issues COSE receipts, and anchors them to an append-only RFC 9162 Merkle log — so the record of an agent action can be proven included, and never quietly dropped or rewritten. It is infrastructure, not a product: it verifies nothing for you and asks you to trust nothing you can't check yourself.</p>
-    <div class="host">POST your signed statement → <b>anchor.agentactioncapsule.org</b></div>
+    <div class="host">POST a checkpoint → <b>witness.agentactioncapsule.org/checkpoints</b></div>
     <div class="sth-strip" id="sth-strip"></div>
     <p class="sth-note">Early access — tree includes initial test submissions.</p>
-    <p class="sth-note">Canonical name: <span class="mono">witness.agentactioncapsule.org</span> [CNAME pending — currently served via <span class="mono">anchor.agentactioncapsule.org</span>, which is preserved and will keep working]. Same free public-good log either way.</p>
+    <p class="sth-note">One service, two routes: <span class="mono">/checkpoints</span> is the default checkpoint-witness path; <span class="mono">/register</span> is an explicit opt-in per-record digest registration (SCITT-interop). <span class="mono">anchor.agentactioncapsule.org</span> is preserved as a legacy alias of the same log and keeps working.</p>
   </div>
 </header>
 
@@ -179,6 +179,8 @@
       <a class="eprow" href="/anchor/transparency-log"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/transparency-log</span><div class="epdesc">The public log entries.</div></span></a>
       <a class="eprow" href="/anchor/inclusion-proof-ct"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/inclusion-proof-ct</span><div class="epdesc">Inclusion proof for a leaf at a given tree size.</div></span></a>
       <a class="eprow" href="/anchor/consistency-proof"><span class="verbtag get">GET</span><span><span class="eppath">/anchor/consistency-proof</span><div class="epdesc">Append-only consistency proof between two tree sizes.</div></span></a>
+      <div class="eprow"><span class="verbtag post">POST</span><span><span class="eppath">/checkpoints</span><div class="epdesc">Default: register a CLL checkpoint; refuses any other artifact by name.</div></span></div>
+      <div class="eprow"><span class="verbtag post">POST</span><span><span class="eppath">/register</span><div class="epdesc">Opt-in: register a per-record digest; returns a full SCITT receipt.</div></span></div>
       <div class="eprow"><span class="verbtag post">POST</span><span><span class="eppath">/transparency/register-statement</span><div class="epdesc">Register a COSE_Sign1 signed statement; returns a COSE receipt.</div></span></div>
     </div>
   </div>

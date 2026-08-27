@@ -33,19 +33,48 @@ content-free Signed Tree Heads.
 ## Free public instance
 
 ```
-https://anchor.agentactioncapsule.org
+https://witness.agentactioncapsule.org
 ```
 
+**One service, two vocabularies of route.** `witness.agentactioncapsule.org` is the
+checkpoint/CLL-primary name: `POST /checkpoints` is the default route every
+`capsule-emit` client registers against; `POST /register` is the explicit opt-in,
+plain-SCITT-interop digest route. `anchor.agentactioncapsule.org` (and
+`ts.agentactioncapsule.org`) CNAME onto the exact same Cloud Run service — same signing
+key, same database, no server-side role flag — and keep answering the legacy routes
+(`/v1/digest`, `/transparency/register-statement`, `/anchor/*`) for existing callers.
+See [Witness host: checkpoints vs. registration](#witness-host-checkpoints-vs-registration)
+below for the full picture, and `deploy/DEPLOY.md` for the DNS mapping.
+
 - Free, public, unauthenticated
-- Stable Ed25519 authority key; resolve the current `key_id` at [`/.well-known/did.json`](https://anchor.agentactioncapsule.org/.well-known/did.json)
-- Interactive API docs: [`/docs`](https://anchor.agentactioncapsule.org/docs)
-- Health: [`/health`](https://anchor.agentactioncapsule.org/health)
+- Stable Ed25519 authority key; resolve the current `key_id` at [`/.well-known/did.json`](https://witness.agentactioncapsule.org/.well-known/did.json)
+- Interactive API docs: [`/docs`](https://witness.agentactioncapsule.org/docs)
+- Health: [`/health`](https://witness.agentactioncapsule.org/health)
 - **Rate limit**: 300 POST registrations/minute globally — abuse control, not a metering
   quota. The limiter is per-process; a multi-instance deployment's effective limit is
   `300 × instance count` unless a cluster-wide layer (Cloud Armor) is added in front — see
   `deploy/DEPLOY.md`. Exceeding the limit returns `429`.
 
-`ts.agentactioncapsule.org` resolves to the same service.
+---
+
+## Witness host: checkpoints vs. registration
+
+| We say | The route | What it does |
+|---|---|---|
+| **checkpoint witnessing** (default) | `POST /checkpoints` | Registers a CLL checkpoint (a signed snapshot of your whole log). This is the only route a default `capsule-emit` client ever calls — it structurally cannot register anything else (see below). |
+| **record registration (legacy)** — opt-in route on the witness host (SCITT-interop) | `POST /register` (canonical) / `POST /v1/digest` (legacy alias) | Registers ONE record's digest and returns a full SCITT Receipt for it — the plain-SCITT-interop case. Never called by any default `capsule-emit` path; pinned by a no-egress CI test on the client. |
+
+A bundle (capsule + inclusion proof + stamped checkpoint) is already per-record proof —
+`/register` exists for verifiers that require a per-record SCITT Receipt specifically, not
+as an upgrade path from a checkpoint stamp.
+
+**Privacy is enforced at the route level, not the host level.** Both `/checkpoints` and
+`/register` are always reachable on this one service; there is no host-level allow-list
+that hides `/register`. What keeps a default `capsule-emit` process's egress
+checkpoint-only is (1) `/checkpoints` itself refuses any non-checkpoint artifact with a
+named error before any signature check or log write, and (2) the client never calls
+`/register` from its default `emit()` path — a fact enforced by a CI test, not just
+documentation.
 
 ---
 
@@ -132,10 +161,43 @@ for content-addressing the DER cert bytes — is in the internal design note
 
 ## API
 
-### Simple digest endpoint (capsule-emit default)
+### `/checkpoints` — checkpoint witnessing (default, witness host)
 
 ```bash
-curl -s -X POST https://anchor.agentactioncapsule.org/v1/digest \
+curl -s -X POST https://witness.agentactioncapsule.org/checkpoints \
+  -H 'Content-Type: application/json' \
+  -d '{"v":1,"kind":"mmr_checkpoint","log_id":"...","mmr_size":100,"root":"<64-hex>","prev_size":0,"prev_root":"","key_id":"<64-hex pubkey>","timestamp":"2026-08-27T00:00:00Z","signature":"<hex>"}' \
+  | python3 -m json.tool
+```
+
+Accepts a CLL (Checkpointed Local Log, `draft-mih-scitt-checkpointed-local-log`)
+`CheckpointRecord` verbatim — nothing else. Any other shape is refused with a **named
+400** (`NotACheckpointError`) before any signature check or log write; a checkpoint whose
+`signature` doesn't verify against `key_id` is refused with **401** and never
+counter-signed. This is what makes the route's rejection policy — not a host-level gate —
+the thing that keeps a default `capsule-emit` process's egress checkpoint-only.
+
+Returns:
+
+```json
+{
+  "receipt_b64": "<base64-encoded COSE Receipt>",
+  "entry_hash": "<SHA-256 of the checkpoint digest>",
+  "entry_hash_scheme": "legacy",
+  "leaf_index": 0,
+  "tree_size": 1
+}
+```
+
+Stage 1 is **stateless**: existence-and-time evidence for this checkpoint only, no
+per-`log_id` monotonicity/rollback check. Nothing about this route's storage or keying
+choices precludes the stage-2 checkpoint-aware upgrade (two-check continuity: `prev_*`
+equality AND consistency-proof verification), which lands additively once available.
+
+### `/register` — record registration (legacy: `/v1/digest`), opt-in route (SCITT-interop)
+
+```bash
+curl -s -X POST https://witness.agentactioncapsule.org/register \
   -H 'Content-Type: application/json' \
   -d '{"capsule_id": "'"$(echo -n hello | sha256sum | awk '{print $1}')"'"}' \
   | python3 -m json.tool
@@ -155,6 +217,11 @@ Returns:
 
 **Offline verify:** `entry_hash = SHA256(bytes.fromhex(capsule_id))` — the CT
 leaf the inclusion proof covers, reconstructable from the `capsule_id` alone.
+
+`POST /v1/digest` is the same handler under its legacy name, kept for existing callers
+registered against `anchor.agentactioncapsule.org`. **This route is opt-in** — a
+default `capsule-emit` client never calls it; see
+[Witness host: checkpoints vs. registration](#witness-host-checkpoints-vs-registration).
 
 ### SCITT Signed Statement registration
 
@@ -198,16 +265,20 @@ new-scheme cache miss, the service falls back to a legacy-scheme lookup before d
 submission is genuinely new. No leaf is lost and no signature is invalidated by this
 migration — only the identifier surface for new registrations changed shape.
 
-### Checkpoint witness surface (`mmr-checkpoint`)
+### Checkpoint witness surface (`mmr-checkpoint`) on `/transparency/register-statement`
 
-A checkpoint capsule — a signed snapshot of one log's MMR peak set, e.g. from
+Not to be confused with `/checkpoints` above — this is a SEPARATE, older mechanism: a
+checkpoint capsule — a signed snapshot of one log's MMR peak set, e.g. from
 [`capsule-emit`'s `checkpoint` module](https://github.com/action-state-group/capsule-emit)
-— is just a Signed Statement, so it registers through the SAME
+— wrapped as a Signed Statement, so it registers through the SAME
 `/transparency/register-statement` endpoint above with zero new routes. What's different
 is WITNESS behavior: a statement whose payload self-declares `"artifact_type":
 "mmr-checkpoint"` is auto-recognized and checked against the log's own last-witnessed
 checkpoint for its `log_id` before being co-signed. Any other `artifact_type` (or none)
 registers exactly as an ordinary Signed Statement — `checkpoint_witness` stays `null`.
+`/checkpoints` (stage 1 of the CLL checkpoint witness) accepts the bare `CheckpointRecord`
+wire shape directly, verifies its own signature server-side, and is stateless — the two
+surfaces are independent; a client uses one or the other, not both.
 
 Payload shape (JSON, embedded as the COSE_Sign1's payload):
 
@@ -336,7 +407,10 @@ capsule-emit  →  POST /v1/digest  →  capsule-anchor  →  COSE Receipt
 The `AAC_ANCHOR_URL` environment variable or `anchor_url=` parameter in
 `capsule-emit` lets you repoint at any `capsule-anchor` instance — the free
 public one, a private self-hosted deployment, or a local instance for
-development.
+development. This is the per-capsule `anchor=`/`/register` path — since 0.5.0,
+`capsule-emit`'s **default** witnessing path is the per-stream CLL checkpoint
+(`CAPSULE_WITNESS_URL`, defaulting to `witness.agentactioncapsule.org/checkpoints`);
+see [Witness host: checkpoints vs. registration](#witness-host-checkpoints-vs-registration).
 
 **See [ADOPT.md](ADOPT.md) for the full adoption ladder** — no anchor, self-hosted,
 public, and the roadmap toward issuer-binding-enforced registration — stated as

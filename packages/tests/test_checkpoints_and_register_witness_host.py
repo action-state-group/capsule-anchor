@@ -1,6 +1,9 @@
-"""Tests for the checkpoint-only witness surface on POST /v1/checkpoint.
+"""Tests for the witness-host canonical routes: POST /checkpoints (default) and
+POST /register (explicit opt-in) -- both always reachable on the SAME service,
+per the single-host witness ruling (2026-08-27, supersedes the earlier
+WITNESS_ONLY separate-deployment plan from #29).
 
-STAGE 1 of the CLL (Checkpointed Local Log,
+``/checkpoints`` is STAGE 1 of the CLL (Checkpointed Local Log,
 draft-mih-scitt-checkpointed-local-log) checkpoint witness: a SEPARATE,
 stricter surface from the ``mmr-checkpoint`` artifact_type recognition on
 ``/transparency/register-statement`` (see ``test_checkpoint_witness.py``).
@@ -12,6 +15,14 @@ This surface:
     counter-signing -- 401 on failure, never appended/counter-signed;
   * is STATELESS: no per-log_id monotonicity/rollback/chain-linkage check,
     no MMR math -- existence-and-time evidence for one checkpoint only.
+
+``/register`` is the explicit opt-in, plain-SCITT-interop digest-registration
+route -- identical behavior to the legacy ``/v1/digest`` alias (see
+``test_endpoint_consolidation.py`` for the legacy-route coverage). Privacy is
+enforced at the ROUTE level here, not a host-level gate: both routes are
+always reachable on this same service -- see ``test_no_host_level_gate``
+below, and ``capsule_emit``'s no-egress CI test for the client-side half of
+this guarantee.
 """
 from __future__ import annotations
 
@@ -84,7 +95,7 @@ def client():
 
 
 def _register(client: TestClient, cp: dict) -> tuple[int, dict]:
-    resp = client.post("/v1/checkpoint", json=cp)
+    resp = client.post("/checkpoints", json=cp)
     return resp.status_code, (resp.json() if resp.content else {})
 
 
@@ -220,3 +231,70 @@ def test_two_valid_checkpoints_get_distinct_leaves(client, key):
     assert s1 == s2 == 200
     assert b1["entry_hash"] != b2["entry_hash"]
     assert b1["leaf_index"] != b2["leaf_index"]
+
+
+# --- /register: explicit opt-in digest registration ---------------------------
+
+
+def test_register_returns_full_scitt_receipt(client):
+    cid = "c" * 64
+    resp = client.post("/register", json={"capsule_id": cid})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["entry_hash"] == hashlib.sha256(bytes.fromhex(cid)).hexdigest()
+    assert body["entry_hash_scheme"] == "legacy"
+    assert body["receipt_b64"]
+
+
+def test_register_is_byte_identical_to_legacy_v1_digest(client):
+    """/register is the canonical name; /v1/digest is the legacy alias kept for
+    existing anchor.aac callers -- same handler, so a given capsule_id produces
+    the identical receipt shape through either route."""
+    cid = "d" * 64
+    via_register = client.post("/register", json={"capsule_id": cid})
+    via_legacy = client.post("/v1/digest", json={"capsule_id": cid})
+    assert via_register.status_code == via_legacy.status_code == 200
+    assert via_register.json() == via_legacy.json()
+
+
+def test_register_never_accepts_a_checkpoint_shape_as_a_checkpoint(client, key):
+    """/register treats its body as an opaque digest request -- submitting a
+    full CheckpointRecord to it is just a validation error (not a digest),
+    not a channel that bypasses /checkpoints' signature verification."""
+    cp = _checkpoint(key, log_id="log-L", mmr_size=10, prev_size=0)
+    resp = client.post("/register", json=cp)
+    assert resp.status_code == 422, resp.text
+
+
+# --- two-route model: privacy is route-level, not a host-level gate -----------
+
+
+def test_both_routes_always_reachable_on_the_same_service(client, key, monkeypatch):
+    """The witness-host ruling (2026-08-27) replaces the earlier WITNESS_ONLY
+    host-level reject (#29) with route-level privacy: /checkpoints (default)
+    and /register (opt-in) are BOTH always reachable on one deployment -- there
+    is no env flag that hides either. Setting the old WITNESS_ONLY var is a
+    no-op now (it named no code path after the supersession)."""
+    monkeypatch.setenv("WITNESS_ONLY", "1")
+    client = TestClient(create_app())
+
+    checkpoint_resp = client.post(
+        "/checkpoints", json=_checkpoint(key, log_id="log-M", mmr_size=10, prev_size=0)
+    )
+    assert checkpoint_resp.status_code == 200, checkpoint_resp.text
+
+    register_resp = client.post("/register", json={"capsule_id": "e" * 64})
+    assert register_resp.status_code == 200, register_resp.text
+
+    legacy_digest_resp = client.post("/v1/digest", json={"capsule_id": "f" * 64})
+    assert legacy_digest_resp.status_code == 200, legacy_digest_resp.text
+
+
+def test_legacy_v1_checkpoint_route_no_longer_exists(client, key):
+    """/v1/checkpoint (PR #29's original path, never documented, never called
+    by any client -- see repo-wide grep) is renamed to /checkpoints outright;
+    no dual-mount, no deprecation period, since nothing depended on the old
+    path."""
+    cp = _checkpoint(key, log_id="log-N", mmr_size=10, prev_size=0)
+    resp = client.post("/v1/checkpoint", json=cp)
+    assert resp.status_code == 404
