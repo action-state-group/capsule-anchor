@@ -1,4 +1,4 @@
-# Deploying capsule-anchor (Cloud Run)
+# Deploying capsule-witness (Cloud Run) — built from the capsule-anchor repo
 
 ## Runtime configuration
 
@@ -52,7 +52,7 @@ python3 -c "import os; print(os.urandom(32).hex())" | \
   gcloud secrets create capsule-anchor-signing-key --data-file=- --project=PROJECT_ID
 
 # 2. Deploy with Cloud SQL + secrets
-gcloud run deploy capsule-anchor \
+gcloud run deploy capsule-witness \
   --source . \
   --project=PROJECT_ID \
   --region=us-central1 \
@@ -68,88 +68,84 @@ No `--max-instances` cap is needed when using Postgres: all instances share the 
 and the rate limiter is per-instance (see HA notes below). Remove `--max-instances=1` from any
 prior deploy commands — it was only safe with in-memory storage.
 
-## Domain mapping: witness.aac (primary) + anchor.aac (legacy alias)
+## One service, two domains: witness.aac (primary) + anchor.aac (legacy alias)
 
-**Ruling (2026-08-27, Steven): ONE witness endpoint, ONE Cloud Run service, TWO domain
-mappings.** This supersedes the earlier "separate `capsule-witness` deployment +
-`WITNESS_ONLY` env flag" plan — that mode is removed from the code (see CHANGELOG). There
-is no server-side role flag and no second deployment: `witness.agentactioncapsule.org`
-becomes the CLL/checkpoint-primary name (`POST /checkpoints` default, `POST /register`
-opt-in) and `anchor.agentactioncapsule.org` retires to a plain alias of the exact same
-service, still answering its legacy routes (`/v1/digest`, `/transparency/register-statement`,
-`/anchor/*`) for existing callers.
+**Finalized 2026-08-28 (Steven): ONE Cloud Run service, TWO domain mappings, and "witness"
+is the service vocabulary.** This repo's code deploys as the Cloud Run service
+**`capsule-witness`** — it runs the full Transparency Service (`WITNESS_ONLY` was removed in
+#30). Both hostnames point at that one service:
+
+- **`witness.agentactioncapsule.org`** — primary. The CLL/checkpoint surface: `POST /checkpoints`
+  (default; COSE checkpoint wire; verify-before-countersign; a non-checkpoint body gets one named
+  400) + `POST /register` (opt-in per-record receipt) + `/health`.
+- **`anchor.agentactioncapsule.org`** — legacy alias of the *same* service, still answering its
+  legacy routes (`/v1/digest`, `/transparency/register-statement`, `/anchor/*`) for existing
+  callers. "anchor" survives only as this deprecated alias and never appears as service vocabulary
+  in new docs; its eventual removal is a later decision.
+
+Note the naming split: the **repo/codebase** is still `capsule-anchor` and the secret/instance
+names (`capsule-anchor-signing-key`, `capsule-anchor-pg`, `CAPSULE_ANCHOR_*`) are unchanged — they
+are codebase/infra identifiers, not the service name. Only the Cloud Run **service** is
+`capsule-witness`.
 
 **These are Steven's clicks — nothing below goes live without running it.**
 
 ```bash
-# (once) verify the subdomain if not already covered by an apex verification
-# in Search Console for agentactioncapsule.org:
-gcloud domains verify witness.agentactioncapsule.org      # skip if already verified
+# Deploy the service from this repo checkout (current main):
+gcloud run deploy capsule-witness \
+  --source . --project=PROJECT_ID --region=us-central1 --port=8000 --allow-unauthenticated \
+  --add-cloudsql-instances=PROJECT_ID:us-central1:capsule-anchor-pg \
+  --set-secrets=CAPSULE_ANCHOR_SIGNING_KEY=capsule-anchor-signing-key:latest,CAPSULE_ANCHOR_DATABASE_URL=capsule-anchor-database-url:latest
 
-# Map witness.aac onto the EXISTING capsule-anchor Cloud Run service (not a new one):
-gcloud run domain-mappings create \
-  --service=capsule-anchor \
-  --domain=witness.agentactioncapsule.org \
-  --region=us-central1 \
-  --project=PROJECT_ID
+# Map BOTH hostnames onto the one capsule-witness service:
+gcloud beta run domain-mappings create --service=capsule-witness \
+  --domain=witness.agentactioncapsule.org --region=us-central1 --project=PROJECT_ID
+gcloud beta run domain-mappings create --service=capsule-witness \
+  --domain=anchor.agentactioncapsule.org --region=us-central1 --project=PROJECT_ID
 ```
 
-`gcloud` prints the DNS record(s) to add at the registrar/zone for
-`agentactioncapsule.org` — add exactly what it prints, the same procedure already used
-for `anchor.aac`. For a Cloud Run subdomain mapping this is normally a single:
+Each `domain-mappings create` prints the DNS record to add — normally a single
+`CNAME  <name>  ghs.googlehosted.com.`. TLS provisions automatically once DNS resolves (minutes
+to ~an hour); a remap of an existing hostname triggers a fresh managed-cert provision, so expect a
+short propagation window. Both hostnames answer with the same `key_id`.
 
-```
-Type: CNAME   Name: witness   Value: ghs.googlehosted.com.
-```
-
-(If it instead lists 4×A + 4×AAAA, add those.) TLS provisions automatically once DNS
-resolves (a few minutes to ~an hour). No `--set-secrets`, no new Cloud SQL grants, no new
-signing key — this mapping points at the identical running service, so it inherits
-`CAPSULE_ANCHOR_SIGNING_KEY` / `CAPSULE_ANCHOR_DATABASE_URL` and answers with the same
-`key_id`.
-
-**`anchor.agentactioncapsule.org` keeps its existing domain mapping unchanged** — it is
-already mapped to `capsule-anchor`; nothing to redo. It becomes vocabulary-deprecated
-(docs mark its registration routes "record registration (legacy)"; "anchor" never
-appears as service vocabulary in new docs) — its removal is its own, later decision
-(~a quarter out), not part of this change.
-
-Add a second uptime check alongside the existing `anchor.aac` one (same `/health` path,
-same alerting policy):
-
-```bash
-gcloud monitoring uptime create "capsule-anchor /health (witness)" \
-  --resource-type=uptime-url \
-  --resource-labels="host=witness.agentactioncapsule.org,project_id=PROJECT_ID" \
-  --path=/health \
-  --period=1 \
-  --timeout=10 \
-  --project=PROJECT_ID
-```
-
-Verify after DNS resolves:
+Verify both domains serve from the one service:
 
 ```bash
 curl -s https://witness.agentactioncapsule.org/health | python3 -m json.tool
+curl -s https://anchor.agentactioncapsule.org/health   | python3 -m json.tool   # same key_id
 
-# a checkpoint registers and gets a stamp:
-curl -s -X POST https://witness.agentactioncapsule.org/checkpoints \
-  -H 'content-type: application/json' -d '{ ...a real CLL checkpoint... }'
-
-# a non-checkpoint is refused via the ONE named rejection path (never counter-signed):
-curl -s -X POST https://witness.agentactioncapsule.org/checkpoints \
-  -H 'content-type: application/json' -d '{"not":"a checkpoint"}'
-
-# opt-in registration still works on the same host:
-curl -s -X POST https://witness.agentactioncapsule.org/register \
-  -H 'content-type: application/json' \
-  -d '{"capsule_id":"0000000000000000000000000000000000000000000000000000000000000001"}'
-
-# anchor.aac keeps answering its legacy route, unchanged:
-curl -s -X POST https://anchor.agentactioncapsule.org/v1/digest \
-  -H 'content-type: application/json' \
-  -d '{"capsule_id":"0000000000000000000000000000000000000000000000000000000000000002"}'
+curl -s -o /dev/null -w '%{http_code}
+' -X POST https://witness.agentactioncapsule.org/checkpoints \
+  -H 'content-type: application/cll-checkpoint+cbor' --data-binary 'nope'        # 400 (named refusal)
+curl -s -o /dev/null -w '%{http_code}
+' -X POST https://witness.agentactioncapsule.org/register \
+  -H 'content-type: application/json' -d '{"capsule_id":"'"$(printf 'e%.0s' $(seq 64))"'"}'  # 2xx
+curl -s -o /dev/null -w '%{http_code}
+' -X POST https://anchor.agentactioncapsule.org/v1/digest -d '{}'  # 422 (legacy route live)
 ```
+
+**A third hostname, `ts.agentactioncapsule.org` ("ts" = Transparency Service), must also be
+remapped — it is NOT optional.** It is the hardcoded default in the shipped `agent-action-capsule`
+library (`anchor.py`: `_DEFAULT_TS_URL = "https://ts.agentactioncapsule.org"`), so deleting the old
+service while `ts.aac` still points at it breaks every existing install's default anchor path. Remap
+it like the others, then retire the old service only after all THREE hostnames are green on
+`capsule-witness`:
+
+```bash
+# remap the Transparency-Service alias (library default) onto capsule-witness:
+gcloud beta run domain-mappings delete --domain=ts.agentactioncapsule.org --region=us-central1 --project=PROJECT_ID
+gcloud beta run domain-mappings create --service=capsule-witness --domain=ts.agentactioncapsule.org --region=us-central1 --project=PROJECT_ID
+curl -s https://ts.agentactioncapsule.org/health   # 200, same key_id
+
+# confirm NOTHING still targets capsule-anchor, then delete it:
+gcloud beta run domain-mappings list --region=us-central1 --project=PROJECT_ID
+gcloud run services delete capsule-anchor --region=us-central1 --project=PROJECT_ID
+```
+
+(`ts.aac` and `anchor.aac` both survive as legacy aliases of `capsule-witness`; new library code
+should default to `witness.aac`, with the old names honored via DNS mapping, not code branches.)
+
 
 ## High-availability (HA)
 
@@ -163,7 +159,7 @@ With Postgres as the backing store, multiple Cloud Run instances are safe:
   Cloud Armor (`--security-policy`) in front of the Cloud Run service.
 - **Recommended minimum HA config**:
   ```bash
-  gcloud run services update capsule-anchor \
+  gcloud run services update capsule-witness \
     --region=us-central1 \
     --min-instances=1 \
     --max-instances=10 \
@@ -171,58 +167,6 @@ With Postgres as the backing store, multiple Cloud Run instances are safe:
   ```
   `--min-instances=1` avoids cold-start latency for the first request on a new instance.
 
-## Second domain: witness.agentactioncapsule.org (checkpoint-witness role)
-
-`capsule-anchor` is a conforming SCITT Transparency Service and already answers
-`POST /v1/digest` + `GET /anchor/authority-pubkey` — the exact surface a
-checkpoint witness needs (see `capsule-ledger/capsule_ledger/mmr/checkpoint.py`
-and `capsule-emit/capsule_emit/checkpoint/emit.py`, both of which register
-checkpoint digests through this same route). `witness.agentactioncapsule.org`
-is a second custom domain mapped onto this **same** service — not a second
-deployment, not a second signing key, not a second database. The
-anchor-vs-witness distinction is purely which name a caller uses for which
-purpose (per-capsule anchor vs. per-stream checkpoint witness); there is no
-server-side role flag.
-
-```bash
-# One-time, if not already covered by an apex/wildcard verification for
-# agentactioncapsule.org in Search Console:
-#   gcloud domains verify witness.agentactioncapsule.org
-
-gcloud run domain-mappings create \
-  --service=capsule-anchor \
-  --domain=witness.agentactioncapsule.org \
-  --region=us-central1 \
-  --project=PROJECT_ID
-```
-
-`gcloud` prints the DNS record(s) to add at the registrar — add exactly what
-it prints (same procedure already used for `anchor.agentactioncapsule.org`).
-No `--set-secrets`, no new Cloud SQL grants, no new signing key: this mapping
-points at the identical running service, so it inherits
-`CAPSULE_ANCHOR_SIGNING_KEY` / `CAPSULE_ANCHOR_DATABASE_URL` and answers with
-the same `key_id`.
-
-Add a second uptime check alongside the existing `anchor.aac` one (same
-`/health` path, same alerting policy):
-
-```bash
-gcloud monitoring uptime create "capsule-anchor /health (witness)" \
-  --resource-type=uptime-url \
-  --resource-labels="host=witness.agentactioncapsule.org,project_id=PROJECT_ID" \
-  --path=/health \
-  --period=1 \
-  --timeout=10 \
-  --project=PROJECT_ID
-```
-
-Both hostnames stay live indefinitely — `anchor.aac` remains the legacy
-per-capsule default and the CT-log browse/verify surface existing receipts
-depend on; `witness.aac` is the per-stream checkpoint default since
-capsule-emit 0.5.0. Neither redirects to the other; they are two names for
-the same log. See `~/dev/asg/_work/witness-aac-deploy-spec.md` for the full
-spec (checkpoint-witness API surface, trust-tier upgrade path, and the DNS
-ruling) this section summarizes.
 
 ## Key management and rotation
 
