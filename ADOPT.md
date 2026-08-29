@@ -33,7 +33,7 @@ cap = emit(action="submit_order", operator="acme-co", ..., anchor=False)
 ```
 
 `anchor=False` (or `CAPSULE_ANCHOR=false` in adapter/env config) writes a
-structured, signed record to your local ledger file and nothing else. Verification
+structured, content-addressed record to your local ledger file and nothing else. Verification
 reads the ledger offline and reports the record as **self-attested / not
 anchored** — that is the honest label, not a placeholder for something better; it
 means exactly what it says. No `capsule-anchor` instance is involved at this rung.
