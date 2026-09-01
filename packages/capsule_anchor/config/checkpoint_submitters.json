@@ -1,0 +1,9 @@
+[
+  {
+    "log_id": "trace-registry/v1",
+    "pubkey_hex": "bc133259c094f63694b4ec48a295d7501a9a0cd536df5631fb4663c155f7bc90",
+    "accumulator": "foreign",
+    "rate_limit_per_min": 60,
+    "_comment": "AgenTrust trace registry (OPAQUE/AgenTrust). Identity from Imran, 2026-09-01. Foreign accumulator: this witness countersigns observed commitments for this log_id, it does not verify AgenTrust's own consistency proofs (v1 scope; see submitters.py docstring and README)."
+  }
+]

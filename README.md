@@ -46,7 +46,8 @@ key, same database, no server-side role flag — and keep answering the legacy r
 See [Witness host: checkpoints vs. registration](#witness-host-checkpoints-vs-registration)
 below for the full picture, and `deploy/DEPLOY.md` for the DNS mapping.
 
-- Free, public, unauthenticated
+- Free, public, unauthenticated — for every `log_id` NOT in the enrolled-submitter allowlist
+  below, which is every `log_id` today except one.
 - Stable Ed25519 authority key; resolve the current `key_id` at [`/.well-known/did.json`](https://witness.agentactioncapsule.org/.well-known/did.json)
 - Interactive API docs: [`/docs`](https://witness.agentactioncapsule.org/docs)
 - Health: [`/health`](https://witness.agentactioncapsule.org/health)
@@ -54,6 +55,30 @@ below for the full picture, and `deploy/DEPLOY.md` for the DNS mapping.
   quota. The limiter is per-process; a multi-instance deployment's effective limit is
   `300 × instance count` unless a cluster-wide layer (Cloud Armor) is added in front — see
   `deploy/DEPLOY.md`. Exceeding the limit returns `429`.
+
+### Enrolled external checkpoint submitters (`/checkpoints`)
+
+`POST /checkpoints` (above) is open by default: any COSE_Sign1 checkpoint verifying under its
+own self-asserted `kid` is counter-signed, for any `log_id`. A NAMED external log can
+additionally be **enrolled** — a config-driven allowlist (`packages/capsule_anchor/config/
+checkpoint_submitters.json`, committed, never hand-edited on the deployed box) pins a specific
+`log_id` (the CWT `iss`) to a specific Ed25519 key. For an enrolled `log_id`, verification uses
+ONLY the pinned key — the envelope's own `kid` is ignored — so a stranger cannot mint a stamp
+for an enrolled identity by self-signing with an arbitrary key. Every other `log_id` is
+unaffected and keeps the open behavior above.
+
+An enrolled entry's stamp additionally carries a `grade`:
+
+| `grade` | Meaning |
+|---|---|
+| `mmr-verified` | The submitter's commitment is our own CLL MMR peaks-and-root scheme, which this witness fully understands. |
+| `countersigned-observed` | The submitter's commitment is a FOREIGN accumulator this witness does not independently verify — it only observes, timestamps, and countersigns the submitted commitment bytes. **Never equivalent to `mmr-verified`** — this witness does not check a foreign log's own consistency proofs (out of scope for v1). |
+
+Each enrolled entry also gets its own `rate_limit_per_min`, enforced in addition to (not instead
+of) the global 300/min budget above.
+
+Currently enrolled: the AgenTrust trace registry (`trace-registry/v1`, `countersigned-observed`
+grade) — see `packages/capsule_anchor/config/checkpoint_submitters.json`.
 
 ---
 

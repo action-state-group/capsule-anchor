@@ -28,6 +28,7 @@ import hashlib
 import cbor2
 
 from .service import CheckpointSignatureError, NotACheckpointError
+from .submitters import SubmitterAllowlist
 
 #: Must match capsule_emit.checkpoint.cose_wire.CLL_CHECKPOINT_CONTENT_TYPE
 #: byte-for-byte -- this is the ONE wire shape both sides speak, not a
@@ -43,6 +44,30 @@ _HDR_KID = 4
 _HDR_CONTENT_TYPE = 3
 
 _DIGEST_LEN = 32
+
+
+def _peek_unauthenticated_issuer(protected: dict) -> str | None:
+    """Structurally read the CWT ``iss`` claim out of an ALREADY-DECODED
+    protected header, without any signature check.
+
+    Only used to decide, BEFORE verification, whether ``log_id`` names an
+    enrolled submitter -- and therefore which key gets used to verify (the
+    submitter's pinned key, never the envelope's own self-asserted ``kid``).
+    Never trusted as an authenticated value: the returned claim is thrown
+    away unless the corresponding signature later verifies under the
+    resolved key (see ``parse_and_verify_checkpoint_cose``, which re-derives
+    ``issuer`` from ``parsed["issuer"]`` -- the AUTHENTICATED field -- after
+    verification, and never returns this peeked value directly).
+    """
+    from scitt_cose.statement import CWT_ISS, HDR_CWT_CLAIMS
+
+    claims = protected.get(HDR_CWT_CLAIMS)
+    if not isinstance(claims, dict):
+        return None
+    iss = claims.get(CWT_ISS)
+    if isinstance(iss, (bytes, bytearray)):
+        return bytes(iss).decode("utf-8", errors="replace")
+    return iss if isinstance(iss, str) else None
 
 
 def _root_from_peaks(peak_hashes: list[bytes]) -> bytes:
@@ -75,15 +100,18 @@ def _decode_commitment(raw, *, what: str) -> list[bytes]:
     return [bytes(p) for p in peaks]
 
 
-def _extract_protected_fields(cose_bytes: bytes) -> tuple[bytes | None, str | None]:
-    """Structurally read ``kid`` and ``content_type`` out of the protected
-    header WITHOUT verifying the signature -- needed before verification can
-    even be attempted (the kid names which public key to check against), and
-    ``content_type`` doubles as the checkpoint-only gate: any COSE_Sign1
-    that isn't self-labelled a CLL checkpoint is refused here (NotACheckpointError,
-    400) BEFORE a signature check ever runs, so a well-signed statement for a
-    DIFFERENT purpose (e.g. a capsule producer envelope) is never mistaken
-    for a bad-signature checkpoint (401).
+def _extract_protected_fields(cose_bytes: bytes) -> tuple[bytes | None, str | None, str | None]:
+    """Structurally read ``kid``, ``content_type``, and the (unauthenticated)
+    CWT ``iss`` claim out of the protected header WITHOUT verifying the
+    signature -- needed before verification can even be attempted: the kid
+    names a candidate public key, and the peeked ``iss`` decides whether an
+    ENROLLED submitter's PINNED key should be used instead (see
+    :func:`_peek_unauthenticated_issuer`). ``content_type`` doubles as the
+    checkpoint-only gate: any COSE_Sign1 that isn't self-labelled a CLL
+    checkpoint is refused here (NotACheckpointError, 400) BEFORE a signature
+    check ever runs, so a well-signed statement for a DIFFERENT purpose
+    (e.g. a capsule producer envelope) is never mistaken for a bad-signature
+    checkpoint (401).
 
     Uses ``scitt_cose.cose_sign1.strict_decode`` -- the same malleability-
     resistant decoder the verifying path itself uses -- so even this
@@ -108,7 +136,8 @@ def _extract_protected_fields(cose_bytes: bytes) -> tuple[bytes | None, str | No
     content_type = protected.get(_HDR_CONTENT_TYPE)
     if isinstance(content_type, (bytes, bytearray)):
         content_type = bytes(content_type).decode("utf-8", errors="replace")
-    return kid, content_type
+    unauth_iss = _peek_unauthenticated_issuer(protected)
+    return kid, content_type, unauth_iss
 
 
 def _ed25519_pubkey_pem(raw: bytes) -> bytes:
@@ -119,13 +148,18 @@ def _ed25519_pubkey_pem(raw: bytes) -> bytes:
     return key.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
 
 
-def parse_and_verify_checkpoint_cose(cose_bytes: bytes) -> dict:
+def parse_and_verify_checkpoint_cose(
+    cose_bytes: bytes, *, allowlist: SubmitterAllowlist | None = None
+) -> dict:
     """Decode + independently verify a COSE-wire CLL checkpoint statement.
 
-    Returns a dict shaped exactly like the legacy JSON ``CheckpointRecord``
-    path's 9 signing-body fields (``v, kind, log_id, mmr_size, root,
-    prev_size, prev_root, key_id, timestamp``), suitable for
-    ``AnchorerService.witness_checkpoint`` unchanged.
+    Returns a dict shaped like the legacy JSON ``CheckpointRecord`` path's
+    9 signing-body fields (``v, kind, log_id, mmr_size, root, prev_size,
+    prev_root, key_id, timestamp``) PLUS a ``grade`` key (``None`` unless
+    ``log_id`` is an enrolled submitter -- see below), suitable for
+    ``AnchorerService.witness_checkpoint`` unchanged (``grade`` is not one of
+    the signing-body fields ``_checkpoint_signing_body`` hashes, so its
+    presence never changes the digest/signature math).
 
     Order of checks (BEFORE any counter-signing, matching the JSON path's
     own two-phase gate):
@@ -135,11 +169,20 @@ def parse_and_verify_checkpoint_cose(cose_bytes: bytes) -> dict:
        self-labelled a CLL checkpoint. This runs BEFORE the signature check
        so a well-formed-but-differently-purposed COSE statement is named
        "not a checkpoint", not misreported as a bad signature.
-    2. Signature verification, via ``scitt_cose.statement.parse_signed_statement``
-       against the Ed25519 public key reconstructed from the envelope's own
-       ``kid`` (self-contained offline verify -- same trust model as
+    2. Signature verification, via ``scitt_cose.statement.parse_signed_statement``.
+       The verification key is normally the Ed25519 public key reconstructed
+       from the envelope's own self-asserted ``kid`` (self-contained offline
+       verify -- same trust model as
        ``capsule_emit.checkpoint.cose_wire.verify_checkpoint_cose_offline``)
-       -- ``CheckpointSignatureError`` (-> 401) on failure. Never counter-signed.
+       -- EXCEPT when the envelope's (unauthenticated, merely peeked) CWT
+       ``iss`` matches an ENROLLED entry in ``allowlist``: then the
+       submitter's PINNED key is used instead, and ``kid`` is ignored
+       entirely. This is what makes an enrolled ``log_id`` a protected
+       identity -- a stranger cannot mint a valid stamp for it just by
+       self-signing with an arbitrary key and claiming that ``iss``; only a
+       signature made by the pinned key verifies.
+       ``CheckpointSignatureError`` (-> 401) on failure either way. Never
+       counter-signed on failure.
     3. Claims-map decode (kind, log_size, commitment, prev_size,
        prev_commitment, issued_at, CWT subject) -- ``NotACheckpointError``
        (-> 400) for any structurally invalid claim. This step only ever
@@ -149,8 +192,13 @@ def parse_and_verify_checkpoint_cose(cose_bytes: bytes) -> dict:
     Deliberately does NOT verify an attached ``consistency_proof`` (that is
     stage-2, per-``log_id`` continuity state this stateless route does not
     keep -- same STAGE 1 scope as the JSON path's ``witness_checkpoint``).
+    Foreign-accumulator entries (``grade`` ==
+    ``submitters.GRADE_COUNTERSIGNED_OBSERVED``) are explicitly NEVER
+    checked for internal consistency in v1 regardless -- this witness only
+    countersigns that it observed the submitted commitment, it does not
+    understand or verify a foreign log's own accumulator math.
     """
-    kid, content_type = _extract_protected_fields(cose_bytes)
+    kid, content_type, unauth_iss = _extract_protected_fields(cose_bytes)
     if content_type != CLL_CHECKPOINT_CONTENT_TYPE:
         raise NotACheckpointError(
             f"content_type is {content_type!r}, expected {CLL_CHECKPOINT_CONTENT_TYPE!r} "
@@ -161,8 +209,11 @@ def parse_and_verify_checkpoint_cose(cose_bytes: bytes) -> dict:
             "COSE checkpoint statement carries no 32-byte kid (label 4) -- cannot verify"
         )
 
+    entry = allowlist.get(unauth_iss) if allowlist is not None and unauth_iss else None
+    verify_key_raw = entry.pubkey if entry is not None else kid
+
     try:
-        pubkey_pem = _ed25519_pubkey_pem(kid)
+        pubkey_pem = _ed25519_pubkey_pem(verify_key_raw)
     except Exception as exc:  # noqa: BLE001 -- 32 arbitrary bytes always parse as SOME Ed25519 key, but stay defensive
         raise NotACheckpointError(f"kid is not a valid Ed25519 public key: {exc}") from exc
 
@@ -171,13 +222,24 @@ def parse_and_verify_checkpoint_cose(cose_bytes: bytes) -> dict:
     parsed = parse_signed_statement(cose_bytes, public_key_pem=pubkey_pem)
     if not parsed["signature_verified"]:
         raise CheckpointSignatureError(
-            "COSE checkpoint signature does not verify under its own kid"
+            "COSE checkpoint signature does not verify under its pinned enrolled key"
+            if entry is not None
+            else "COSE checkpoint signature does not verify under its own kid"
         )
 
     # Everything below reads only AUTHENTICATED fields (signature already verified above).
     issuer = parsed["issuer"]
     if not issuer:
         raise NotACheckpointError("statement carries no CWT issuer (log identity)")
+    if entry is not None and issuer != entry.log_id:
+        # Defensive only: verify_key_raw was chosen from `entry` based on the
+        # UNAUTHENTICATED peek, and the AUTHENTICATED issuer (from the SAME
+        # protected header the peek read) must match it exactly, since a
+        # single protected header cannot decode to two different `iss`
+        # values. A mismatch here means something upstream changed shape.
+        raise NotACheckpointError(
+            f"authenticated issuer {issuer!r} does not match resolved submitter {entry.log_id!r}"
+        )
 
     try:
         claims = cbor2.loads(parsed["payload"])
@@ -232,6 +294,12 @@ def parse_and_verify_checkpoint_cose(cose_bytes: bytes) -> dict:
         "root": root,
         "prev_size": prev_size,
         "prev_root": prev_root,
-        "key_id": kid.hex(),
+        # The key that was ACTUALLY checked: the pinned key for an enrolled
+        # submitter (never the self-asserted `kid`, which is ignored once an
+        # entry is resolved), else `kid` as before.
+        "key_id": entry.pubkey.hex() if entry is not None else kid.hex(),
         "timestamp": issued_at,
+        # Not part of _CHECKPOINT_RECORD_FIELDS / the signing body -- purely
+        # informational, served on the stamp for an enrolled submitter only.
+        "grade": entry.grade if entry is not None else None,
     }
