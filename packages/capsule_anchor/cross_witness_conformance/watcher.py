@@ -5,14 +5,15 @@ against it.
 
 USAGE:
     python -m capsule_anchor.cross_witness_conformance.watcher <checkpoint-file>
-        [--witness-base-url URL] [--state-file PATH] [--grade-field NAME]
+        [--witness-base-url URL] [--state-file PATH] [--expected-grade GRADE]
 
 Reads raw COSE_Sign1 checkpoint bytes from <checkpoint-file> (``-`` for
-stdin), runs the full report, and if a PREVIOUS checkpoint for the same
-log_id is on record, also runs the chain-continuity check against it. Exit
-code is 0 only if no check FAILed (an UNKNOWN -- e.g. the grade-label gap,
-or "no previous checkpoint yet" -- does not fail the run, but is always
-printed so it stays visible rather than silently passing).
+stdin), runs the full report (wire + enrolled identity/grade + witness
+tie-back), and if a PREVIOUS checkpoint for the same log_id is on record,
+also runs the chain-continuity check against it. Exit code is 0 only if no
+check FAILed (an UNKNOWN -- e.g. "no previous checkpoint yet" -- does not
+fail the run, but is always printed so it stays visible rather than
+silently passing).
 
 KNOWN GAP (see NOTES.md): witness.agentactioncapsule.org has no public
 endpoint that lets a third party DISCOVER a checkpoint's bytes by log_id --
@@ -30,15 +31,12 @@ import json
 import sys
 from pathlib import Path
 
-from capsule_anchor.anchoring.service import _checkpoint_digest
-
 from .checker import (
+    DEFAULT_EXPECTED_GRADE,
     DEFAULT_EXPECTED_LOG_ID,
-    DEFAULT_EXPECTED_PUBKEY_HEX,
     ConformanceReport,
     check_chain_continuity,
     check_checkpoint_wire,
-    check_countersign_grade,
     check_witness_tie_back,
     make_http_getter,
 )
@@ -63,8 +61,7 @@ def run(
     witness_base_url: str = DEFAULT_WITNESS_BASE_URL,
     state_file: Path = DEFAULT_STATE_FILE,
     expected_log_id: str = DEFAULT_EXPECTED_LOG_ID,
-    expected_pubkey_hex: str = DEFAULT_EXPECTED_PUBKEY_HEX,
-    grade_field: str | None = None,
+    expected_grade: str | None = DEFAULT_EXPECTED_GRADE,
     get=None,
 ) -> ConformanceReport:
     """`get` is injectable (a `TestClient(app).get`-shaped callable) so tests
@@ -72,17 +69,13 @@ def run(
     real HTTP client against `witness_base_url`.
     """
     report = check_checkpoint_wire(
-        cose_bytes, expected_log_id=expected_log_id, expected_pubkey_hex=expected_pubkey_hex
+        cose_bytes, expected_log_id=expected_log_id, expected_grade=expected_grade
     )
     if report.claims is None:
         return report  # wire-invalid -- nothing further to check
 
     getter = get or make_http_getter(witness_base_url)
     report.merge(check_witness_tie_back(report.claims, get=getter))
-
-    inclusion_resp = getter(f"/v1/inclusion/{_checkpoint_digest(report.claims)}")
-    inclusion_body = inclusion_resp.json() if inclusion_resp.status_code == 200 else {}
-    report.merge(check_countersign_grade(inclusion_body, grade_field=grade_field))
 
     previous = _load_state(state_file)
     if previous is not None and previous.get("log_id") == report.claims["log_id"]:
@@ -113,13 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--witness-base-url", default=DEFAULT_WITNESS_BASE_URL)
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
     parser.add_argument("--expected-log-id", default=DEFAULT_EXPECTED_LOG_ID)
-    parser.add_argument("--expected-pubkey-hex", default=DEFAULT_EXPECTED_PUBKEY_HEX)
-    parser.add_argument(
-        "--grade-field",
-        default=None,
-        help="field name the witness API uses for the observed/MMR-verified grade label, "
-        "once [witness-enroll-trace-registry-key] ships one (unset -> reports UNKNOWN)",
-    )
+    parser.add_argument("--expected-grade", default=DEFAULT_EXPECTED_GRADE)
     args = parser.parse_args(argv)
 
     cose_bytes = sys.stdin.buffer.read() if args.checkpoint_file == "-" else Path(args.checkpoint_file).read_bytes()
@@ -129,8 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         witness_base_url=args.witness_base_url,
         state_file=args.state_file,
         expected_log_id=args.expected_log_id,
-        expected_pubkey_hex=args.expected_pubkey_hex,
-        grade_field=args.grade_field,
+        expected_grade=args.expected_grade,
     )
     print(report.render())
     return 1 if report.has_failure else 0

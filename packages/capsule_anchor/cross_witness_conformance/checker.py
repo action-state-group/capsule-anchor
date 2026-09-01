@@ -9,6 +9,14 @@ this tooling works around: the witness has no discovery/read-by-log_id
 surface, so a checkpoint's bytes must be supplied out of band (this module
 never guesses at how).
 
+As of `#33` (merged onto `origin/main` while this was being built,
+2026-09-01), `capsule_anchor.anchoring.submitters.SubmitterAllowlist` pins
+`trace-registry/v1` to AgenTrust's enrolled key AND labels the checkpoint's
+`grade` (`"countersigned-observed"` for their foreign accumulator, never
+`"mmr-verified"`) -- both handled here by passing the SAME committed
+allowlist config into `parse_and_verify_checkpoint_cose` that the live
+witness itself loads, rather than re-deriving either independently.
+
 Each ``check_*`` function returns a :class:`ConformanceReport` and never
 raises -- a malformed/adversarial input is a FAIL entry, not an exception,
 so a caller can always render a report even for garbage input.
@@ -33,13 +41,15 @@ from capsule_anchor.anchoring.checkpoint_cose import (
     parse_and_verify_checkpoint_cose,
 )
 from capsule_anchor.anchoring.service import _checkpoint_digest
+from capsule_anchor.anchoring.submitters import GRADE_COUNTERSIGNED_OBSERVED, SubmitterAllowlist
 
-#: Identity enrolled 2026-09-01 (Imran, AgenTrust) for the trace-registry
-#: cross-witness submitter -- see [witness-enroll-trace-registry-key]. A
-#: single place to update if the key is ever rotated/re-enrolled; callers
-#: may also override per-call.
+#: Identity enrolled 2026-09-01 (Imran, AgenTrust) -- see
+#: `packages/capsule_anchor/config/checkpoint_submitters.json`, the single
+#: committed source of truth for both the log_id and its expected grade
+#: (`accumulator: "foreign"` -> `GRADE_COUNTERSIGNED_OBSERVED`). Callers may
+#: override either per-call.
 DEFAULT_EXPECTED_LOG_ID = "trace-registry/v1"
-DEFAULT_EXPECTED_PUBKEY_HEX = "bc133259c094f63694b4ec48a295d7501a9a0cd536df5631fb4663c155f7bc90"
+DEFAULT_EXPECTED_GRADE = GRADE_COUNTERSIGNED_OBSERVED
 
 CheckStatus = str  # "PASS" | "FAIL" | "UNKNOWN"
 
@@ -84,34 +94,48 @@ def check_checkpoint_wire(
     cose_bytes: bytes,
     *,
     expected_log_id: str = DEFAULT_EXPECTED_LOG_ID,
-    expected_pubkey_hex: str = DEFAULT_EXPECTED_PUBKEY_HEX,
+    expected_grade: str | None = DEFAULT_EXPECTED_GRADE,
+    allowlist: SubmitterAllowlist | None = None,
 ) -> ConformanceReport:
-    """Task item (1): wire conformance for one submitted checkpoint.
+    """Task items (1) and (2): wire conformance + enrolled-identity/grade for
+    one submitted checkpoint.
 
     Independently decodes + verifies the COSE_Sign1 envelope (content type
     `application/cll-checkpoint+cbor`, claim set, CWT `sub` pattern,
-    signature self-consistency) via the SAME independent decoder the live
-    witness itself runs (`capsule_anchor.anchoring.checkpoint_cose`) -- a
-    PASS here means "the witness would accept this", not just "this looks
-    plausible."
+    signature) via the SAME independent decoder AND the SAME committed
+    allowlist config the live witness itself loads
+    (`capsule_anchor.anchoring.checkpoint_cose` + `.submitters`) -- a PASS
+    here means "the witness would accept this, from this identity, at this
+    grade", not just "this looks plausible." `allowlist` defaults to
+    `SubmitterAllowlist.from_env_or_default()` (the in-package committed
+    config); pass a different one only to test against a non-default entry.
 
-    On top of that this checks two things the generic decoder does NOT,
-    because it has no notion of who's enrolled: (a) the CWT issuer equals
-    `expected_log_id`, (b) the signing key (COSE `kid`) equals the specific
-    ENROLLED public key. A checkpoint can be internally self-consistent (a
-    valid signature under its OWN kid) while being signed by an entirely
-    different keypair -- catching that is the read-side mirror of the
-    enrollment task's own server-side "unknown key rejects" check.
+    Because `parse_and_verify_checkpoint_cose` now PINS verification to the
+    enrolled key for `expected_log_id` (the self-asserted COSE `kid` is
+    ignored entirely once an entry matches -- see `submitters.py`), a
+    checkpoint claiming `trace-registry/v1` but signed with any OTHER key
+    fails at the signature stage below (`CheckpointSignatureError`, from the
+    server's own code) -- there is no separate "right signature, wrong
+    identity" case left to catch on the read side; the server closes it.
+
+    `claims["grade"]` (also server-computed) is checked against
+    `expected_grade` -- for the committed config's `accumulator: "foreign"`
+    entry that must be `GRADE_COUNTERSIGNED_OBSERVED`, never
+    `GRADE_MMR_VERIFIED`. `grade` is `None` whenever `log_id` isn't resolved
+    against the allowlist at all (e.g. the entry went missing from a
+    deployed config) -- that FAILs this check too, rather than skipping it.
     """
+    if allowlist is None:
+        allowlist = SubmitterAllowlist.from_env_or_default()
     report = ConformanceReport()
     try:
-        claims = parse_and_verify_checkpoint_cose(cose_bytes)
+        claims = parse_and_verify_checkpoint_cose(cose_bytes, allowlist=allowlist)
     except NotACheckpointError as exc:
         report.add("wire_structure", "FAIL", f"not a well-formed CLL checkpoint: {exc}")
         return report
     except CheckpointSignatureError as exc:
         report.add("wire_structure", "PASS", "content-type + claim set well-formed")
-        report.add("signature_self_consistent", "FAIL", str(exc))
+        report.add("signature_verified", "FAIL", str(exc))
         return report
 
     report.claims = claims
@@ -121,7 +145,13 @@ def check_checkpoint_wire(
         f"content-type application/cll-checkpoint+cbor; kind={claims['kind']!r}; "
         f"log_size={claims['mmr_size']}; prev_size={claims['prev_size']}",
     )
-    report.add("signature_self_consistent", "PASS", "COSE_Sign1 verifies under its own kid")
+    report.add(
+        "signature_verified",
+        "PASS",
+        "COSE_Sign1 verifies under "
+        + ("its pinned enrolled key" if claims.get("grade") is not None else "its own self-asserted kid")
+        + f" (key_id={claims['key_id']})",
+    )
     # parse_and_verify_checkpoint_cose already enforces sub == f"{iss}#{log_size}"
     # before returning claims at all -- if we got here, it passed.
     report.add(
@@ -139,14 +169,17 @@ def check_checkpoint_wire(
             f"iss == {claims['log_id']!r}, expected {expected_log_id!r}",
         )
 
-    if claims["key_id"] == expected_pubkey_hex:
-        report.add("enrolled_key", "PASS", f"kid == enrolled key {expected_pubkey_hex}")
+    if expected_grade is None:
+        report.add("countersign_grade", "UNKNOWN", "no expected grade configured for this check")
+    elif claims.get("grade") == expected_grade:
+        report.add("countersign_grade", "PASS", f"grade={claims['grade']!r}")
     else:
         report.add(
-            "enrolled_key",
+            "countersign_grade",
             "FAIL",
-            f"kid == {claims['key_id']!r}, expected the ENROLLED key {expected_pubkey_hex!r} "
-            "-- checkpoint is self-consistent but NOT signed by the enrolled identity",
+            f"grade={claims.get('grade')!r}, expected {expected_grade!r} -- a foreign "
+            "accumulator must never be presented as mmr-verified (and grade=None means "
+            f"{claims['log_id']!r} isn't resolving against the allowlist at all)",
         )
 
     return report
@@ -179,17 +212,28 @@ def make_http_getter(base_url: str) -> Callable[[str], _Resp]:
 
 
 def check_witness_tie_back(claims: dict, *, get: Callable[[str], Any]) -> ConformanceReport:
-    """Task item (1)'s "fetch it from the witness" step, and item (2)'s
-    "confirm the witness countersigned" step.
+    """Task item (1)'s "fetch it from the witness" step: confirm the witness
+    actually countersigned THIS exact checkpoint.
 
-    The witness's `POST /checkpoints` response carries no claim fields (see
-    NOTES.md) and there is no query-by-log_id surface, so this does NOT
-    discover the checkpoint -- it recomputes the checkpoint's `capsule_id`
-    exactly as the witness does (`_checkpoint_digest`) from claims already
-    obtained out of band, then independently verifies the COSE Receipt the
-    witness holds for that exact digest via `GET /v1/inclusion/{capsule_id}`
-    -- proving the witness actually countersigned THIS checkpoint, not
-    merely that something from this submitter exists somewhere.
+    Note this is separate from the grade check (folded into
+    `check_checkpoint_wire` instead): `grade` is only ever returned
+    synchronously on the ORIGINAL `POST /checkpoints` response (which
+    AgenTrust sees, not us) -- `InclusionResolveResponse` (`GET /v1/
+    inclusion/{capsule_id}`, what this function reads) never carries it. So
+    "confirm the witness countersigned under the observed grade" resolves,
+    from our external vantage point, to recomputing what grade the witness
+    WOULD have/DID assign from the same committed allowlist config
+    ourselves (`check_checkpoint_wire`), not to reading it back here.
+
+    The witness's `POST /checkpoints` response also carries no claim fields
+    at all (see NOTES.md) and there is no query-by-log_id surface, so this
+    function does NOT discover the checkpoint -- it recomputes the
+    checkpoint's `capsule_id` exactly as the witness does
+    (`_checkpoint_digest`) from claims already obtained out of band, then
+    independently verifies the COSE Receipt the witness holds for that exact
+    digest via `GET /v1/inclusion/{capsule_id}` -- proving the witness
+    actually countersigned THIS checkpoint, not merely that something from
+    this submitter exists somewhere.
     """
     report = ConformanceReport()
     capsule_id = _checkpoint_digest(claims)
@@ -238,56 +282,6 @@ def check_witness_tie_back(claims: dict, *, get: Callable[[str], Any]) -> Confor
         )
     else:
         report.add("receipt_offline_verify", "FAIL", "; ".join(result.errors) or "receipt did not verify")
-    return report
-
-
-def check_countersign_grade(
-    inclusion_body: dict,
-    *,
-    grade_field: str | None = None,
-    expected_value: str = "observed",
-) -> ConformanceReport:
-    """Task item (2): confirm the witness published this FOREIGN checkpoint
-    under the observed grade (records/timestamps/publishes a foreign
-    accumulator; does NOT verify its consistency proofs) -- distinctly
-    labeled from an MMR-verified (our own log's) checkpoint. Per the
-    launch-tasks brief (`_work/cross-witness-launch-tasks-2026-08-31.md`
-    Task 1): "the response object and docs MUST label this grade distinctly
-    ... never present the two as the same guarantee."
-
-    GAP FOUND while building this (2026-09-01, base_sha 26083a7 on
-    origin/main): no such field exists ANYWHERE in the witness API today --
-    not on `CheckpointStampResponse` (the `POST /checkpoints` response) nor
-    `InclusionResolveResponse` (the `GET /v1/inclusion/{capsule_id}`
-    response). It's expected to land with [witness-enroll-trace-registry-
-    key]. Until `grade_field` is passed (the actual field name it ships
-    with), this reports UNKNOWN rather than silently passing -- the absence
-    of a grade label is exactly the defect this check exists to catch, so
-    it must stay visible, not get swallowed as "nothing to check."
-    """
-    report = ConformanceReport()
-    if grade_field is None:
-        report.add(
-            "countersign_grade",
-            "UNKNOWN",
-            "no grade/status field exists in the witness API yet (checked "
-            "CheckpointStampResponse + InclusionResolveResponse as of "
-            "origin/main 26083a7) -- cannot confirm the 'observed, not "
-            "MMR-verified' label until [witness-enroll-trace-registry-key] "
-            "ships one and this call is updated with the field name; do "
-            "NOT read this as a pass",
-        )
-        return report
-    value = inclusion_body.get(grade_field)
-    if value == expected_value:
-        report.add("countersign_grade", "PASS", f"{grade_field}={value!r}")
-    else:
-        report.add(
-            "countersign_grade",
-            "FAIL",
-            f"{grade_field}={value!r}, expected {expected_value!r} -- a foreign "
-            "checkpoint must never be presented as MMR-verified",
-        )
     return report
 
 
