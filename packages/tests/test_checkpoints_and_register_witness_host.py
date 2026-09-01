@@ -470,3 +470,231 @@ def test_legacy_v1_checkpoint_route_no_longer_exists(client, key):
         "/v1/checkpoint", content=cose, headers={"Content-Type": _CLL_CONTENT_TYPE}
     )
     assert resp.status_code == 404
+
+
+# --- enrolled submitter allowlist (submitters.py) -----------------------------
+#
+# [witness-enroll-trace-registry-key]: /checkpoints was fully open (any
+# self-asserted `kid` is trusted, for any `log_id`) before this allowlist
+# existed -- see every test above, none of which enroll a log_id and all of
+# which keep passing unmodified (proving non-enrolled log_ids stay open).
+# These tests cover the NEW, additive behavior: for a log_id present in the
+# config-driven allowlist, verification uses the PINNED key from config, and
+# the self-asserted `kid` is ignored entirely.
+
+from capsule_anchor.anchoring.router import (  # noqa: E402
+    _SlidingWindowLimiter,
+    configure_submitters,
+)
+from capsule_anchor.anchoring.submitters import (  # noqa: E402
+    ACCUMULATOR_FOREIGN,
+    ACCUMULATOR_NATIVE_MMR,
+    DEFAULT_CONFIG_PATH,
+    GRADE_COUNTERSIGNED_OBSERVED,
+    GRADE_MMR_VERIFIED,
+    SubmitterAllowlist,
+)
+
+_TRACE_REGISTRY_LOG_ID = "trace-registry/v1"
+_TRACE_REGISTRY_PUBKEY_HEX = (
+    "bc133259c094f63694b4ec48a295d7501a9a0cd536df5631fb4663c155f7bc90"
+)
+
+
+@pytest.fixture()
+def agentrust_key() -> Ed25519PrivateKey:
+    """A LOCALLY GENERATED test key standing in for AgenTrust's real private
+    key (which this repo never holds) -- used to build "honest" enrolled
+    submissions. Tests that need to prove the PINNED key (not this one) is
+    what's actually checked configure the allowlist with a DIFFERENT pubkey
+    than this key's own."""
+    return Ed25519PrivateKey.generate()
+
+
+def _enroll(
+    client: TestClient,
+    *,
+    log_id: str,
+    pubkey: bytes,
+    accumulator: str = ACCUMULATOR_FOREIGN,
+    rate_limit_per_min: int = 60,
+) -> None:
+    """Configure the shared allowlist with exactly one entry. Safe to call
+    after ``client`` was built -- ``configure_submitters`` is process-wide
+    module state, same pattern as ``configure_service``, and the NEXT
+    ``create_app()`` call (the next test's ``client`` fixture) resets it back
+    to the real shipped default via ``app.py``'s own startup wiring."""
+    configure_submitters(
+        SubmitterAllowlist.from_list(
+            [
+                {
+                    "log_id": log_id,
+                    "pubkey_hex": pubkey.hex(),
+                    "accumulator": accumulator,
+                    "rate_limit_per_min": rate_limit_per_min,
+                }
+            ]
+        )
+    )
+
+
+def test_real_shipped_config_enrolls_trace_registry_with_foreign_grade():
+    """Pins the ACTUAL committed config file, not a synthetic one: the
+    exact identity Imran provided (2026-09-01) must be the one that ships."""
+    allowlist = SubmitterAllowlist.load(DEFAULT_CONFIG_PATH)
+    entry = allowlist.get(_TRACE_REGISTRY_LOG_ID)
+    assert entry is not None, "trace-registry/v1 is not enrolled in the shipped config"
+    assert entry.pubkey.hex() == _TRACE_REGISTRY_PUBKEY_HEX
+    assert entry.accumulator == ACCUMULATOR_FOREIGN
+    assert entry.grade == GRADE_COUNTERSIGNED_OBSERVED
+
+
+def test_enrolled_submission_signed_by_pinned_key_accepted_with_grade(client, agentrust_key):
+    """iss contains a "/" ([witness-enroll-trace-registry-key] item 1) and
+    the subject pattern `<iss>#<log_size>` -- both flow through unchanged;
+    this is the honest, correctly-signed enrolled submission."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    cose = _checkpoint_cose(
+        agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=42,
+        new_peaks=_peaks_for(f"{_TRACE_REGISTRY_LOG_ID}-42"),
+    )
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+
+
+def test_enrolled_native_mmr_submitter_gets_mmr_verified_grade(client, agentrust_key):
+    _enroll(
+        client, log_id="some-native-log", pubkey=agentrust_key.public_key().public_bytes_raw(),
+        accumulator=ACCUMULATOR_NATIVE_MMR,
+    )
+    cose = _checkpoint_cose(
+        agentrust_key, log_id="some-native-log", mmr_size=1, new_peaks=_peaks_for("native-1"),
+    )
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    assert body["grade"] == GRADE_MMR_VERIFIED
+
+
+def test_non_enrolled_log_id_stays_open_even_with_allowlist_configured(client, key, agentrust_key):
+    """Regression guard: enrolling trace-registry/v1 must not gate any OTHER
+    log_id -- a default capsule-emit client using its own arbitrary log_id
+    and self-asserted kid keeps working exactly as before enrollment."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    cose = _checkpoint_cose(key, log_id="some-other-log", mmr_size=10, new_peaks=_peaks_for("other-10"))
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    assert body["grade"] is None
+
+
+def test_checkpoint_signed_by_unenrolled_key_but_claiming_enrolled_iss_rejects_401(client, key, agentrust_key):
+    """The core protection: enrolling trace-registry/v1 pins verification to
+    AgenTrust's key. A checkpoint claiming iss=trace-registry/v1 but signed
+    (and self-asserting kid) with a DIFFERENT, unenrolled key must be
+    rejected -- proves the self-asserted kid is ignored for an enrolled
+    iss, not merely re-trusted."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    impostor_key = key  # a completely different, unenrolled keypair
+    cose = _checkpoint_cose(
+        impostor_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=7,
+        new_peaks=_peaks_for(f"{_TRACE_REGISTRY_LOG_ID}-impostor-7"),
+    )
+    status, body = _post_checkpoint(client, cose)
+    assert status == 401, body
+    assert "signature" in body["detail"].lower()
+
+
+def test_tampered_signature_under_enrolled_iss_rejects_with_signature_error(client, agentrust_key):
+    """A locally-constructed COSE_Sign1 carrying iss=trace-registry/v1 whose
+    signature bytes don't verify (here: payload tampered post-signing, same
+    technique as test_invalid_signature_refused_401_and_never_countersigned
+    above) rejects with a signature error -- proving the PINNED key is what
+    gets checked, not merely "was this well-formed"."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    cose = _checkpoint_cose(
+        agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=100,
+        new_peaks=_peaks_for(f"{_TRACE_REGISTRY_LOG_ID}-100"),
+    )
+    tampered = _tamper_payload(
+        cose,
+        _checkpoint_claims(mmr_size=999, new_peaks=_peaks_for(f"{_TRACE_REGISTRY_LOG_ID}-999")),
+    )
+    status, body = _post_checkpoint(client, tampered)
+    assert status == 401, body
+    assert "signature" in body["detail"].lower()
+
+
+def test_unknown_unenrolled_log_id_impersonation_still_rejects_cleanly(client, key, agentrust_key):
+    """A checkpoint self-signed end-to-end (valid signature under ITS OWN
+    self-asserted kid) but claiming the enrolled trace-registry/v1 identity
+    with a key that was never enrolled -- still rejects cleanly (401, never
+    a 500, never silently accepted as AgenTrust's stamp)."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    unknown_key = Ed25519PrivateKey.generate()
+    cose = _checkpoint_cose(
+        unknown_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=3,
+        new_peaks=_peaks_for(f"{_TRACE_REGISTRY_LOG_ID}-unknown-3"),
+    )
+    status, body = _post_checkpoint(client, cose)
+    assert status == 401, body
+
+
+def test_grade_is_not_part_of_the_signing_body_or_digest(client, agentrust_key):
+    """grade must be purely informational -- an enrolled submission's
+    entry_hash/digest is identical to what a non-enrolled submission with
+    the same 9 CheckpointRecord fields would produce, so a relying party
+    who only holds the 9-field record (no grade) can still recompute
+    entry_hash independently (see CheckpointStampResponse's own docstring)."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    new_peaks = _peaks_for(f"{_TRACE_REGISTRY_LOG_ID}-55")
+    cose = _checkpoint_cose(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=55, new_peaks=new_peaks)
+    expected = _expected_record(
+        log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=55, new_peaks=new_peaks,
+        key_id=agentrust_key.public_key().public_bytes_raw().hex(),
+    )
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    assert body["entry_hash"] == _entry_hash(expected)
+
+
+def test_per_submitter_rate_limit_429_independent_of_global_limiter(client, agentrust_key, monkeypatch):
+    """The global _POST_LIMITER budget (300/min) is untouched; a submitter's
+    OWN configured rate_limit_per_min is a SEPARATE, additional budget."""
+    monkeypatch.setattr(
+        "capsule_anchor.anchoring.router._POST_LIMITER",
+        _SlidingWindowLimiter(max_calls=100, window_s=60.0),
+    )
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        rate_limit_per_min=1,
+    )
+    cose1 = _checkpoint_cose(
+        agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1, new_peaks=_peaks_for("rl-1"),
+    )
+    cose2 = _checkpoint_cose(
+        agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=2, new_peaks=_peaks_for("rl-2"),
+        prev_size=1, prev_peaks=_peaks_for("rl-1"),
+    )
+    s1, b1 = _post_checkpoint(client, cose1)
+    s2, b2 = _post_checkpoint(client, cose2)
+    assert s1 == 200, b1
+    assert s2 == 429, b2
+
+
+def test_per_submitter_rate_limit_does_not_affect_non_enrolled_log_ids(client, key, agentrust_key):
+    """The per-submitter budget is scoped to the enrolled log_id only -- an
+    unrelated, non-enrolled log_id is unaffected even after the enrolled
+    submitter's own budget is exhausted."""
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        rate_limit_per_min=1,
+    )
+    cose_enrolled = _checkpoint_cose(
+        agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1, new_peaks=_peaks_for("rl-scope-1"),
+    )
+    s1, b1 = _post_checkpoint(client, cose_enrolled)
+    assert s1 == 200, b1
+
+    cose_other = _checkpoint_cose(key, log_id="unrelated-log", mmr_size=1, new_peaks=_peaks_for("rl-scope-2"))
+    s2, b2 = _post_checkpoint(client, cose_other)
+    assert s2 == 200, b2

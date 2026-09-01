@@ -61,7 +61,7 @@ capsule-anchor = "capsule_anchor.app:main"
 where = ["packages"]
 
 [tool.setuptools.package-data]
-capsule_anchor = ["static/*.html"]
+capsule_anchor = ["static/*.html", "config/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages"]

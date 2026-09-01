@@ -8,6 +8,19 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Added
 
+- **Enrolled external checkpoint submitters (`submitters.py`)**: `POST /checkpoints` gains a
+  config-driven allowlist (`packages/capsule_anchor/config/checkpoint_submitters.json`,
+  committed, never hand-edited on the box) pinning a specific `log_id` (CWT `iss`) to a
+  specific Ed25519 key. For an enrolled `log_id`, verification uses ONLY the pinned key — the
+  envelope's self-asserted `kid` is ignored — closing the impersonation gap where anyone could
+  mint a stamp claiming someone else's `log_id` by self-signing. Every non-enrolled `log_id`
+  keeps the pre-existing open self-asserted-`kid` behavior, unchanged. `CheckpointStampResponse`
+  gains a `grade` field (`null` for non-enrolled submissions), `"mmr-verified"` or
+  `"countersigned-observed"` for an enrolled submitter depending on its configured
+  `accumulator` — a foreign accumulator is honestly labeled distinct from an MMR-verified one
+  and is never checked for internal consistency (v1 scope). Each enrolled entry also gets its
+  own `rate_limit_per_min`, additive to the existing global limiter. First entry: the AgenTrust
+  trace registry (`trace-registry/v1`, foreign accumulator).
 - **Witness-host canonical routes, `POST /checkpoints` (default) + `POST /register`
   (opt-in)**: single-host reconciliation (2026-08-27) of the checkpoint-only witness
   surface added in `witness-checkpoint-only-stage1`. `/checkpoints` is a rename of that

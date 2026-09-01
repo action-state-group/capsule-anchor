@@ -116,6 +116,17 @@ def create_app() -> FastAPI:
         _svc = AnchorerService(attestor=attestor)
     cfg_anchor(_svc)
 
+    # Enrolled external checkpoint submitters (POST /checkpoints identity
+    # pinning) -- loads from CAPSULE_ANCHOR_CHECKPOINT_SUBMITTERS_FILE if
+    # set, else the in-package default (packages/capsule_anchor/config/
+    # checkpoint_submitters.json, shipped in the image), else empty (no
+    # log_id is gated). A PRESENT-but-malformed file fails startup closed --
+    # see submitters.SubmitterAllowlist.from_env_or_default.
+    from capsule_anchor.anchoring.router import configure_submitters
+    from capsule_anchor.anchoring.submitters import SubmitterAllowlist
+
+    configure_submitters(SubmitterAllowlist.from_env_or_default())
+
     # Background periodic STH refresh — keeps the persisted STH fresh even
     # during idle periods. Interval defaults to 60 s; override via
     # CAPSULE_ANCHOR_STH_REFRESH_INTERVAL (seconds). This is a daemon thread

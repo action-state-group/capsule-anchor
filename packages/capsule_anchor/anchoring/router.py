@@ -90,6 +90,7 @@ from .service import (
     NotACheckpointError,
     RollbackError,
 )
+from .submitters import SubmitterAllowlist
 
 
 class _SlidingWindowLimiter:
@@ -129,6 +130,18 @@ _POST_LIMITER = _SlidingWindowLimiter(max_calls=300, window_s=60.0)
 # Shared anchorer; replaced by configure_service() in the app factory.
 _SERVICE = AnchorerService()
 
+# Enrolled external checkpoint submitters (log_id -> pinned key); empty by
+# default (no gate on any log_id) -- replaced by configure_submitters() in
+# the app factory. See submitters.py for what "enrolled" changes.
+_SUBMITTERS = SubmitterAllowlist()
+
+# Per-submitter-identity sliding-window limiters, keyed by log_id, built
+# lazily from each enrolled entry's own rate_limit_per_min -- separate from
+# and in ADDITION to the global _POST_LIMITER above (an enrolled submitter's
+# traffic is bounded by both).
+_SUBMITTER_LIMITERS: dict[str, _SlidingWindowLimiter] = {}
+_SUBMITTER_LIMITERS_LOCK = threading.Lock()
+
 
 def get_service() -> AnchorerService:
     return _SERVICE
@@ -138,6 +151,32 @@ def configure_service(service: AnchorerService) -> None:
     """Install a durable-backed anchorer (called by the app factory from config)."""
     global _SERVICE
     _SERVICE = service
+
+
+def get_submitters() -> SubmitterAllowlist:
+    return _SUBMITTERS
+
+
+def configure_submitters(allowlist: SubmitterAllowlist) -> None:
+    """Install the enrolled-submitter allowlist (called by the app factory).
+
+    Also resets the per-submitter limiter cache -- a stale limiter from a
+    PREVIOUS allowlist (e.g. between test runs) must never be reused against
+    a differently-configured entry.
+    """
+    global _SUBMITTERS
+    _SUBMITTERS = allowlist
+    with _SUBMITTER_LIMITERS_LOCK:
+        _SUBMITTER_LIMITERS.clear()
+
+
+def _submitter_rate_limit_ok(log_id: str, max_calls: int) -> bool:
+    with _SUBMITTER_LIMITERS_LOCK:
+        limiter = _SUBMITTER_LIMITERS.get(log_id)
+        if limiter is None:
+            limiter = _SlidingWindowLimiter(max_calls=max_calls, window_s=60.0)
+            _SUBMITTER_LIMITERS[log_id] = limiter
+    return limiter.is_allowed(log_id)
 
 
 class AnchorRequest(BaseModel):
@@ -264,6 +303,14 @@ class CheckpointStampResponse(BaseModel):
     This is existence-and-time evidence for THIS checkpoint only — it does
     not attest that the log wasn't rewritten around it (no per-log_id
     continuity is checked here; see the module docstring).
+
+    ``grade`` is populated only when ``log_id`` is an ENROLLED submitter
+    (``submitters.py``): ``"mmr-verified"`` for a native CLL log, or
+    ``"countersigned-observed"`` for a foreign accumulator this witness does
+    not independently verify -- it only observed and countersigned the
+    submitted commitment. ``None`` for every non-enrolled ``log_id``, same
+    as before enrollment existed; never presented as equivalent to either
+    grade.
     """
 
     receipt_b64: str
@@ -271,6 +318,7 @@ class CheckpointStampResponse(BaseModel):
     entry_hash_scheme: str
     leaf_index: int
     tree_size: int
+    grade: str | None = None
 
 
 def get_router() -> APIRouter:
@@ -545,11 +593,24 @@ def get_router() -> APIRouter:
         if not _POST_LIMITER.is_allowed():
             raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
         try:
-            cp = parse_and_verify_checkpoint_cose(cose_bytes)
+            cp = parse_and_verify_checkpoint_cose(cose_bytes, allowlist=get_submitters())
         except NotACheckpointError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except CheckpointSignatureError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
+        # Per-submitter-identity budget, IN ADDITION to the global limiter
+        # above -- only meaningful for an ENROLLED log_id (grade is not None):
+        # a non-enrolled log_id has no pinned identity to rate-limit
+        # separately and stays on the shared global budget only.
+        if cp.get("grade") is not None:
+            entry = get_submitters().get(cp["log_id"])
+            if entry is not None and not _submitter_rate_limit_ok(
+                entry.log_id, entry.rate_limit_per_min
+            ):
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"rate limit exceeded for submitter {entry.log_id!r} — try again later",
+                )
         svc = get_service()
         result = svc.witness_checkpoint(cp)
         return CheckpointStampResponse(
@@ -558,6 +619,7 @@ def get_router() -> APIRouter:
             entry_hash_scheme=result.entry_hash_scheme,
             leaf_index=result.leaf_index,
             tree_size=result.tree_size,
+            grade=cp.get("grade"),
         )
 
     @canonical.post("/checkpoints", response_model=CheckpointStampResponse)
@@ -588,6 +650,19 @@ def get_router() -> APIRouter:
         the envelope's own ``kid`` -- capsule-anchor never imports
         capsule-emit for this); a checkpoint whose signature doesn't verify
         is refused with **401** and is never counter-signed.
+
+        **Enrolled submitters** (``submitters.py``, config-driven, NOT open
+        enrollment): when the envelope's CWT ``iss`` names an enrolled
+        ``log_id``, verification instead uses that submitter's PINNED key --
+        the self-asserted ``kid`` is ignored entirely for that ``iss`` -- so
+        a stranger cannot mint a stamp claiming an enrolled identity by
+        self-signing with their own key. Every other ``log_id`` keeps the
+        open self-asserted-``kid`` behavior above, unchanged. An enrolled
+        submitter's stamp additionally carries a ``grade``
+        (``"mmr-verified"`` or ``"countersigned-observed"`` for a foreign
+        accumulator this witness only observes and does not independently
+        verify) and is subject to its own configured per-identity rate limit
+        on top of the global one.
 
         STATELESS (stage 1): this stamp proves existence-and-time for THIS
         checkpoint only. It does not check monotonicity or chain-linkage
