@@ -3,21 +3,31 @@
 # Account-portable: every project/region/registry value is a substitution.
 # Nothing is hardcoded.
 #
-# Usage:
+# Usage — always pass _TAG as the git commit SHA, never "latest": a static
+# tag makes "is the deployed revision == origin/main?" unanswerable from the
+# image alone (see deploy/check_revision.sh, which diffs this tag against
+# `git rev-parse origin/main`):
 #   gcloud builds submit --config deploy/cloudbuild.yaml \
 #     --substitutions \
 #       _REGION=us-central1,\
 #       _REGISTRY=us-central1-docker.pkg.dev/PROJECT_ID/anchor,\
-#       _SIGNING_KEY_SECRET=capsule-anchor-signing-key
+#       _SIGNING_KEY_SECRET=capsule-anchor-signing-key,\
+#       _TAG=$(git rev-parse --short HEAD)
 
 substitutions:
   _REGION: ""
   _REGISTRY: ""
-  _SERVICE: "capsule-anchor"
+  # The deployed Cloud Run SERVICE name (finalized 2026-08-28: "capsule-witness",
+  # not "capsule-anchor" — the repo/codebase and secret/instance names stay
+  # capsule-anchor; only the running service is capsule-witness).
+  _SERVICE: "capsule-witness"
   _SIGNING_KEY_SECRET: "capsule-anchor-signing-key"
   # Secret Manager secret name for the Postgres connection URL. Required.
   # The service refuses to start without it (see app.py fail-closed check).
   _DATABASE_SECRET: "capsule-anchor-database-url"
+  # Cloud SQL instance ID (not the full connection name — $PROJECT_ID and
+  # _REGION are prepended below).
+  _CLOUDSQL_INSTANCE: "capsule-anchor-pg"
   _TAG: "latest"
   _MAX_INSTANCES: "1"
 
@@ -52,6 +62,7 @@ steps:
       - "--port=8000"
       - "--set-env-vars=CAPSULE_ANCHOR_HOST=0.0.0.0,CAPSULE_ANCHOR_PORT=8000"
       - "--set-secrets=CAPSULE_ANCHOR_SIGNING_KEY=${_SIGNING_KEY_SECRET}:latest,CAPSULE_ANCHOR_DATABASE_URL=${_DATABASE_SECRET}:latest"
+      - "--add-cloudsql-instances=$PROJECT_ID:${_REGION}:${_CLOUDSQL_INSTANCE}"
       - "--max-instances=${_MAX_INSTANCES}"
       - "--allow-unauthenticated"
       - "--no-use-http2"

@@ -186,24 +186,30 @@ gcloud builds submit --config deploy/cloudbuild.yaml \
 
 ## Uptime monitoring
 
-Create a Cloud Monitoring uptime check on `/health` so any future DB-connectivity
-500 pages on-call immediately rather than going unnoticed:
+`deploy/monitoring.sh` creates BOTH the read-path and checkpoint-submit-path
+checks as code (not manual Cloud Console clicks), wired to an existing
+notification channel:
 
 ```bash
-# Create a public HTTPS uptime check on /health (pings every 1 min from global PoPs).
-gcloud monitoring uptime create "capsule-anchor /health" \
-  --resource-type=uptime-url \
-  --resource-labels="host=anchor.agentactioncapsule.org,project_id=PROJECT_ID" \
-  --path=/health \
-  --period=1 \
-  --timeout=10 \
-  --project=PROJECT_ID
+PROJECT_ID=PROJECT_ID \
+NOTIFICATION_CHANNEL=projects/PROJECT_ID/notificationChannels/CHANNEL_ID \
+  deploy/monitoring.sh
 ```
 
-The check passes when the response is HTTP 200. A non-200 (including 500) triggers
-a Cloud Monitoring alert if an alerting policy is attached. Set one up in the
-Cloud Console: Monitoring → Alerting → Create policy → Uptime check policy →
-notify via email or PagerDuty.
+- **Read path**: `GET /health` on `witness.agentactioncapsule.org`, pings every
+  1 min from global PoPs, alerts on any non-200.
+- **Submit path**: `POST /checkpoints` with a deliberately-invalid body,
+  expecting the documented named-refusal `400`. This proves the write path is
+  alive and enforcing its input contract without needing a real allowlisted
+  submitter identity (see [witness-external-submitter]) — a 200, a 5xx, or a
+  timeout all fail the check.
+
+Both checks page the same channel as the legacy `anchor.aac /health` check
+(kept, unchanged) within ~2 minutes of a failure.
+
+**Public status answer, if asked:** witness.agentactioncapsule.org is monitored
+24/7 on both its read and checkpoint-submit paths from Google's global uptime
+network, with alerting to on-call within two minutes of any failure.
 
 Smoke-test the write path after each deploy (substitute a real 64-hex capsule_id):
 
@@ -220,3 +226,48 @@ curl -s https://anchor.agentactioncapsule.org/health | python3 -m json.tool
 # verify /anchor/sth returns a signed tree head
 curl -s https://anchor.agentactioncapsule.org/anchor/sth | python3 -m json.tool
 ```
+
+## Load sanity (burst testing)
+
+`deploy/burst_test.py` fires concurrent requests at `POST /checkpoints` and
+the read routes at a configurable rate, reporting a status-code histogram and
+latency percentiles per simulated submitter — including a distinguished
+"demo identity" so a run can confirm noisy background submitters don't starve
+the one identity actually demoing live.
+
+**Do not run this against production before [witness-external-submitter]
+lands** — before that, `/checkpoints` has only a single global rate limit, so
+a burst test proves the global limiter works, not that per-submitter limits
+protect the demo identity from other traffic:
+
+```bash
+python3 deploy/burst_test.py \
+  --host https://witness.agentactioncapsule.org \
+  --demo-key-hex "$DEMO_IDENTITY_ED25519_SEED_HEX" \
+  --demo-log-id demo-webinar-2026-09-09 \
+  --noisy-submitters 5 --rate 20 --duration 30
+```
+
+## Revision verification
+
+`deploy/check_revision.sh` mechanically checks the deployed Cloud Run revision
+against `origin/main`, per the 2026-08-27 stale-deploy rule (fetch, fast-
+forward, THEN deploy) — no eyeballing timestamps:
+
+```bash
+PROJECT_ID=PROJECT_ID deploy/check_revision.sh
+```
+
+Exact match requires deploying with `cloudbuild.yaml`'s `_TAG=$(git rev-parse
+--short HEAD)` (see that file); a `--source .` deploy is checked by timestamp
+inference instead and says so explicitly.
+
+## Backup / restore
+
+See [deploy/BACKUP-RESTORE.md](BACKUP-RESTORE.md) — a restore drill runbook
+plus `deploy/verify_restore.py`, an integrity check for the log store's
+append-only hash chain. Automated backups + point-in-time recovery must be
+enabled on `capsule-anchor-pg` (`gcloud sql instances describe
+capsule-anchor-pg --format="yaml(settings.backupConfiguration)"` — expect
+`enabled: true`); a restore drill should be re-run, not just re-read, before
+any date the witness is depended on publicly.

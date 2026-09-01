@@ -8,6 +8,18 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Added
 
+- **Ops readiness tooling for the witness deployment** (`deploy/monitoring.sh`,
+  `deploy/burst_test.py`, `deploy/verify_restore.py`, `deploy/check_revision.sh`,
+  `deploy/BACKUP-RESTORE.md`): uptime monitoring + alerting as code for both the
+  read path (`GET /health`) and the checkpoint-submit path (`POST /checkpoints`,
+  a named-refusal canary that doesn't require a real allowlisted submitter
+  identity); a load-sanity tool for burst-testing `/checkpoints` and read routes
+  with a distinguished "demo identity"; an append-only hash-chain integrity
+  checker for restore drills; and a mechanical deployed-revision-vs-origin/main
+  check. `cloudbuild.yaml` now tags images by commit SHA instead of `latest` and
+  includes `--add-cloudsql-instances`, and its `_SERVICE` default was corrected
+  to `capsule-witness` (the actual deployed service name, finalized 2026-08-28).
+
 - **Witness-host canonical routes, `POST /checkpoints` (default) + `POST /register`
   (opt-in)**: single-host reconciliation (2026-08-27) of the checkpoint-only witness
   surface added in `witness-checkpoint-only-stage1`. `/checkpoints` is a rename of that
