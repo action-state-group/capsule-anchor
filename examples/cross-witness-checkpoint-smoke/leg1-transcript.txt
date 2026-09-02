@@ -1,0 +1,32 @@
+=== cross-witness checkpoint smoke: LEG 1 (synthetic test identity) ===
+host:    https://witness.agentactioncapsule.org
+log_id:  asg-smoke-test/v1
+mmr_size: 1
+
+[1] generated Ed25519 test key, kid=5dc09ccccf8763a6d3d27c3b36eefb5332050267e3d8dd0b6e78b7412ea7aa5d
+    issued_at=2026-09-01T23:11:05Z
+    private key written to examples/cross-witness-checkpoint-smoke/leg1-artifacts/test_key.pem
+[2] built COSE_Sign1 checkpoint statement, 325 bytes
+    content_type=application/cll-checkpoint+cbor
+    COSE bytes written to examples/cross-witness-checkpoint-smoke/leg1-artifacts/checkpoint.cose
+
+    locally-computed digest:     ee32120a9e929025d347312e264b6975c98e35ffcd3fd81f8bd7798233f96bc5
+    locally-computed entry_hash: b16766df5e64792852c1da1210a448e6abf0eb9eef9d2a45b4172aafcb1eb2bb
+
+[3] POST https://witness.agentactioncapsule.org/checkpoints
+    -> HTTP 200
+    -> {"receipt_b64":"0oRHogEnGQGLAaEZAYyhIIFYkIMZAkYZAkWEWCALb6as9B8uRB29GYmHSaWMFu0xcN5QTG9kvy3TvsFvS1gg+qpDTZ7vKZE3b++WhNGA5PUQmzwzE14tZ+qdc7WO/cZYIBpjqo17mPsVboEt6dTdioGl6yFp2DumehIrTq494RoQWCBOGtTqsMhlU9z3q4Ggyf3a0FaqsQCtAU5winw0FQCn5fZYQDzb2VAriHG4FO76qU85FJ+PEPQ41NNhjdypr60aYlFQWzMZaAGkIPJmd0KeQoPZjR2z5Zbstr2QVy4G6FPUTgk=","entry_hash":"b16766df5e64792852c1da1210a448e6abf0eb9eef9d2a45b4172aafcb1eb2bb","entry_hash_scheme":"legacy","leaf_index":581,"tree_size":582}
+    OK: witness entry_hash matches our independent computation
+
+[4] GET https://witness.agentactioncapsule.org/v1/inclusion/ee32120a9e929025d347312e264b6975c98e35ffcd3fd81f8bd7798233f96bc5 (independent fetch-back, NOT reusing the POST response)
+    -> HTTP 200
+    -> entry_hash=b16766df5e64792852c1da1210a448e6abf0eb9eef9d2a45b4172aafcb1eb2bb leaf_index=581 tree_size=582
+    OK: fetched-back record matches the POST response
+
+[5] GET https://witness.agentactioncapsule.org/anchor/authority-pubkey, then verify the receipt OFFLINE
+    authority key_id=19a9ab3e02fad55c
+    receipt written to examples/cross-witness-checkpoint-smoke/leg1-artifacts/receipt.cose
+    verify_receipt(...).ok = True
+    root=d49b4a3afca5100662873b1125cf6daf87e8552f973acef1123a342769b136aa tree_size=582 leaf_index=581
+
+=== LEG 1: PASSED -- checkpoint submitted, fetched back independently, receipt verifies offline ===
