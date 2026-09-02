@@ -14,6 +14,12 @@ Endpoints:
                                            AnchorerService.witness_checkpoint. This is
                                            the only route a default capsule-emit client
                                            ever calls.
+  GET  /checkpoints/{log_id}            -> read-only resolve: the LAST checkpoint
+                                           witnessed for log_id (claims + receipt
+                                           evidence + countersign grade), plus any
+                                           equivocation flagged for it (200 present /
+                                           404 never witnessed) -- see
+                                           AnchorerService.get_checkpoint_readback.
   POST /register                        -> EXPLICIT OPT-IN route: per-record digest
                                            registration -> full SCITT Receipt (the
                                            plain-SCITT-interop case). Identical
@@ -319,6 +325,58 @@ class CheckpointStampResponse(BaseModel):
     leaf_index: int
     tree_size: int
     grade: str | None = None
+
+
+class CheckpointEquivocationSighting(BaseModel):
+    """One side (first-seen or conflicting) of a flagged equivocation."""
+
+    root: str
+    entry_hash: str
+    timestamp: str
+
+
+class CheckpointEquivocation(BaseModel):
+    """A fork attempt: two DIFFERENT roots witnessed for the SAME
+    (``log_id``, ``mmr_size``) position. ``first`` is the record this
+    witness preserved (never overwritten); ``conflicting`` is the later
+    submission that collided with it."""
+
+    mmr_size: int
+    first: CheckpointEquivocationSighting
+    conflicting: CheckpointEquivocationSighting
+
+
+class CheckpointReadBackResponse(BaseModel):
+    """``GET /checkpoints/{log_id}``: the last checkpoint witnessed for
+    ``log_id``, plus every equivocation flagged for it.
+
+    Same claims/evidence shape as ``CheckpointStampResponse`` (the response
+    to the original ``POST``), so a watcher that only has ``log_id`` can
+    fetch what ``#34``'s fetch step and ``#32``'s watcher need: the stored
+    checkpoint bytes/claims AND the countersign ``grade`` -- neither of
+    which the stateless POST response alone makes queryable later.
+
+    ``equivocations`` is empty for a ``log_id`` that has never had two
+    conflicting roots witnessed at the same position -- non-empty is the
+    loud surface backing the "the log cannot equivocate" launch claim; see
+    the module docstring's scope line (detect-and-surface here, refusing
+    the write is a stage-2 follow-up).
+    """
+
+    log_id: str
+    mmr_size: int
+    root: str
+    prev_size: int
+    prev_root: str
+    key_id: str
+    timestamp: str
+    grade: str | None
+    receipt_b64: str
+    entry_hash: str
+    entry_hash_scheme: str
+    leaf_index: int
+    tree_size: int
+    equivocations: list[CheckpointEquivocation]
 
 
 def get_router() -> APIRouter:
@@ -686,6 +744,50 @@ def get_router() -> APIRouter:
                 detail=f"checkpoint too large ({len(body)} bytes; max {MAX_STATEMENT_BYTES})",
             )
         return _witness_checkpoint(body)
+
+    @canonical.get("/checkpoints/{log_id:path}", response_model=CheckpointReadBackResponse)
+    def checkpoint_readback(log_id: str) -> CheckpointReadBackResponse:
+        """Read-only resolve: the LAST checkpoint witnessed for ``log_id``.
+
+        ``log_id`` is taken verbatim from the path (``:path`` so an ``iss``
+        containing ``/``, e.g. ``trace-registry/v1``, round-trips). Returns
+        **200** with the stored checkpoint claims, receipt evidence, and
+        countersign ``grade`` if this ``log_id`` has been witnessed by
+        ``POST /checkpoints`` at least once, **404** if it never has. Also
+        carries ``equivocations`` -- any (log_id, mmr_size) position where
+        two DIFFERENT roots were witnessed -- so a watcher can detect a
+        fork attempt without re-deriving it from the raw log feed. This is
+        a pure read; it never registers or mutates anything.
+        """
+        record = get_service().get_checkpoint_readback(log_id)
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"log_id {log_id!r} has never been witnessed by POST /checkpoints",
+            )
+        return CheckpointReadBackResponse(
+            log_id=log_id,
+            mmr_size=record["mmr_size"],
+            root=record["root"],
+            prev_size=record["prev_size"],
+            prev_root=record["prev_root"],
+            key_id=record["key_id"],
+            timestamp=record["timestamp"],
+            grade=record["grade"],
+            receipt_b64=base64.b64encode(record["receipt"]).decode("ascii"),
+            entry_hash=record["entry_hash"],
+            entry_hash_scheme=record["entry_hash_scheme"],
+            leaf_index=record["leaf_index"],
+            tree_size=record["tree_size"],
+            equivocations=[
+                CheckpointEquivocation(
+                    mmr_size=e["mmr_size"],
+                    first=CheckpointEquivocationSighting(**e["first"]),
+                    conflicting=CheckpointEquivocationSighting(**e["conflicting"]),
+                )
+                for e in record["equivocations"]
+            ],
+        )
 
     @canonical.post("/register", response_model=RegisterStatementResponse)
     def register(req: DigestRequest, request: Request) -> RegisterStatementResponse:

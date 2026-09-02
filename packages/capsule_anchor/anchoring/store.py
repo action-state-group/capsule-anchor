@@ -16,6 +16,7 @@ All backends implement the same interface:
   put_capsule_id / get_capsule_id / entries_for_capsule
   put_statement / get_statement
   put_checkpoint_witness / get_checkpoint_witness
+  put_checkpoint_record / get_last_checkpoint_record / get_checkpoint_equivocations
   put_sth / get_latest_sth
   close
 
@@ -58,6 +59,11 @@ class InMemoryLogStore:
         self._statements: dict[str, tuple[bytes, int, int]] = {}
         # Checkpoint witness state: log_id -> last-witnessed checkpoint fields.
         self._checkpoint_witnesses: dict[str, dict] = {}
+        # POST /checkpoints read surface: (log_id, mmr_size) -> full record,
+        # one row per position ever witnessed (first-seen root wins the slot;
+        # see put_checkpoint_record). log_id -> flagged equivocation events.
+        self._checkpoint_records: dict[tuple[str, int], dict] = {}
+        self._checkpoint_equivocations: dict[str, list[dict]] = {}
         # Latest persisted Signed Tree Head (JSON string) or None.
         self._latest_sth: str | None = None
 
@@ -115,6 +121,39 @@ class InMemoryLogStore:
     def get_checkpoint_witness(self, log_id: str) -> dict | None:
         w = self._checkpoint_witnesses.get(log_id)
         return dict(w) if w is not None else None
+
+    # --- checkpoint read-back + equivocation detection (POST /checkpoints) ---
+    def put_checkpoint_record(self, log_id: str, mmr_size: int, record: dict) -> bool:
+        key = (log_id, mmr_size)
+        existing = self._checkpoint_records.get(key)
+        if existing is None:
+            self._checkpoint_records[key] = dict(record)
+            return False
+        if existing["root"] == record["root"]:
+            return False  # idempotent resubmission of the same checkpoint
+        # EQUIVOCATION: a different root already occupies this exact
+        # (log_id, mmr_size) slot. Never overwrite the first-seen record --
+        # it is the fork evidence -- and flag the conflict loudly.
+        def _evidence(r: dict) -> dict:
+            return {"root": r["root"], "entry_hash": r["entry_hash"], "timestamp": r["timestamp"]}
+
+        self._checkpoint_equivocations.setdefault(log_id, []).append(
+            {"mmr_size": mmr_size, "first": _evidence(existing), "conflicting": _evidence(record)}
+        )
+        return True
+
+    def get_last_checkpoint_record(self, log_id: str) -> dict | None:
+        rows = [
+            {"mmr_size": size, **rec}
+            for (lid, size), rec in self._checkpoint_records.items()
+            if lid == log_id
+        ]
+        if not rows:
+            return None
+        return max(rows, key=lambda r: r["mmr_size"])
+
+    def get_checkpoint_equivocations(self, log_id: str) -> list[dict]:
+        return [dict(e) for e in self._checkpoint_equivocations.get(log_id, [])]
 
     # --- persisted Signed Tree Head ---
     def put_sth(self, sth_json: str) -> None:
@@ -216,6 +255,53 @@ class SqliteLogStore:
                     timestamp  TEXT NOT NULL
                 )
                 """
+            )
+            # POST /checkpoints read surface: one row per (log_id, mmr_size)
+            # position ever witnessed. Only ever INSERTed, never UPDATEd --
+            # the first root seen at a position is preserved as fork
+            # evidence (see put_checkpoint_record, which checks-before-insert
+            # under the caller's lock and never overwrites a conflicting row).
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS checkpoint_records (
+                    log_id           TEXT NOT NULL,
+                    mmr_size         INTEGER NOT NULL,
+                    root             TEXT NOT NULL,
+                    prev_size        INTEGER NOT NULL,
+                    prev_root        TEXT NOT NULL,
+                    key_id           TEXT NOT NULL,
+                    timestamp        TEXT NOT NULL,
+                    grade            TEXT,
+                    entry_hash       TEXT NOT NULL,
+                    entry_hash_scheme TEXT NOT NULL,
+                    leaf_index       INTEGER NOT NULL,
+                    tree_size        INTEGER NOT NULL,
+                    receipt          BLOB NOT NULL,
+                    PRIMARY KEY (log_id, mmr_size)
+                )
+                """
+            )
+            # Loud-surface evidence: appended whenever a NEW submission's
+            # root conflicts with the root already recorded for the same
+            # (log_id, mmr_size) -- i.e. an equivocation/fork attempt.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS checkpoint_equivocations (
+                    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                    log_id                TEXT NOT NULL,
+                    mmr_size              INTEGER NOT NULL,
+                    first_root            TEXT NOT NULL,
+                    first_entry_hash      TEXT NOT NULL,
+                    first_timestamp       TEXT NOT NULL,
+                    conflicting_root      TEXT NOT NULL,
+                    conflicting_entry_hash TEXT NOT NULL,
+                    conflicting_timestamp TEXT NOT NULL
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_checkpoint_equivocations_log_id "
+                "ON checkpoint_equivocations(log_id)"
             )
 
     # --- row <-> model ---
@@ -388,6 +474,77 @@ class SqliteLogStore:
             "timestamp": str(row[3]),
         }
 
+    # --- checkpoint read-back + equivocation detection (POST /checkpoints) ---
+    def put_checkpoint_record(self, log_id: str, mmr_size: int, record: dict) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "SELECT root, entry_hash, timestamp FROM checkpoint_records "
+                "WHERE log_id = ? AND mmr_size = ?",
+                (log_id, mmr_size),
+            )
+            existing = cur.fetchone()
+            if existing is None:
+                self._conn.execute(
+                    "INSERT INTO checkpoint_records (log_id, mmr_size, root, prev_size, "
+                    "prev_root, key_id, timestamp, grade, entry_hash, entry_hash_scheme, "
+                    "leaf_index, tree_size, receipt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        log_id, mmr_size, record["root"], int(record["prev_size"]),
+                        record["prev_root"], record["key_id"], record["timestamp"],
+                        record.get("grade"), record["entry_hash"], record["entry_hash_scheme"],
+                        int(record["leaf_index"]), int(record["tree_size"]), record["receipt"],
+                    ),
+                )
+                return False
+            if existing[0] == record["root"]:
+                return False  # idempotent resubmission of the same checkpoint
+            self._conn.execute(
+                "INSERT INTO checkpoint_equivocations (log_id, mmr_size, first_root, "
+                "first_entry_hash, first_timestamp, conflicting_root, conflicting_entry_hash, "
+                "conflicting_timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    log_id, mmr_size, existing[0], existing[1], existing[2],
+                    record["root"], record["entry_hash"], record["timestamp"],
+                ),
+            )
+            return True
+
+    def get_last_checkpoint_record(self, log_id: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT mmr_size, root, prev_size, prev_root, key_id, timestamp, grade, "
+                "entry_hash, entry_hash_scheme, leaf_index, tree_size, receipt "
+                "FROM checkpoint_records WHERE log_id = ? ORDER BY mmr_size DESC LIMIT 1",
+                (log_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "mmr_size": int(row[0]), "root": str(row[1]), "prev_size": int(row[2]),
+            "prev_root": str(row[3]), "key_id": str(row[4]), "timestamp": str(row[5]),
+            "grade": row[6], "entry_hash": str(row[7]), "entry_hash_scheme": str(row[8]),
+            "leaf_index": int(row[9]), "tree_size": int(row[10]), "receipt": bytes(row[11]),
+        }
+
+    def get_checkpoint_equivocations(self, log_id: str) -> list[dict]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT mmr_size, first_root, first_entry_hash, first_timestamp, "
+                "conflicting_root, conflicting_entry_hash, conflicting_timestamp "
+                "FROM checkpoint_equivocations WHERE log_id = ? ORDER BY id ASC",
+                (log_id,),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "mmr_size": int(r[0]),
+                "first": {"root": str(r[1]), "entry_hash": str(r[2]), "timestamp": str(r[3])},
+                "conflicting": {"root": str(r[4]), "entry_hash": str(r[5]), "timestamp": str(r[6])},
+            }
+            for r in rows
+        ]
+
     # --- persisted Signed Tree Head ---
     def put_sth(self, sth_json: str) -> None:
         with self._lock, self._conn:
@@ -535,6 +692,48 @@ class PostgresLogStore:
                     timestamp  TEXT NOT NULL
                 )
             """)
+            # POST /checkpoints read surface: one row per (log_id, mmr_size)
+            # position ever witnessed. Only ever INSERTed, never UPDATEd --
+            # the first root seen at a position is preserved as fork
+            # evidence (see put_checkpoint_record).
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_records (
+                    log_id            TEXT NOT NULL,
+                    mmr_size          BIGINT NOT NULL,
+                    root              TEXT NOT NULL,
+                    prev_size         BIGINT NOT NULL,
+                    prev_root         TEXT NOT NULL,
+                    key_id            TEXT NOT NULL,
+                    timestamp         TEXT NOT NULL,
+                    grade             TEXT,
+                    entry_hash        TEXT NOT NULL,
+                    entry_hash_scheme TEXT NOT NULL,
+                    leaf_index        BIGINT NOT NULL,
+                    tree_size         BIGINT NOT NULL,
+                    receipt           BYTEA NOT NULL,
+                    PRIMARY KEY (log_id, mmr_size)
+                )
+            """)
+            # Loud-surface evidence: appended whenever a NEW submission's
+            # root conflicts with the root already recorded for the same
+            # (log_id, mmr_size) -- i.e. an equivocation/fork attempt.
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoint_equivocations (
+                    id                     BIGSERIAL PRIMARY KEY,
+                    log_id                 TEXT NOT NULL,
+                    mmr_size               BIGINT NOT NULL,
+                    first_root             TEXT NOT NULL,
+                    first_entry_hash       TEXT NOT NULL,
+                    first_timestamp        TEXT NOT NULL,
+                    conflicting_root       TEXT NOT NULL,
+                    conflicting_entry_hash TEXT NOT NULL,
+                    conflicting_timestamp  TEXT NOT NULL
+                )
+            """)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_checkpoint_equivocations_log_id "
+                "ON checkpoint_equivocations(log_id)"
+            )
 
     @staticmethod
     def _row_to_entry(row: tuple) -> TransparencyLogEntry:
@@ -728,6 +927,86 @@ class PostgresLogStore:
             "key_id": str(row[2]),
             "timestamp": str(row[3]),
         }
+
+    # --- checkpoint read-back + equivocation detection (POST /checkpoints) ---
+    def put_checkpoint_record(self, log_id: str, mmr_size: int, record: dict) -> bool:
+        outcome = {"equivocation": False}
+
+        def _run() -> None:
+            cur = self._conn.execute(
+                "INSERT INTO checkpoint_records (log_id, mmr_size, root, prev_size, "
+                "prev_root, key_id, timestamp, grade, entry_hash, entry_hash_scheme, "
+                "leaf_index, tree_size, receipt) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (log_id, mmr_size) DO NOTHING",
+                (
+                    log_id, mmr_size, record["root"], int(record["prev_size"]),
+                    record["prev_root"], record["key_id"], record["timestamp"],
+                    record.get("grade"), record["entry_hash"], record["entry_hash_scheme"],
+                    int(record["leaf_index"]), int(record["tree_size"]), record["receipt"],
+                ),
+            )
+            if cur.rowcount:
+                return  # freshly inserted -- first sighting of this position
+            existing = self._conn.execute(
+                "SELECT root, entry_hash, timestamp FROM checkpoint_records "
+                "WHERE log_id = %s AND mmr_size = %s",
+                (log_id, mmr_size),
+            ).fetchone()
+            if existing[0] == record["root"]:
+                return  # idempotent resubmission of the same checkpoint
+            # EQUIVOCATION: a different root already occupies this exact
+            # (log_id, mmr_size) slot. Never overwrite the first-seen row --
+            # it is the fork evidence -- and flag the conflict loudly.
+            outcome["equivocation"] = True
+            self._conn.execute(
+                "INSERT INTO checkpoint_equivocations (log_id, mmr_size, first_root, "
+                "first_entry_hash, first_timestamp, conflicting_root, conflicting_entry_hash, "
+                "conflicting_timestamp) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    log_id, mmr_size, existing[0], existing[1], existing[2],
+                    record["root"], record["entry_hash"], record["timestamp"],
+                ),
+            )
+
+        with self._lock:
+            self._transact(_run)
+        return outcome["equivocation"]
+
+    def get_last_checkpoint_record(self, log_id: str) -> dict | None:
+        with self._lock:
+            cur = self._read(
+                "SELECT mmr_size, root, prev_size, prev_root, key_id, timestamp, grade, "
+                "entry_hash, entry_hash_scheme, leaf_index, tree_size, receipt "
+                "FROM checkpoint_records WHERE log_id = %s ORDER BY mmr_size DESC LIMIT 1",
+                (log_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "mmr_size": int(row[0]), "root": str(row[1]), "prev_size": int(row[2]),
+            "prev_root": str(row[3]), "key_id": str(row[4]), "timestamp": str(row[5]),
+            "grade": row[6], "entry_hash": str(row[7]), "entry_hash_scheme": str(row[8]),
+            "leaf_index": int(row[9]), "tree_size": int(row[10]), "receipt": bytes(row[11]),
+        }
+
+    def get_checkpoint_equivocations(self, log_id: str) -> list[dict]:
+        with self._lock:
+            cur = self._read(
+                "SELECT mmr_size, first_root, first_entry_hash, first_timestamp, "
+                "conflicting_root, conflicting_entry_hash, conflicting_timestamp "
+                "FROM checkpoint_equivocations WHERE log_id = %s ORDER BY id ASC",
+                (log_id,),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "mmr_size": int(r[0]),
+                "first": {"root": str(r[1]), "entry_hash": str(r[2]), "timestamp": str(r[3])},
+                "conflicting": {"root": str(r[4]), "entry_hash": str(r[5]), "timestamp": str(r[6])},
+            }
+            for r in rows
+        ]
 
     # --- persisted Signed Tree Head ---
     def put_sth(self, sth_json: str) -> None:

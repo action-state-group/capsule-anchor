@@ -46,7 +46,8 @@ def _pg_store():
     with store._lock, store._conn.transaction():
         store._conn.execute(
             "TRUNCATE TABLE submitted_statements, log_capsule_bindings, "
-            "countersigned_roots, log_entries, checkpoint_witnesses RESTART IDENTITY CASCADE"
+            "countersigned_roots, log_entries, checkpoint_witnesses, "
+            "checkpoint_records, checkpoint_equivocations RESTART IDENTITY CASCADE"
         )
     return store
 
@@ -128,6 +129,52 @@ class TestSqliteRestartSurvival:
 
         svc2 = AnchorerService(attestor=attestor, db_path=db)
         assert svc2.verify_log(), "hash-chain integrity check failed after reopen"
+
+
+# ---------------------------------------------------------------------------
+# 1b. [witness-checkpoint-read-surface]: the per-log_id checkpoint read-back
+#     record and equivocation flag must survive a restart -- a witness that
+#     "forgets" a flagged fork on restart isn't proving the log can't
+#     equivocate.
+# ---------------------------------------------------------------------------
+
+def _cp(*, log_id: str, mmr_size: int, root: str, prev_size: int = 0, prev_root: str = "") -> dict:
+    return {
+        "v": 1, "kind": "mmr_checkpoint", "log_id": log_id, "mmr_size": mmr_size,
+        "root": root, "prev_size": prev_size, "prev_root": prev_root,
+        "key_id": "a" * 64, "timestamp": "2026-09-01T00:00:00Z", "grade": None,
+    }
+
+
+class TestSqliteCheckpointReadSurfaceSurvival:
+    def test_last_checkpoint_survives_reopen(self, tmp_path):
+        db = str(tmp_path / "anchor.db")
+        svc1 = _fresh_service(db)
+        svc1.witness_checkpoint(_cp(log_id="log-P", mmr_size=10, root="a" * 64))
+        svc1._store.close()
+
+        svc2 = _fresh_service(db)
+        record = svc2.get_checkpoint_readback("log-P")
+        assert record is not None
+        assert record["mmr_size"] == 10
+        assert record["root"] == "a" * 64
+        assert record["equivocations"] == []
+
+    def test_equivocation_survives_reopen(self, tmp_path):
+        db = str(tmp_path / "anchor.db")
+        svc1 = _fresh_service(db)
+        svc1.witness_checkpoint(_cp(log_id="log-Q", mmr_size=5, root="b" * 64))
+        svc1.witness_checkpoint(_cp(log_id="log-Q", mmr_size=5, root="c" * 64))
+        svc1._store.close()
+
+        svc2 = _fresh_service(db)
+        record = svc2.get_checkpoint_readback("log-Q")
+        assert len(record["equivocations"]) == 1
+        assert record["equivocations"][0]["first"]["root"] == "b" * 64
+        assert record["equivocations"][0]["conflicting"]["root"] == "c" * 64
+        # the FIRST-seen root is what "last" still reports -- never silently
+        # overwritten by the later conflicting submission
+        assert record["root"] == "b" * 64
 
 
 # ---------------------------------------------------------------------------
@@ -593,6 +640,46 @@ class TestPostgresRestartSurvival:
         store2 = PostgresLogStore(_PG_URL)
         svc2 = AnchorerService(store=store2)
         assert svc2.get_sth().root_hash == root_before
+        store2.close()
+
+
+@_pg_required
+class TestPostgresCheckpointReadSurfaceSurvival:
+    """[witness-checkpoint-read-surface] Postgres counterpart of
+    ``TestSqliteCheckpointReadSurfaceSurvival`` -- same contract against a
+    real Postgres instance."""
+
+    def test_last_checkpoint_survives_reconnect(self):
+        from capsule_anchor.anchoring.store import PostgresLogStore
+        store1 = _pg_store()
+        svc1 = AnchorerService(store=store1)
+        svc1.witness_checkpoint(_cp(log_id="log-PG-P", mmr_size=10, root="a" * 64))
+        store1.close()
+
+        store2 = PostgresLogStore(_PG_URL)
+        svc2 = AnchorerService(store=store2)
+        record = svc2.get_checkpoint_readback("log-PG-P")
+        assert record is not None
+        assert record["mmr_size"] == 10
+        assert record["root"] == "a" * 64
+        assert record["equivocations"] == []
+        store2.close()
+
+    def test_equivocation_survives_reconnect(self):
+        from capsule_anchor.anchoring.store import PostgresLogStore
+        store1 = _pg_store()
+        svc1 = AnchorerService(store=store1)
+        svc1.witness_checkpoint(_cp(log_id="log-PG-Q", mmr_size=5, root="b" * 64))
+        svc1.witness_checkpoint(_cp(log_id="log-PG-Q", mmr_size=5, root="c" * 64))
+        store1.close()
+
+        store2 = PostgresLogStore(_PG_URL)
+        svc2 = AnchorerService(store=store2)
+        record = svc2.get_checkpoint_readback("log-PG-Q")
+        assert len(record["equivocations"]) == 1
+        assert record["equivocations"][0]["first"]["root"] == "b" * 64
+        assert record["equivocations"][0]["conflicting"]["root"] == "c" * 64
+        assert record["root"] == "b" * 64
         store2.close()
 
 
