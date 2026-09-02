@@ -7,13 +7,15 @@ USAGE:
     python -m capsule_anchor.cross_witness_conformance.watcher <checkpoint-file>
         [--witness-base-url URL] [--state-file PATH] [--expected-grade GRADE]
 
-Reads raw COSE_Sign1 checkpoint bytes from <checkpoint-file> (``-`` for
-stdin), runs the full report (wire + enrolled identity/grade + witness
-tie-back), and if a PREVIOUS checkpoint for the same log_id is on record,
-also runs the chain-continuity check against it. Exit code is 0 only if no
-check FAILed (an UNKNOWN -- e.g. "no previous checkpoint yet" -- does not
-fail the run, but is always printed so it stays visible rather than
-silently passing).
+Reads raw checkpoint bytes from <checkpoint-file> (``-`` for stdin) -- COSE_Sign1
+or JSON ``CheckpointRecord``, whichever ``--expected-log-id`` DECLARES as its
+wire form in the submitter allowlist (``submitters.py``; ``check_checkpoint_wire``
+does the dispatch, this CLI never needs to know which) -- runs the full report
+(wire + enrolled identity/grade + witness tie-back), and if a PREVIOUS
+checkpoint for the same log_id is on record, also runs the chain-continuity
+check against it. Exit code is 0 only if no check FAILed (an UNKNOWN -- e.g.
+"no previous checkpoint yet" -- does not fail the run, but is always printed
+so it stays visible rather than silently passing).
 
 KNOWN GAP (see NOTES.md): witness.agentactioncapsule.org has no public
 endpoint that lets a third party DISCOVER a checkpoint's bytes by log_id --
@@ -56,7 +58,7 @@ def _save_state(state_file: Path, claims: dict) -> None:
 
 
 def run(
-    cose_bytes: bytes,
+    checkpoint_bytes: bytes,
     *,
     witness_base_url: str = DEFAULT_WITNESS_BASE_URL,
     state_file: Path = DEFAULT_STATE_FILE,
@@ -66,10 +68,12 @@ def run(
 ) -> ConformanceReport:
     """`get` is injectable (a `TestClient(app).get`-shaped callable) so tests
     never touch the network; the CLI's `main()` leaves it `None` to get a
-    real HTTP client against `witness_base_url`.
+    real HTTP client against `witness_base_url`. `checkpoint_bytes` is COSE
+    or JSON depending on what `expected_log_id` declares (see
+    `check_checkpoint_wire`) -- this function doesn't need to know which.
     """
     report = check_checkpoint_wire(
-        cose_bytes, expected_log_id=expected_log_id, expected_grade=expected_grade
+        checkpoint_bytes, expected_log_id=expected_log_id, expected_grade=expected_grade
     )
     if report.claims is None:
         return report  # wire-invalid -- nothing further to check
@@ -102,17 +106,23 @@ def run(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("checkpoint_file", help="path to raw COSE_Sign1 checkpoint bytes, or '-' for stdin")
+    parser.add_argument(
+        "checkpoint_file",
+        help="path to raw checkpoint bytes (COSE_Sign1 or json-ed25519, per --expected-log-id's "
+        "declared wire_form), or '-' for stdin",
+    )
     parser.add_argument("--witness-base-url", default=DEFAULT_WITNESS_BASE_URL)
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
     parser.add_argument("--expected-log-id", default=DEFAULT_EXPECTED_LOG_ID)
     parser.add_argument("--expected-grade", default=DEFAULT_EXPECTED_GRADE)
     args = parser.parse_args(argv)
 
-    cose_bytes = sys.stdin.buffer.read() if args.checkpoint_file == "-" else Path(args.checkpoint_file).read_bytes()
+    checkpoint_bytes = (
+        sys.stdin.buffer.read() if args.checkpoint_file == "-" else Path(args.checkpoint_file).read_bytes()
+    )
 
     report = run(
-        cose_bytes,
+        checkpoint_bytes,
         witness_base_url=args.witness_base_url,
         state_file=args.state_file,
         expected_log_id=args.expected_log_id,

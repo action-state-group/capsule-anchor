@@ -14,6 +14,8 @@ from capsule_anchor.anchoring.submitters import (
     DEFAULT_SUBMITTER_RATE_LIMIT_PER_MIN,
     GRADE_COUNTERSIGNED_OBSERVED,
     GRADE_MMR_VERIFIED,
+    WIRE_FORM_COSE_SIGN1,
+    WIRE_FORM_JSON_ED25519,
     SubmitterAllowlist,
     SubmitterConfigError,
 )
@@ -112,3 +114,117 @@ def test_from_env_or_default_loads_override_file(tmp_path, monkeypatch):
     monkeypatch.setenv("CAPSULE_ANCHOR_CHECKPOINT_SUBMITTERS_FILE", str(path))
     allowlist = SubmitterAllowlist.from_env_or_default()
     assert allowlist.get("y") is not None
+
+
+# --- wire_form / field_map (per-entry DECLARED checkpoint wire form) ---------
+
+
+def test_wire_form_defaults_to_cose_with_no_field_map():
+    allowlist = SubmitterAllowlist.from_list([{"log_id": "x", "pubkey_hex": _VALID_HEX}])
+    entry = allowlist.get("x")
+    assert entry.wire_form == WIRE_FORM_COSE_SIGN1
+    assert entry.field_map is None
+
+
+def test_json_ed25519_wire_form_gets_identity_field_map_by_default():
+    allowlist = SubmitterAllowlist.from_list(
+        [{"log_id": "x", "pubkey_hex": _VALID_HEX, "wire_form": WIRE_FORM_JSON_ED25519}]
+    )
+    entry = allowlist.get("x")
+    assert entry.wire_form == WIRE_FORM_JSON_ED25519
+    assert entry.field_map == {
+        "v": "v",
+        "kind": "kind",
+        "log_id": "log_id",
+        "mmr_size": "mmr_size",
+        "root": "root",
+        "prev_size": "prev_size",
+        "prev_root": "prev_root",
+        "key_id": "key_id",
+        "timestamp": "timestamp",
+        "signature": "signature",
+    }
+
+
+def test_json_ed25519_wire_form_with_partial_field_map_overrides_only_named_keys():
+    allowlist = SubmitterAllowlist.from_list(
+        [
+            {
+                "log_id": "x",
+                "pubkey_hex": _VALID_HEX,
+                "wire_form": WIRE_FORM_JSON_ED25519,
+                "field_map": {"log_id": "registryId", "root": "mmrRoot"},
+            }
+        ]
+    )
+    fm = allowlist.get("x").field_map
+    assert fm["log_id"] == "registryId"
+    assert fm["root"] == "mmrRoot"
+    assert fm["mmr_size"] == "mmr_size"  # untouched keys stay identity-mapped
+
+
+def test_invalid_wire_form_fails_closed():
+    with pytest.raises(SubmitterConfigError, match="wire_form"):
+        SubmitterAllowlist.from_list([{"log_id": "x", "pubkey_hex": _VALID_HEX, "wire_form": "yaml"}])
+
+
+def test_field_map_on_a_cose_entry_fails_closed():
+    """field_map is only meaningful for json-ed25519 -- a cose entry that
+    sets one is a config mistake that would otherwise be silently ignored,
+    which fails closed instead."""
+    with pytest.raises(SubmitterConfigError, match="field_map"):
+        SubmitterAllowlist.from_list(
+            [
+                {
+                    "log_id": "x",
+                    "pubkey_hex": _VALID_HEX,
+                    "wire_form": WIRE_FORM_COSE_SIGN1,
+                    "field_map": {"log_id": "registryId"},
+                }
+            ]
+        )
+
+
+def test_field_map_unknown_canonical_field_fails_closed():
+    with pytest.raises(SubmitterConfigError, match="unknown canonical field"):
+        SubmitterAllowlist.from_list(
+            [
+                {
+                    "log_id": "x",
+                    "pubkey_hex": _VALID_HEX,
+                    "wire_form": WIRE_FORM_JSON_ED25519,
+                    "field_map": {"not_a_real_field": "whatever"},
+                }
+            ]
+        )
+
+
+def test_field_map_duplicate_target_key_fails_closed():
+    """Two canonical fields reading from the SAME submitted key would be
+    ambiguous (which one wins?) -- fails closed rather than picking one
+    silently."""
+    with pytest.raises(SubmitterConfigError, match="distinct"):
+        SubmitterAllowlist.from_list(
+            [
+                {
+                    "log_id": "x",
+                    "pubkey_hex": _VALID_HEX,
+                    "wire_form": WIRE_FORM_JSON_ED25519,
+                    "field_map": {"log_id": "same_key", "root": "same_key"},
+                }
+            ]
+        )
+
+
+def test_field_map_non_string_value_fails_closed():
+    with pytest.raises(SubmitterConfigError, match="non-empty string"):
+        SubmitterAllowlist.from_list(
+            [
+                {
+                    "log_id": "x",
+                    "pubkey_hex": _VALID_HEX,
+                    "wire_form": WIRE_FORM_JSON_ED25519,
+                    "field_map": {"log_id": 5},
+                }
+            ]
+        )

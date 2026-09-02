@@ -25,6 +25,7 @@ default-open path without depending on or mutating the real enrollment.
 from __future__ import annotations
 
 import hashlib
+import json
 
 import cbor2
 import pytest
@@ -34,6 +35,8 @@ from capsule_anchor.anchoring.submitters import (
     DEFAULT_CONFIG_PATH,
     GRADE_COUNTERSIGNED_OBSERVED,
     GRADE_MMR_VERIFIED,
+    WIRE_FORM_COSE_SIGN1,
+    WIRE_FORM_JSON_ED25519,
     SubmitterAllowlist,
 )
 from capsule_anchor.app import create_app
@@ -119,10 +122,61 @@ def _checkpoint_cose(
     )
 
 
-def _allowlist(*, log_id: str = _LOG_ID, pubkey: bytes, accumulator: str = ACCUMULATOR_FOREIGN) -> SubmitterAllowlist:
+def _allowlist(
+    *,
+    log_id: str = _LOG_ID,
+    pubkey: bytes,
+    accumulator: str = ACCUMULATOR_FOREIGN,
+    wire_form: str = WIRE_FORM_COSE_SIGN1,
+) -> SubmitterAllowlist:
     return SubmitterAllowlist.from_list(
-        [{"log_id": log_id, "pubkey_hex": pubkey.hex(), "accumulator": accumulator, "rate_limit_per_min": 60}]
+        [
+            {
+                "log_id": log_id,
+                "pubkey_hex": pubkey.hex(),
+                "accumulator": accumulator,
+                "rate_limit_per_min": 60,
+                "wire_form": wire_form,
+            }
+        ]
     )
+
+
+def _json_signing_body(cp: dict) -> dict:
+    fields = ("v", "kind", "log_id", "mmr_size", "root", "prev_size", "prev_root", "key_id", "timestamp")
+    return {k: cp[k] for k in fields}
+
+
+def _json_checkpoint(
+    key: Ed25519PrivateKey,
+    *,
+    log_id: str = _LOG_ID,
+    mmr_size: int,
+    prev_size: int = 0,
+    root: str | None = None,
+    prev_root: str = "",
+    timestamp: str = "2026-09-02T00:00:00Z",
+) -> dict:
+    """Build a JSON CheckpointRecord + Ed25519 signature from scratch --
+    same "never trust a shared builder to agree with itself" discipline as
+    `_checkpoint_cose` above, independently reimplemented here (not imported
+    from `test_checkpoint_json.py` or the router test file)."""
+    cp = {
+        "v": 1,
+        "kind": "mmr_checkpoint",
+        "log_id": log_id,
+        "mmr_size": mmr_size,
+        "root": root or ("a" * 64),
+        "prev_size": prev_size,
+        "prev_root": prev_root,
+        "key_id": key.public_key().public_bytes_raw().hex(),
+        "timestamp": timestamp,
+    }
+    digest = hashlib.sha256(
+        json.dumps(_json_signing_body(cp), sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    cp["signature"] = key.sign(digest.encode("ascii")).hex()
+    return json.dumps(cp).encode()
 
 
 @pytest.fixture()
@@ -259,6 +313,180 @@ def test_defaults_match_the_real_shipped_config():
     entry = allowlist.get(DEFAULT_EXPECTED_LOG_ID)
     assert entry is not None, f"{DEFAULT_EXPECTED_LOG_ID!r} is not enrolled in the shipped config"
     assert entry.grade == DEFAULT_EXPECTED_GRADE
+    # AgenTrust's pipeline mints json-ed25519, not COSE_Sign1 (added
+    # 2026-09-02) -- catches drift the same way as the grade assertion above.
+    assert entry.wire_form == WIRE_FORM_JSON_ED25519
+
+
+# --- per-submitter DECLARED wire form (item 3, 2026-09-02 amendment) --------
+#
+# check_checkpoint_wire dispatches to the decoder `expected_log_id` DECLARES
+# in the allowlist -- never a single hardcoded wire, and never checked
+# against the OTHER form's rules ("compare like-for-like ... never
+# cross-graded", the 2026-09-02 amendment's framing).
+
+
+def test_json_declared_submitter_checked_as_json(enrolled_key):
+    allowlist = _allowlist(pubkey=enrolled_key.public_key().public_bytes_raw(), wire_form=WIRE_FORM_JSON_ED25519)
+    body = _json_checkpoint(enrolled_key, mmr_size=10)
+    report = check_checkpoint_wire(body, expected_log_id=_LOG_ID, allowlist=allowlist)
+    assert not report.has_failure, report.render()
+    names = {c.name for c in report.checks}
+    assert names == {"wire_structure", "signature_verified", "sub_pattern", "enrolled_log_id", "countersign_grade"}
+    assert report.claims["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    wire_detail = next(c.detail for c in report.checks if c.name == "wire_structure")
+    assert "json-ed25519" in wire_detail
+
+
+def test_cose_declared_submitter_checked_as_cose_unchanged(enrolled_key):
+    """Regression: the default (cose) declared form behaves exactly as
+    before this amendment -- same check names, same COSE-specific detail."""
+    allowlist = _allowlist(pubkey=enrolled_key.public_key().public_bytes_raw(), wire_form=WIRE_FORM_COSE_SIGN1)
+    cose = _checkpoint_cose(enrolled_key, mmr_size=10)
+    report = check_checkpoint_wire(cose, expected_log_id=_LOG_ID, allowlist=allowlist)
+    assert not report.has_failure, report.render()
+    wire_detail = next(c.detail for c in report.checks if c.name == "wire_structure")
+    assert "application/cll-checkpoint+cbor" in wire_detail
+
+
+def test_json_bytes_against_a_cose_declared_submitter_fails_wire_never_cross_graded(enrolled_key):
+    """The 'never cross-graded' guarantee: a submitter enrolled as cose
+    (the default) sending JSON bytes must FAIL wire_structure -- never be
+    silently checked as if json-ed25519 were its declared form."""
+    allowlist = _allowlist(pubkey=enrolled_key.public_key().public_bytes_raw(), wire_form=WIRE_FORM_COSE_SIGN1)
+    body = _json_checkpoint(enrolled_key, mmr_size=10)
+    report = check_checkpoint_wire(body, expected_log_id=_LOG_ID, allowlist=allowlist)
+    assert report.has_failure
+    assert report.claims is None
+    assert any(c.name == "wire_structure" and c.status == "FAIL" for c in report.checks)
+
+
+def test_cose_bytes_against_a_json_declared_submitter_fails_wire_never_cross_graded(enrolled_key):
+    allowlist = _allowlist(pubkey=enrolled_key.public_key().public_bytes_raw(), wire_form=WIRE_FORM_JSON_ED25519)
+    cose = _checkpoint_cose(enrolled_key, mmr_size=10)
+    report = check_checkpoint_wire(cose, expected_log_id=_LOG_ID, allowlist=allowlist)
+    assert report.has_failure
+    assert report.claims is None
+    assert any(c.name == "wire_structure" and c.status == "FAIL" for c in report.checks)
+
+
+def test_json_root_never_reconstructed_from_a_peak_list():
+    """THEIR commitment is a bagged MMR root (an opaque authenticated
+    string), not our peak-list encoding -- this must pass through exactly
+    as submitted, never run through _root_from_peaks or any other
+    reconstruction, for any root value (including one that isn't derivable
+    from any peak list at all)."""
+    key = Ed25519PrivateKey.generate()
+    allowlist = _allowlist(pubkey=key.public_key().public_bytes_raw(), wire_form=WIRE_FORM_JSON_ED25519)
+    opaque_root = "deadbeef" * 8
+    body = _json_checkpoint(key, mmr_size=1, root=opaque_root)
+    report = check_checkpoint_wire(body, expected_log_id=_LOG_ID, allowlist=allowlist)
+    assert not report.has_failure, report.render()
+    assert report.claims["root"] == opaque_root
+
+
+def test_json_impostor_signature_under_enrolled_iss_fails_at_signature_stage():
+    """Mirrors the COSE impostor test above, for the json-ed25519 form: the
+    pinned key is what's checked, never the JSON body's own key_id."""
+    impostor_key = Ed25519PrivateKey.generate()
+    real_enrolled_key = Ed25519PrivateKey.generate()
+    allowlist = _allowlist(pubkey=real_enrolled_key.public_key().public_bytes_raw(), wire_form=WIRE_FORM_JSON_ED25519)
+    body = _json_checkpoint(impostor_key, mmr_size=10)  # self-signs + self-asserts its OWN key_id
+    report = check_checkpoint_wire(body, expected_log_id=_LOG_ID, allowlist=allowlist)
+    assert report.has_failure
+    assert report.claims is None
+    assert any(c.name == "wire_structure" and c.status == "PASS" for c in report.checks)
+    assert any(
+        c.name == "signature_verified" and c.status == "FAIL" and "pinned" in c.detail
+        for c in report.checks
+    )
+
+
+def test_json_bad_signature_fails_named():
+    key = Ed25519PrivateKey.generate()
+    allowlist = _allowlist(pubkey=key.public_key().public_bytes_raw(), wire_form=WIRE_FORM_JSON_ED25519)
+    body = _json_checkpoint(key, mmr_size=10)
+    tampered = json.loads(body)
+    tampered["signature"] = ("0" if tampered["signature"][0] != "0" else "1") + tampered["signature"][1:]
+    report = check_checkpoint_wire(json.dumps(tampered).encode(), expected_log_id=_LOG_ID, allowlist=allowlist)
+    assert report.has_failure
+    assert report.claims is None
+    assert any(c.name == "signature_verified" and c.status == "FAIL" for c in report.checks)
+
+
+# --- STEP 3: the real live checkpoint-1 (2026-09-02 amendment) --------------
+#
+# trace-registry/v1's checkpoint 1 -- LIVE as of 2026-09-01. Read verbatim
+# from agentrust-io/trace-registry upstream commit 55e1270
+# (registry/2026/09/01.ndjson .mmr_checkpoint), never retyped/guessed (see
+# _ops/QUEUE_PROTOCOL.md §7b). This runs the ACTUAL conformance pass against
+# what their pipeline actually published, through the REAL committed
+# allowlist config (not a synthetic one).
+
+_LIVE_CHECKPOINT_1 = json.dumps(
+    {
+        "v": 1,
+        "kind": "mmr_checkpoint",
+        "log_id": "trace-registry/v1",
+        "mmr_size": 1,
+        "root": "3af8ddf2c1f429bb4fc670437e48640887f60de809b18f8ccea55fefb0c6639a",
+        "prev_size": 0,
+        "prev_root": "",
+        "key_id": "bc133259c094f63694b4ec48a295d7501a9a0cd536df5631fb4663c155f7bc90",
+        "timestamp": "2026-09-01T21:39:37Z",
+        "signature": (
+            "a1ad25e2fd8f56e9c07a345fd5bde66f950afffc9d55af91f586cef1840c4ad"
+            "cd992fc1e277c94f26fb673c0e0ad51a6fcff2e22cd58806133416d4c5c3e930e"
+        ),
+    }
+).encode()
+
+
+def test_step3_live_checkpoint_1_conformance_pass():
+    """Runs check_checkpoint_wire against the REAL bytes trace-registry/v1
+    published as checkpoint 1, through the real shipped allowlist config --
+    items (1)+(2) of [trace-registry-first-checkpoint-conformance], now
+    actually fireable since their first real checkpoint exists."""
+    report = check_checkpoint_wire(_LIVE_CHECKPOINT_1)  # all defaults: real config, real expected log_id/grade
+    assert not report.has_failure, report.render()
+    assert report.claims["mmr_size"] == 1
+    assert report.claims["root"] == "3af8ddf2c1f429bb4fc670437e48640887f60de809b18f8ccea55fefb0c6639a"
+    assert report.claims["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+
+
+def test_step3_chain_continuity_harness_ready_for_checkpoint_2():
+    """Checkpoint 2 does not exist yet (only checkpoint 1 has published as
+    of 2026-09-02 -- upstream agentrust-io/trace-registry main is
+    1e2d0b6, one checkpoint). This pins that the chain-continuity machinery
+    (item 4) is READY to run the moment it lands: checkpoint 1 vs a
+    correctly-chained synthetic "checkpoint 2" passes, and vs the reported
+    fresh-chain-every-15-min regression shape fails -- exactly the two
+    outcomes the real checkpoint 2 will produce one of."""
+    live_wire = check_checkpoint_wire(_LIVE_CHECKPOINT_1)
+    assert not live_wire.has_failure, live_wire.render()
+    cp1 = live_wire.claims
+
+    correctly_chained_cp2 = {
+        "log_id": cp1["log_id"],
+        "mmr_size": 2,
+        "root": "b" * 64,
+        "prev_size": cp1["mmr_size"],
+        "prev_root": cp1["root"],
+    }
+    ok_report = check_chain_continuity(cp1, correctly_chained_cp2)
+    assert not ok_report.has_failure, ok_report.render()
+
+    fresh_chain_cp2 = {
+        "log_id": cp1["log_id"],
+        "mmr_size": 1,
+        "root": "c" * 64,
+        "prev_size": 0,
+        "prev_root": "",
+    }
+    regression_report = check_chain_continuity(cp1, fresh_chain_cp2)
+    assert regression_report.has_failure
+    detail = next(c.detail for c in regression_report.checks if c.name == "chain_continuity")
+    assert "ephemeral-runner-state regression" in detail
 
 
 # --- check_chain_continuity (task item 4 -- the critical regression check) --

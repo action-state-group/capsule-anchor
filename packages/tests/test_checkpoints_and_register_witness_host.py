@@ -492,6 +492,8 @@ from capsule_anchor.anchoring.submitters import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
     GRADE_COUNTERSIGNED_OBSERVED,
     GRADE_MMR_VERIFIED,
+    WIRE_FORM_COSE_SIGN1,
+    WIRE_FORM_JSON_ED25519,
     SubmitterAllowlist,
 )
 
@@ -518,6 +520,7 @@ def _enroll(
     pubkey: bytes,
     accumulator: str = ACCUMULATOR_FOREIGN,
     rate_limit_per_min: int = 60,
+    wire_form: str = WIRE_FORM_COSE_SIGN1,
 ) -> None:
     """Configure the shared allowlist with exactly one entry. Safe to call
     after ``client`` was built -- ``configure_submitters`` is process-wide
@@ -532,6 +535,7 @@ def _enroll(
                     "pubkey_hex": pubkey.hex(),
                     "accumulator": accumulator,
                     "rate_limit_per_min": rate_limit_per_min,
+                    "wire_form": wire_form,
                 }
             ]
         )
@@ -547,6 +551,10 @@ def test_real_shipped_config_enrolls_trace_registry_with_foreign_grade():
     assert entry.pubkey.hex() == _TRACE_REGISTRY_PUBKEY_HEX
     assert entry.accumulator == ACCUMULATOR_FOREIGN
     assert entry.grade == GRADE_COUNTERSIGNED_OBSERVED
+    # AgenTrust's pipeline mints json-ed25519, not COSE_Sign1 -- see
+    # checkpoint_submitters.json's _comment (added 2026-09-02).
+    assert entry.wire_form == WIRE_FORM_JSON_ED25519
+    assert entry.field_map is not None  # identity-filled -- verified against their real field set
 
 
 def test_enrolled_submission_signed_by_pinned_key_accepted_with_grade(client, agentrust_key):
@@ -834,3 +842,197 @@ def test_per_submitter_rate_limit_does_not_affect_non_enrolled_log_ids(client, k
     cose_other = _checkpoint_cose(key, log_id="unrelated-log", mmr_size=1, new_peaks=_peaks_for("rl-scope-2"))
     s2, b2 = _post_checkpoint(client, cose_other)
     assert s2 == 200, b2
+
+
+# --- json-ed25519 enrolled submitters: POST /checkpoints, JSON content type --
+#
+# An enrolled entry may DECLARE wire_form=json-ed25519 instead of the default
+# cose -- for a submitter (AgenTrust's trace-registry) whose own pipeline
+# mints the CLL CheckpointRecord as deterministic JSON + a bare Ed25519
+# signature. Sending Content-Type: application/cll-checkpoint+json routes
+# here instead of the COSE path above; every COSE test above is unaffected
+# (still the default when the header names cbor or is absent).
+
+_JSON_CONTENT_TYPE = "application/cll-checkpoint+json"
+
+
+def _json_signing_body(cp: dict) -> bytes:
+    fields = ("v", "kind", "log_id", "mmr_size", "root", "prev_size", "prev_root", "key_id", "timestamp")
+    body = {k: cp[k] for k in fields}
+    return json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _json_checkpoint(
+    key: Ed25519PrivateKey,
+    *,
+    log_id: str,
+    mmr_size: int,
+    prev_size: int = 0,
+    root: str | None = None,
+    prev_root: str = "",
+    key_id: str | None = None,
+    timestamp: str = "2026-09-02T00:00:00Z",
+    kind: str = "mmr_checkpoint",
+    v: int = 1,
+) -> dict:
+    """Build a JSON CheckpointRecord + Ed25519 signature FROM SCRATCH --
+    same discipline as ``_checkpoint_cose`` above: this file must exercise
+    verifying what a STRANGER's bytes claim, never a shared builder agreeing
+    with itself. Mirrors trace_verify._checkpoint.CheckpointRecord exactly
+    (verified against their live checkpoint 1 in test_checkpoint_json.py)."""
+    cp = {
+        "v": v,
+        "kind": kind,
+        "log_id": log_id,
+        "mmr_size": mmr_size,
+        "root": root or ("a" * 64),
+        "prev_size": prev_size,
+        "prev_root": prev_root,
+        "key_id": key_id or key.public_key().public_bytes_raw().hex(),
+        "timestamp": timestamp,
+    }
+    digest = hashlib.sha256(_json_signing_body(cp)).hexdigest()
+    cp["signature"] = key.sign(digest.encode("ascii")).hex()
+    return cp
+
+
+def _post_json_checkpoint(client: TestClient, cp: dict) -> tuple[int, dict]:
+    resp = client.post(
+        "/checkpoints", content=json.dumps(cp), headers={"Content-Type": _JSON_CONTENT_TYPE}
+    )
+    return resp.status_code, (resp.json() if resp.content else {})
+
+
+def test_json_enrolled_submission_accepted_with_grade(client, agentrust_key):
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        wire_form=WIRE_FORM_JSON_ED25519,
+    )
+    cp = _json_checkpoint(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1)
+    status, body = _post_json_checkpoint(client, cp)
+    assert status == 200, body
+    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert body["receipt_b64"]
+
+
+def test_json_real_live_checkpoint_1_accepted_end_to_end(client):
+    """The exact bytes AgenTrust's trace-registry actually published as
+    checkpoint 1 (agentrust-io/trace-registry upstream commit 55e1270,
+    registry/2026/09/01.ndjson .mmr_checkpoint) -- run through the REAL
+    committed config (not a synthetic allowlist), proving the shipped
+    config + this code accept what their pipeline actually produced."""
+    live_config = SubmitterAllowlist.load(DEFAULT_CONFIG_PATH)
+    configure_submitters(live_config)
+    cp = {
+        "v": 1,
+        "kind": "mmr_checkpoint",
+        "log_id": "trace-registry/v1",
+        "mmr_size": 1,
+        "root": "3af8ddf2c1f429bb4fc670437e48640887f60de809b18f8ccea55fefb0c6639a",
+        "prev_size": 0,
+        "prev_root": "",
+        "key_id": "bc133259c094f63694b4ec48a295d7501a9a0cd536df5631fb4663c155f7bc90",
+        "timestamp": "2026-09-01T21:39:37Z",
+        "signature": (
+            "a1ad25e2fd8f56e9c07a345fd5bde66f950afffc9d55af91f586cef1840c4ad"
+            "cd992fc1e277c94f26fb673c0e0ad51a6fcff2e22cd58806133416d4c5c3e930e"
+        ),
+    }
+    status, body = _post_json_checkpoint(client, cp)
+    assert status == 200, body
+    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+
+
+def test_json_unknown_key_claiming_enrolled_iss_rejects_401(client, key, agentrust_key):
+    """The core protection, JSON form: a checkpoint claiming
+    trace-registry/v1 but signed (and self-asserting key_id) by a
+    DIFFERENT, unenrolled key must be rejected -- the pinned key is what's
+    checked, not the self-asserted key_id."""
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        wire_form=WIRE_FORM_JSON_ED25519,
+    )
+    impostor_key = key
+    cp = _json_checkpoint(impostor_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1)
+    status, body = _post_json_checkpoint(client, cp)
+    assert status == 401, body
+    assert "pinned" in body["detail"].lower()
+
+
+def test_json_bad_signature_rejects_401(client, agentrust_key):
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        wire_form=WIRE_FORM_JSON_ED25519,
+    )
+    cp = _json_checkpoint(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1)
+    cp["signature"] = ("0" if cp["signature"][0] != "0" else "1") + cp["signature"][1:]
+    status, body = _post_json_checkpoint(client, cp)
+    assert status == 401, body
+
+
+def test_json_form_refused_for_a_cose_declared_enrolled_submitter(client, agentrust_key):
+    """An entry enrolled WITHOUT wire_form=json-ed25519 (the default, cose)
+    must NOT accept a JSON submission just because the log_id is enrolled --
+    the declared form gates it, not enrollment alone."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    cp = _json_checkpoint(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1)
+    status, body = _post_json_checkpoint(client, cp)
+    assert status == 400, body
+    assert "json-ed25519" in body["detail"]
+
+
+def test_json_form_refused_for_a_non_enrolled_log_id(client, key):
+    """JSON form never falls back to the retired open self-asserted-key_id
+    behavior -- a log_id with NO enrollment at all is refused by name, not
+    silently accepted."""
+    cp = _json_checkpoint(key, log_id="nobody-enrolled-this/v1", mmr_size=1)
+    status, body = _post_json_checkpoint(client, cp)
+    assert status == 400, body
+    assert "json-ed25519" in body["detail"]
+
+
+def test_json_missing_field_refused_400(client, agentrust_key):
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        wire_form=WIRE_FORM_JSON_ED25519,
+    )
+    cp = _json_checkpoint(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1)
+    del cp["timestamp"]
+    status, body = _post_json_checkpoint(client, cp)
+    assert status == 400, body
+
+
+def test_default_content_type_still_routes_to_cose_path(client, agentrust_key):
+    """Regression guard: omitting the Content-Type header (or sending the
+    cbor one) is UNCHANGED by this work -- always the COSE path. JSON
+    acceptance is ADDITIVE (item 1: "SAME pinned key, grade UNCHANGED") --
+    declaring wire_form=json-ed25519 does not take away a submitter's
+    ability to also send a correctly-signed COSE_Sign1 statement; the SAME
+    pinned key verifies either wire on the ACCEPT path. (The conformance
+    CHECKER's declared-form dispatch, exercised in
+    test_cross_witness_conformance.py, is the place per-submitter form is
+    enforced for READING/grading -- see checker.check_checkpoint_wire.)"""
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        wire_form=WIRE_FORM_JSON_ED25519,
+    )
+    cose = _checkpoint_cose(
+        agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1, new_peaks=_peaks_for("cose-still-works"),
+    )
+    status, body = _post_checkpoint(client, cose)  # explicit cose content-type, as every COSE test above sends
+    assert status == 200, body
+    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+
+
+def test_json_bytes_sent_with_no_content_type_treated_as_cose_and_fails_cleanly(client, agentrust_key):
+    """A JSON body posted WITHOUT the json content type is never silently
+    accepted as JSON -- it's routed to the COSE decoder (the default) and
+    fails there cleanly (never a 500)."""
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        wire_form=WIRE_FORM_JSON_ED25519,
+    )
+    cp = _json_checkpoint(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1)
+    resp = client.post("/checkpoints", content=json.dumps(cp))  # no Content-Type header
+    assert resp.status_code == 400
+    assert resp.status_code != 500
