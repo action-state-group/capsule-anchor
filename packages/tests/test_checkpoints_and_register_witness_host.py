@@ -681,6 +681,142 @@ def test_per_submitter_rate_limit_429_independent_of_global_limiter(client, agen
     assert s2 == 429, b2
 
 
+# --- read-back-by-log_id + equivocation flag (GET /checkpoints/{log_id}) -----
+#
+# [witness-checkpoint-read-surface]: POST /checkpoints alone gives a watcher
+# no way to ask "what's the last checkpoint you witnessed for log_id X?" --
+# these cover the queryable read-back surface and its equivocation flag
+# (loud-surface detection of two DIFFERENT roots at the SAME position; see
+# the module docstring's scope line -- refusing the write is a stage-2
+# follow-up, NOT this surface's job -- both submissions below still 200).
+
+
+def test_readback_unknown_log_id_404(client):
+    resp = client.get("/checkpoints/never-seen-log")
+    assert resp.status_code == 404
+
+
+def test_readback_returns_last_checkpoint_claims_and_receipt(client, key):
+    new_peaks = _peaks_for("log-RB-10")
+    cose = _checkpoint_cose(key, log_id="log-RB", mmr_size=10, new_peaks=new_peaks)
+    post_status, post_body = _post_checkpoint(client, cose)
+    assert post_status == 200, post_body
+
+    resp = client.get("/checkpoints/log-RB")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["log_id"] == "log-RB"
+    assert body["mmr_size"] == 10
+    assert body["root"] == _root_from_peaks(new_peaks).hex()
+    assert body["key_id"] == key.public_key().public_bytes_raw().hex()
+    assert body["grade"] is None  # non-enrolled log_id
+    assert body["entry_hash"] == post_body["entry_hash"]
+    assert body["receipt_b64"] == post_body["receipt_b64"]
+    assert body["equivocations"] == []  # single checkpoint -- clean
+
+
+def test_readback_reflects_enrolled_submitters_grade(client, agentrust_key):
+    """log_id with a "/" ([witness-enroll-trace-registry-key]) round-trips
+    through the :path route converter, and the countersign grade -- only
+    ever returned on the original POST response before this task -- is now
+    queryable later too (deliverable 1: bytes/claims AND grade)."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    cose = _checkpoint_cose(
+        agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=5,
+        new_peaks=_peaks_for(f"{_TRACE_REGISTRY_LOG_ID}-rb-5"),
+    )
+    post_status, post_body = _post_checkpoint(client, cose)
+    assert post_status == 200, post_body
+    assert post_body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+
+    resp = client.get(f"/checkpoints/{_TRACE_REGISTRY_LOG_ID}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+
+
+def test_readback_tracks_the_most_recently_witnessed_position(client, key):
+    peaks_10 = _peaks_for("log-RB2-10")
+    cose1 = _checkpoint_cose(key, log_id="log-RB2", mmr_size=10, new_peaks=peaks_10)
+    cose2 = _checkpoint_cose(
+        key, log_id="log-RB2", mmr_size=20, new_peaks=_peaks_for("log-RB2-20"),
+        prev_size=10, prev_peaks=peaks_10, issued_at="2026-08-26T00:10:00Z",
+    )
+    assert _post_checkpoint(client, cose1)[0] == 200
+    assert _post_checkpoint(client, cose2)[0] == 200
+
+    body = client.get("/checkpoints/log-RB2").json()
+    assert body["mmr_size"] == 20
+    assert body["equivocations"] == []
+
+
+def test_two_checkpoints_same_position_different_root_flag_equivocation(client, key):
+    """THE loud-surface case: two DIFFERENT roots submitted for the exact
+    SAME (log_id, mmr_size). The write path accepts BOTH -- refusing at the
+    write boundary is a stage-2 follow-up, not this task (see module
+    docstring's scope line) -- but the read surface must surface the fork
+    loudly, which is the launch claim's proof."""
+    peaks_a = _peaks_for("log-EQ-100-a")
+    peaks_b = _peaks_for("log-EQ-100-b")
+    cose_a = _checkpoint_cose(key, log_id="log-EQ", mmr_size=100, new_peaks=peaks_a)
+    cose_b = _checkpoint_cose(
+        key, log_id="log-EQ", mmr_size=100, new_peaks=peaks_b, issued_at="2026-08-26T00:05:00Z",
+    )
+    status_a, body_a = _post_checkpoint(client, cose_a)
+    status_b, body_b = _post_checkpoint(client, cose_b)
+    assert status_a == 200, body_a
+    assert status_b == 200, body_b  # write boundary does NOT refuse (scope line)
+    assert body_a["entry_hash"] != body_b["entry_hash"]
+
+    body = client.get("/checkpoints/log-EQ").json()
+    # the FIRST-seen root is preserved as "last" -- never silently
+    # overwritten by a later conflicting submission
+    assert body["root"] == _root_from_peaks(peaks_a).hex()
+    assert len(body["equivocations"]) == 1
+    eq = body["equivocations"][0]
+    assert eq["mmr_size"] == 100
+    assert eq["first"]["root"] == _root_from_peaks(peaks_a).hex()
+    assert eq["conflicting"]["root"] == _root_from_peaks(peaks_b).hex()
+    assert eq["first"]["entry_hash"] == body_a["entry_hash"]
+    assert eq["conflicting"]["entry_hash"] == body_b["entry_hash"]
+
+
+def test_resubmitting_the_same_checkpoint_does_not_flag_equivocation(client, key):
+    """Idempotent resubmission (identical bytes, identical root) at the SAME
+    position is NOT a fork -- must stay clean (this is the "single ->
+    clean" acceptance case, exercised via the idempotent-resubmit path)."""
+    cose = _checkpoint_cose(key, log_id="log-EQ2", mmr_size=30, new_peaks=_peaks_for("log-EQ2-30"))
+    assert _post_checkpoint(client, cose)[0] == 200
+    assert _post_checkpoint(client, cose)[0] == 200
+
+    body = client.get("/checkpoints/log-EQ2").json()
+    assert body["equivocations"] == []
+
+
+def test_equivocation_at_an_older_position_does_not_shadow_the_latest_checkpoint(client, key):
+    """An equivocation flagged at an EARLIER position must not hide behind
+    (or corrupt) the honestly-advanced latest checkpoint -- both surface:
+    mmr_size/root still reflect the latest honest state, equivocations
+    still lists the older fork."""
+    peaks_10a = _peaks_for("log-EQ3-10-a")
+    peaks_10b = _peaks_for("log-EQ3-10-b")
+    cose_10a = _checkpoint_cose(key, log_id="log-EQ3", mmr_size=10, new_peaks=peaks_10a)
+    cose_10b = _checkpoint_cose(
+        key, log_id="log-EQ3", mmr_size=10, new_peaks=peaks_10b, issued_at="2026-08-26T00:05:00Z",
+    )
+    cose_20 = _checkpoint_cose(
+        key, log_id="log-EQ3", mmr_size=20, new_peaks=_peaks_for("log-EQ3-20"),
+        prev_size=10, prev_peaks=peaks_10a, issued_at="2026-08-26T00:10:00Z",
+    )
+    assert _post_checkpoint(client, cose_10a)[0] == 200
+    assert _post_checkpoint(client, cose_10b)[0] == 200
+    assert _post_checkpoint(client, cose_20)[0] == 200
+
+    body = client.get("/checkpoints/log-EQ3").json()
+    assert body["mmr_size"] == 20
+    assert len(body["equivocations"]) == 1
+    assert body["equivocations"][0]["mmr_size"] == 10
+
+
 def test_per_submitter_rate_limit_does_not_affect_non_enrolled_log_ids(client, key, agentrust_key):
     """The per-submitter budget is scoped to the enrolled log_id only -- an
     unrelated, non-enrolled log_id is unaffected even after the enrolled

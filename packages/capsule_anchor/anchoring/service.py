@@ -1115,9 +1115,60 @@ class AnchorerService:
         those two (consistency check before the append, state commit after a
         successful one) -- additive, not a rewrite of this method or its
         storage/keying choices.
+
+        Also updates the queryable read surface (``get_checkpoint_readback``)
+        and equivocation flag -- see ``_record_checkpoint_read_surface``.
+        This NEVER refuses the write: detect-and-surface-loudly on the READ
+        side is in scope, refusing a conflicting submission at the write
+        boundary is the stage-2 concern above, not this route's job.
         """
         digest_hex = _checkpoint_digest(cp)
-        return self.register_signed_statement_full(bytes.fromhex(digest_hex))
+        result = self.register_signed_statement_full(bytes.fromhex(digest_hex))
+        self._record_checkpoint_read_surface(cp, result)
+        return result
+
+    def _record_checkpoint_read_surface(self, cp: dict, result: StatementRegistration) -> None:
+        """Record ``cp`` on the per-``log_id`` read surface, keyed by its
+        exact (``log_id``, ``mmr_size``) position.
+
+        A second checkpoint submitted for the SAME position with a
+        DIFFERENT root is equivocation (a fork attempt): the first-seen
+        record is preserved as evidence and the conflict is appended to
+        ``_store.get_checkpoint_equivocations`` so a watcher sees it on the
+        read surface -- backing the "the log cannot equivocate" claim.
+        """
+        with self._lock:
+            self._store.put_checkpoint_record(
+                cp["log_id"],
+                cp["mmr_size"],
+                {
+                    "root": cp["root"],
+                    "prev_size": cp["prev_size"],
+                    "prev_root": cp["prev_root"],
+                    "key_id": cp["key_id"],
+                    "timestamp": cp["timestamp"],
+                    "grade": cp.get("grade"),
+                    "entry_hash": result.entry_hash,
+                    "entry_hash_scheme": result.entry_hash_scheme,
+                    "leaf_index": result.leaf_index,
+                    "tree_size": result.tree_size,
+                    "receipt": result.receipt,
+                },
+            )
+
+    def get_checkpoint_readback(self, log_id: str) -> dict | None:
+        """Read-only resolve for ``GET /checkpoints/{log_id}``.
+
+        Returns the last checkpoint witnessed for ``log_id`` (its claims,
+        the receipt/entry-hash evidence, and its countersign ``grade``) plus
+        every equivocation flagged for it, or ``None`` if this ``log_id``
+        was never witnessed by ``POST /checkpoints``. A pure read -- never
+        registers or mutates anything.
+        """
+        last = self._store.get_last_checkpoint_record(log_id)
+        if last is None:
+            return None
+        return {**last, "equivocations": self._store.get_checkpoint_equivocations(log_id)}
 
     def get_registered_statement(
         self, entry_hash: str
