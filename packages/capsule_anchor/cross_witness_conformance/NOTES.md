@@ -95,3 +95,58 @@ AgenTrust's "fresh chain every 15 minutes" bug pattern before the blog claim shi
   cannot observe more than the receipt tie-back and the recomputed grade from outside; there is no
   additional external signal to check "no-key-means-no-checkpoint" / "fail-closed on root mismatch"
   against beyond `check_witness_tie_back` + `check_checkpoint_wire` both passing.
+
+## 2026-09-02 amendment — JSON-form acceptance + per-submitter declared wire form
+
+Follow-up to `[witness-enroll-trace-registry-key]` (#33) and this task (#34), filed as
+`[witness-enrolled-json-checkpoint-form]` once Imran confirmed (2026-09-01 suggested edits) that
+trace-registry's pipeline mints checkpoints as deterministic JSON + a bare Ed25519 signature
+(`trace_verify._checkpoint.CheckpointRecord`, `agentrust-io/trace-registry`) — COSE_Sign1 alignment
+(`trace-registry` PR #51 / `[trace-registry-align-51-cose-envelope]`) is a held, unmerged follow-up,
+not what ships today. #33's enrolled path verified COSE only, so an enrolled `trace-registry/v1`
+JSON submission 401ed.
+
+**What changed:**
+
+1. `submitters.py`: each enrolled entry now DECLARES a `wire_form` (`cose` default, or
+   `json-ed25519`) plus, for `json-ed25519`, a `field_map` (our canonical field name → the
+   submitter's own JSON key, identity-filled by default). `POST /checkpoints` dispatches on the
+   HTTP `Content-Type` header (`application/cll-checkpoint+json` routes to the new
+   `checkpoint_json.py`; anything else — including no header at all — is unchanged, the COSE path).
+   JSON acceptance is ADDITIVE and ENROLLED-SUBMITTER-ONLY: a `log_id` with no entry, or an entry
+   that hasn't declared `json-ed25519`, gets a named 400, never a fallback to the retired
+   fully-open JSON `key_id`-trusting path. The signature is always verified against the entry's
+   PINNED `pubkey`, never the submitted `key_id` — mirrors the COSE path's key-pinning exactly, and
+   the SAME grade rules apply (`accumulator: foreign` → `countersigned-observed`).
+2. `checker.check_checkpoint_wire` now dispatches to the DECODER `expected_log_id` declares
+   (`entry.wire_form`) instead of hardcoding COSE — a `json-ed25519`-declared submitter's checkpoint
+   is checked as JSON, a `cose`-declared one as COSE, and sending the WRONG form for a submitter's
+   declared entry fails `wire_structure` cleanly (never silently checked against the other form's
+   rules — "never cross-graded"). A `json-ed25519` checkpoint's `root`/`prev_root` are the
+   submitter's own opaque commitment (their bagged MMR root) and are never reconstructed via our
+   peak-list fold, matching `checkpoint_json.py`'s parser.
+3. `checkpoint_submitters.json`: `trace-registry/v1`'s entry now declares
+   `"wire_form": "json-ed25519"` (`field_map` omitted — their `CheckpointRecord` field set is
+   byte-identical to ours, verified directly against `src/trace_verify/_checkpoint.py` and their
+   live checkpoint 1, not guessed). Config committed, NOT deployed (Steven's click).
+
+**Step 3 — the real live checkpoint, run against this code:** `trace-registry/v1` checkpoint 1
+(`mmr_size=1`, `root=3af8ddf2c1f429bb4fc670437e48640887f60de809b18f8ccea55fefb0c6639a`) published
+2026-09-01 in `agentrust-io/trace-registry` upstream commit `55e1270`
+(`registry/2026/09/01.ndjson`'s `.mmr_checkpoint`) — read directly from their repo, never
+retyped/guessed (§7b). `test_step3_live_checkpoint_1_conformance_pass` runs
+`check_checkpoint_wire` against these EXACT bytes through the real committed (post-amendment)
+config: **PASS** — wire well-formed, signature verifies under the pinned key, `sub`-equivalent
+binding holds (log_id/mmr_size are direct signed fields in json-ed25519 form), `grade ==
+countersigned-observed`. This is an OFFLINE conformance pass (our own decode/verify code, the
+committed allowlist) — a live-witness tie-back (`check_witness_tie_back` against
+witness.agentactioncapsule.org) was NOT attempted for checkpoint 1, because the JSON-acceptance
+code in this PR is NOT YET DEPLOYED (held, Steven's click) — the live witness today only accepts
+COSE, so a JSON POST of checkpoint 1 would 400 against the CURRENT deployment. Once deployed,
+re-running the live tie-back (or `watcher.py` against the live witness) is the natural follow-up.
+**Checkpoint 2 does not exist yet** (upstream `agentrust-io/trace-registry` `main` is `1e2d0b6`, one
+checkpoint total as of 2026-09-02) — `test_step3_chain_continuity_harness_ready_for_checkpoint_2`
+pins that the chain-continuity machinery (item 4) is ready and correctly distinguishes a
+correctly-chained checkpoint 2 from the reported fresh-chain-every-15-min regression shape, using
+checkpoint 1's real claims as the "first" side of the pair. Re-run `watcher.py` (or a direct
+`check_chain_continuity` call) the moment a real checkpoint 2 publishes.

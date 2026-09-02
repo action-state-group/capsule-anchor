@@ -36,6 +36,50 @@ ACCUMULATOR_NATIVE_MMR = "native_mmr"
 ACCUMULATOR_FOREIGN = "foreign"
 _VALID_ACCUMULATORS = (ACCUMULATOR_NATIVE_MMR, ACCUMULATOR_FOREIGN)
 
+#: A submitter's DECLARED checkpoint wire form -- what ``POST /checkpoints``
+#: dispatches a submission from this ``log_id`` as. ``cose`` (default) is
+#: the [cll-checkpoint-cose-wire] COSE_Sign1 envelope (``checkpoint_cose.py``,
+#: unchanged). ``json-ed25519`` is the CLL ``CheckpointRecord`` JSON shape
+#: signed with a bare Ed25519 signature (``checkpoint_json.py``) -- for a
+#: submitter whose own pipeline mints that shape directly. This is a
+#: per-``log_id`` DECLARATION read from config, never sniffed from the
+#: request body: a submission in the wrong form for its declared entry is
+#: rejected, never silently accepted under the other form's rules (see
+#: ``checkpoint_json.py`` / ``checkpoint_cose.py`` and
+#: ``cross_witness_conformance.checker.check_checkpoint_wire``, which checks
+#: each submitter against exactly its declared form -- never a single
+#: hardcoded wire, and never cross-graded against the other form's fields).
+WIRE_FORM_COSE_SIGN1 = "cose"
+WIRE_FORM_JSON_ED25519 = "json-ed25519"
+_VALID_WIRE_FORMS = (WIRE_FORM_COSE_SIGN1, WIRE_FORM_JSON_ED25519)
+
+#: The canonical (our-side) CLL ``CheckpointRecord`` field names a
+#: ``json-ed25519`` checkpoint's signing body covers, plus the detached
+#: ``signature`` field itself (never part of the signing body). A
+#: ``json-ed25519`` entry's ``field_map`` (below) names, for each of these,
+#: the key the SUBMITTER actually uses in their JSON -- explicit per entry,
+#: never guessed/assumed to match ours.
+_JSON_CHECKPOINT_SIGNING_FIELDS = (
+    "v",
+    "kind",
+    "log_id",
+    "mmr_size",
+    "root",
+    "prev_size",
+    "prev_root",
+    "key_id",
+    "timestamp",
+)
+_JSON_CHECKPOINT_SIGNATURE_FIELD = "signature"
+_JSON_CHECKPOINT_ALL_FIELDS = (*_JSON_CHECKPOINT_SIGNING_FIELDS, _JSON_CHECKPOINT_SIGNATURE_FIELD)
+
+#: Identity mapping -- the default for a ``json-ed25519`` entry whose config
+#: omits ``field_map`` (or omits individual keys from it): "the submitter's
+#: JSON already uses our field name for this one." Verified true for
+#: ``trace-registry/v1`` (``trace_verify._checkpoint.CheckpointRecord`` uses
+#: this exact field set) as of 2026-09-01 -- see ``checkpoint_submitters.json``.
+_IDENTITY_FIELD_MAP = {k: k for k in _JSON_CHECKPOINT_ALL_FIELDS}
+
 #: Grade label served on the checkpoint stamp for an enrolled submitter.
 #: These two MUST stay textually distinct -- never let a foreign-accumulator
 #: entry read as if it carried the same guarantee as a native one (see the
@@ -66,6 +110,11 @@ class SubmitterEntry:
     pubkey: bytes  # raw 32-byte Ed25519 public key -- the ONLY key trusted for log_id
     accumulator: str  # ACCUMULATOR_NATIVE_MMR | ACCUMULATOR_FOREIGN
     rate_limit_per_min: int = DEFAULT_SUBMITTER_RATE_LIMIT_PER_MIN
+    wire_form: str = WIRE_FORM_COSE_SIGN1  # WIRE_FORM_COSE_SIGN1 | WIRE_FORM_JSON_ED25519
+    # our canonical field name -> submitter's field name; always fully
+    # populated (identity-filled) for a json-ed25519 entry, always None for
+    # a cose entry (see SubmitterAllowlist.from_list).
+    field_map: dict[str, str] | None = None
 
     @property
     def grade(self) -> str:
@@ -101,6 +150,13 @@ class SubmitterAllowlist:
 
     def __contains__(self, log_id: str) -> bool:
         return log_id in self._entries
+
+    def entries_by_wire_form(self, wire_form: str) -> list[SubmitterEntry]:
+        """Every enrolled entry declaring ``wire_form`` -- used by
+        ``checkpoint_json.py`` to resolve WHICH entry's ``field_map`` a raw
+        JSON submission's ``log_id`` belongs to, before that submission is
+        otherwise identified."""
+        return [e for e in self._entries.values() if e.wire_form == wire_form]
 
     @classmethod
     def from_list(cls, raw: list[dict]) -> SubmitterAllowlist:
@@ -144,6 +200,45 @@ class SubmitterAllowlist:
                     f"submitters config entry {i} ({log_id!r}): rate_limit_per_min must be "
                     "a positive integer"
                 )
+            wire_form = item.get("wire_form", WIRE_FORM_COSE_SIGN1)
+            if wire_form not in _VALID_WIRE_FORMS:
+                raise SubmitterConfigError(
+                    f"submitters config entry {i} ({log_id!r}): wire_form must be one of "
+                    f"{_VALID_WIRE_FORMS}, got {wire_form!r}"
+                )
+            raw_field_map = item.get("field_map")
+            if wire_form == WIRE_FORM_COSE_SIGN1:
+                if raw_field_map is not None:
+                    raise SubmitterConfigError(
+                        f"submitters config entry {i} ({log_id!r}): field_map is only "
+                        f"meaningful for wire_form={WIRE_FORM_JSON_ED25519!r}, not {wire_form!r}"
+                    )
+                field_map = None
+            else:
+                if raw_field_map is not None and not isinstance(raw_field_map, dict):
+                    raise SubmitterConfigError(
+                        f"submitters config entry {i} ({log_id!r}): field_map must be an object"
+                    )
+                field_map = dict(_IDENTITY_FIELD_MAP)
+                for our_key, their_key in (raw_field_map or {}).items():
+                    if our_key not in _JSON_CHECKPOINT_ALL_FIELDS:
+                        raise SubmitterConfigError(
+                            f"submitters config entry {i} ({log_id!r}): field_map names "
+                            f"unknown canonical field {our_key!r}, expected one of "
+                            f"{_JSON_CHECKPOINT_ALL_FIELDS}"
+                        )
+                    if not isinstance(their_key, str) or not their_key:
+                        raise SubmitterConfigError(
+                            f"submitters config entry {i} ({log_id!r}): field_map[{our_key!r}] "
+                            "must be a non-empty string"
+                        )
+                    field_map[our_key] = their_key
+                if len(set(field_map.values())) != len(field_map):
+                    raise SubmitterConfigError(
+                        f"submitters config entry {i} ({log_id!r}): field_map values must be "
+                        f"distinct (no two canonical fields reading the same submitted field), "
+                        f"got {field_map!r}"
+                    )
             if log_id in entries:
                 raise SubmitterConfigError(f"duplicate submitter log_id {log_id!r} in config")
             entries[log_id] = SubmitterEntry(
@@ -151,6 +246,8 @@ class SubmitterAllowlist:
                 pubkey=pubkey,
                 accumulator=accumulator,
                 rate_limit_per_min=rate_limit,
+                wire_form=wire_form,
+                field_map=field_map,
             )
         return cls(entries)
 

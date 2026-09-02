@@ -40,8 +40,14 @@ from capsule_anchor.anchoring.checkpoint_cose import (
     NotACheckpointError,
     parse_and_verify_checkpoint_cose,
 )
+from capsule_anchor.anchoring.checkpoint_json import parse_and_verify_checkpoint_json
 from capsule_anchor.anchoring.service import _checkpoint_digest
-from capsule_anchor.anchoring.submitters import GRADE_COUNTERSIGNED_OBSERVED, SubmitterAllowlist
+from capsule_anchor.anchoring.submitters import (
+    GRADE_COUNTERSIGNED_OBSERVED,
+    WIRE_FORM_COSE_SIGN1,
+    WIRE_FORM_JSON_ED25519,
+    SubmitterAllowlist,
+)
 
 #: Identity enrolled 2026-09-01 (Imran, AgenTrust) -- see
 #: `packages/capsule_anchor/config/checkpoint_submitters.json`, the single
@@ -91,7 +97,7 @@ class ConformanceReport:
 
 
 def check_checkpoint_wire(
-    cose_bytes: bytes,
+    checkpoint_bytes: bytes,
     *,
     expected_log_id: str = DEFAULT_EXPECTED_LOG_ID,
     expected_grade: str | None = DEFAULT_EXPECTED_GRADE,
@@ -100,18 +106,30 @@ def check_checkpoint_wire(
     """Task items (1) and (2): wire conformance + enrolled-identity/grade for
     one submitted checkpoint.
 
-    Independently decodes + verifies the COSE_Sign1 envelope (content type
-    `application/cll-checkpoint+cbor`, claim set, CWT `sub` pattern,
-    signature) via the SAME independent decoder AND the SAME committed
-    allowlist config the live witness itself loads
-    (`capsule_anchor.anchoring.checkpoint_cose` + `.submitters`) -- a PASS
-    here means "the witness would accept this, from this identity, at this
-    grade", not just "this looks plausible." `allowlist` defaults to
+    Dispatches `checkpoint_bytes` to the DECODER `expected_log_id` actually
+    DECLARES in the allowlist (`entry.wire_form` -- `submitters.py`): COSE_Sign1
+    (`checkpoint_cose.parse_and_verify_checkpoint_cose`, the default when
+    `expected_log_id` isn't enrolled or declares `cose`) or the JSON
+    `CheckpointRecord` (`checkpoint_json.parse_and_verify_checkpoint_json`,
+    when it declares `json-ed25519`). This is a per-SUBMITTER declared form,
+    never sniffed from the bytes and never a single hardcoded wire for every
+    caller -- passing COSE bytes for a `json-ed25519`-declared submitter (or
+    JSON bytes for a `cose`-declared one) fails wire_structure, it is never
+    silently checked against the OTHER form's rules. `root`/`prev_root` for a
+    `json-ed25519` checkpoint are the submitter's own opaque commitment
+    (e.g. their bagged MMR root) and are never cross-checked against our
+    peak-list fold -- see `checkpoint_json.py`'s module docstring; that
+    would be comparing two different commitment schemes as if they were one.
+
+    Both decoders independently verify via the SAME committed allowlist
+    config the live witness itself loads -- a PASS here means "the witness
+    would accept this, from this identity, at this grade, in this wire
+    form", not just "this looks plausible." `allowlist` defaults to
     `SubmitterAllowlist.from_env_or_default()` (the in-package committed
     config); pass a different one only to test against a non-default entry.
 
-    Because `parse_and_verify_checkpoint_cose` now PINS verification to the
-    enrolled key for `expected_log_id` (the self-asserted COSE `kid` is
+    Because both decoders PIN verification to the enrolled key for
+    `expected_log_id` (the self-asserted COSE `kid` / JSON `key_id` is
     ignored entirely once an entry matches -- see `submitters.py`), a
     checkpoint claiming `trace-registry/v1` but signed with any OTHER key
     fails at the signature stage below (`CheckpointSignatureError`, from the
@@ -127,38 +145,68 @@ def check_checkpoint_wire(
     """
     if allowlist is None:
         allowlist = SubmitterAllowlist.from_env_or_default()
+    entry = allowlist.get(expected_log_id)
+    wire_form = entry.wire_form if entry is not None else WIRE_FORM_COSE_SIGN1
     report = ConformanceReport()
     try:
-        claims = parse_and_verify_checkpoint_cose(cose_bytes, allowlist=allowlist)
+        if wire_form == WIRE_FORM_JSON_ED25519:
+            claims = parse_and_verify_checkpoint_json(checkpoint_bytes, allowlist=allowlist)
+        else:
+            claims = parse_and_verify_checkpoint_cose(checkpoint_bytes, allowlist=allowlist)
     except NotACheckpointError as exc:
-        report.add("wire_structure", "FAIL", f"not a well-formed CLL checkpoint: {exc}")
+        report.add(
+            "wire_structure", "FAIL", f"not a well-formed CLL checkpoint ({wire_form} form): {exc}"
+        )
         return report
     except CheckpointSignatureError as exc:
-        report.add("wire_structure", "PASS", "content-type + claim set well-formed")
+        report.add("wire_structure", "PASS", f"{wire_form} form: content-type/claim set well-formed")
         report.add("signature_verified", "FAIL", str(exc))
         return report
 
     report.claims = claims
-    report.add(
-        "wire_structure",
-        "PASS",
-        f"content-type application/cll-checkpoint+cbor; kind={claims['kind']!r}; "
-        f"log_size={claims['mmr_size']}; prev_size={claims['prev_size']}",
-    )
-    report.add(
-        "signature_verified",
-        "PASS",
-        "COSE_Sign1 verifies under "
-        + ("its pinned enrolled key" if claims.get("grade") is not None else "its own self-asserted kid")
-        + f" (key_id={claims['key_id']})",
-    )
-    # parse_and_verify_checkpoint_cose already enforces sub == f"{iss}#{log_size}"
-    # before returning claims at all -- if we got here, it passed.
-    report.add(
-        "sub_pattern",
-        "PASS",
-        f"sub == '{claims['log_id']}#{claims['mmr_size']}'",
-    )
+    if wire_form == WIRE_FORM_JSON_ED25519:
+        report.add(
+            "wire_structure",
+            "PASS",
+            f"json-ed25519 CheckpointRecord; kind={claims['kind']!r}; "
+            f"log_size={claims['mmr_size']}; prev_size={claims['prev_size']}",
+        )
+        report.add(
+            "signature_verified",
+            "PASS",
+            "Ed25519 signature verifies under its pinned enrolled key "
+            f"(key_id={claims['key_id']})",
+        )
+        # json-ed25519 has no separate CWT `sub` claim to check -- log_id and
+        # mmr_size are direct fields in the signed body itself (see
+        # checkpoint_json.py), so there is no analogous binding check to run.
+        report.add(
+            "sub_pattern",
+            "PASS",
+            "json-ed25519 form: log_id and mmr_size are direct fields in the signed "
+            "body (no separate CWT subject to bind, unlike the cose form)",
+        )
+    else:
+        report.add(
+            "wire_structure",
+            "PASS",
+            f"content-type application/cll-checkpoint+cbor; kind={claims['kind']!r}; "
+            f"log_size={claims['mmr_size']}; prev_size={claims['prev_size']}",
+        )
+        report.add(
+            "signature_verified",
+            "PASS",
+            "COSE_Sign1 verifies under "
+            + ("its pinned enrolled key" if claims.get("grade") is not None else "its own self-asserted kid")
+            + f" (key_id={claims['key_id']})",
+        )
+        # parse_and_verify_checkpoint_cose already enforces sub == f"{iss}#{log_size}"
+        # before returning claims at all -- if we got here, it passed.
+        report.add(
+            "sub_pattern",
+            "PASS",
+            f"sub == '{claims['log_id']}#{claims['mmr_size']}'",
+        )
 
     if claims["log_id"] == expected_log_id:
         report.add("enrolled_log_id", "PASS", f"iss == {expected_log_id!r}")

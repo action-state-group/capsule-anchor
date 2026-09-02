@@ -4,6 +4,7 @@
     "pubkey_hex": "bc133259c094f63694b4ec48a295d7501a9a0cd536df5631fb4663c155f7bc90",
     "accumulator": "foreign",
     "rate_limit_per_min": 60,
-    "_comment": "AgenTrust trace registry (OPAQUE/AgenTrust). Identity from Imran, 2026-09-01. Foreign accumulator: this witness countersigns observed commitments for this log_id, it does not verify AgenTrust's own consistency proofs (v1 scope; see submitters.py docstring and README)."
+    "wire_form": "json-ed25519",
+    "_comment": "AgenTrust trace registry (OPAQUE/AgenTrust). Identity from Imran, 2026-09-01. Foreign accumulator: this witness countersigns observed commitments for this log_id, it does not verify AgenTrust's own consistency proofs (v1 scope; see submitters.py docstring and README). wire_form=json-ed25519 (added 2026-09-02): their pipeline (trace_verify._checkpoint.CheckpointRecord, agentrust-io/trace-registry) mints the CLL checkpoint as deterministic JSON + a bare Ed25519 signature, not COSE_Sign1 -- COSE alignment (trace-registry PR #51 / [trace-registry-align-51-cose-envelope]) is a held, unmerged follow-up, not what ships today. field_map omitted: their CheckpointRecord field set (v/kind/log_id/mmr_size/root/prev_size/prev_root/key_id/timestamp/signature) is byte-identical to ours (verified directly against src/trace_verify/_checkpoint.py and their live checkpoint 1, registry/2026/09/01.ndjson entry .mmr_checkpoint, upstream commit 55e1270), so the identity mapping applies -- see checkpoint_json.py."
   }
 ]

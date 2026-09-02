@@ -82,6 +82,7 @@ from capsule_anchor.contracts.types import (
 )
 
 from .checkpoint_cose import parse_and_verify_checkpoint_cose
+from .checkpoint_json import CLL_CHECKPOINT_JSON_CONTENT_TYPE, parse_and_verify_checkpoint_json
 from .service import (
     MAX_STATEMENT_BYTES,
     AnchorerService,
@@ -589,7 +590,7 @@ def get_router() -> APIRouter:
     # opt-in, plain-SCITT-interop case. See the module docstring.
     canonical = APIRouter(tags=["witness-host"])
 
-    def _witness_checkpoint(cose_bytes: bytes) -> CheckpointStampResponse:
+    def _witness_checkpoint_cose(cose_bytes: bytes) -> CheckpointStampResponse:
         if not _POST_LIMITER.is_allowed():
             raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
         try:
@@ -598,7 +599,22 @@ def get_router() -> APIRouter:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except CheckpointSignatureError as exc:
             raise HTTPException(status_code=401, detail=str(exc)) from exc
+        return _witness_checkpoint_cp(cp)
+
+    def _witness_checkpoint_json(json_bytes: bytes) -> CheckpointStampResponse:
+        if not _POST_LIMITER.is_allowed():
+            raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
+        try:
+            cp = parse_and_verify_checkpoint_json(json_bytes, allowlist=get_submitters())
+        except NotACheckpointError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except CheckpointSignatureError as exc:
+            raise HTTPException(status_code=401, detail=str(exc)) from exc
+        return _witness_checkpoint_cp(cp)
+
+    def _witness_checkpoint_cp(cp: dict) -> CheckpointStampResponse:
         # Per-submitter-identity budget, IN ADDITION to the global limiter
+
         # above -- only meaningful for an ENROLLED log_id (grade is not None):
         # a non-enrolled log_id has no pinned identity to rate-limit
         # separately and stays on the shared global budget only.
@@ -664,6 +680,22 @@ def get_router() -> APIRouter:
         verify) and is subject to its own configured per-identity rate limit
         on top of the global one.
 
+        **JSON-form enrolled submitters:** an enrolled entry may instead
+        declare ``wire_form: json-ed25519`` (``submitters.py``) -- a
+        submitter whose own pipeline mints the CLL ``CheckpointRecord`` as
+        deterministic JSON + a bare Ed25519 signature, never the COSE_Sign1
+        envelope. Sending ``Content-Type: application/cll-checkpoint+json``
+        routes here instead of the COSE path (``checkpoint_json.py``); the
+        signature is verified against that submitter's PINNED key exactly
+        as above, and the same ``grade`` + rate-limit rules apply. JSON form
+        is accepted ONLY for a ``log_id`` enrolled with wire_form ==
+        json-ed25519 -- every other ``log_id`` (enrolled cose-form or
+        unenrolled) sending JSON is refused with a named 400, never silently
+        treated as an open self-asserted-key submission (that JSON surface
+        was retired -- see ``checkpoint_json.py`` module docstring). Omitting
+        the header, or sending the COSE content type, is unchanged from
+        today and always routes to the COSE path above.
+
         STATELESS (stage 1): this stamp proves existence-and-time for THIS
         checkpoint only. It does not check monotonicity or chain-linkage
         against any checkpoint previously seen for the same ``log_id`` -- so
@@ -685,7 +717,10 @@ def get_router() -> APIRouter:
                 status_code=413,
                 detail=f"checkpoint too large ({len(body)} bytes; max {MAX_STATEMENT_BYTES})",
             )
-        return _witness_checkpoint(body)
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type == CLL_CHECKPOINT_JSON_CONTENT_TYPE:
+            return _witness_checkpoint_json(body)
+        return _witness_checkpoint_cose(body)
 
     @canonical.post("/register", response_model=RegisterStatementResponse)
     def register(req: DigestRequest, request: Request) -> RegisterStatementResponse:
