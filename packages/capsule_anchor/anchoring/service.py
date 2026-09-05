@@ -45,6 +45,7 @@ from datetime import UTC, datetime
 
 import cbor2
 from pydantic import BaseModel
+from scitt_cose.statement import CWT_SUB, HDR_CWT_CLAIMS
 
 from capsule_anchor.attestation.service import AttestorService
 from capsule_anchor.contracts.protocols import CryptoCore, KeyProvider
@@ -187,6 +188,31 @@ def _decode_cose_sign1(data: bytes) -> tuple[bytes, dict, bytes | None, bytes] |
     if payload is not None and not isinstance(payload, bytes):
         return None
     return protected_bstr, dict(unprotected), payload, signature
+
+
+def _peek_unauthenticated_subject(protected: dict) -> str | None:
+    """Structurally read the CWT ``sub`` claim (RFC 9597 label 15, CWT claim
+    2) out of an ALREADY-DECODED protected header, without any signature
+    check -- same discipline as ``checkpoint_cose.py``'s
+    ``_peek_unauthenticated_issuer``.
+
+    Unlike the checkpoint witness path, the generic register-statement path
+    never verifies a submitted statement's signature at all (see
+    ``register_signed_statement_full``'s docstring: "we treat it as opaque
+    bytes for anchoring purposes"), so there is no later step that
+    re-derives an authenticated version of this value. The witness stores
+    exactly what was claimed -- it is a witness, not a judge; anyone who
+    later queries by subject must independently verify every record they
+    pull before trusting it (mesh-adjudication-witness-registration's
+    ``citation_unverified`` recompute step does exactly that).
+    """
+    claims = protected.get(HDR_CWT_CLAIMS)
+    if not isinstance(claims, dict):
+        return None
+    sub = claims.get(CWT_SUB)
+    if isinstance(sub, (bytes, bytearray)):
+        return bytes(sub).decode("utf-8", errors="replace")
+    return sub if isinstance(sub, str) else None
 
 
 def _legacy_entry_hash(statement_bytes: bytes) -> str:
@@ -380,6 +406,12 @@ class StatementRegistration:
     tree_size: int
     entry_hash_scheme: str
     checkpoint_witness: dict | None = field(default=None)
+    #: The CWT `subject` claim the statement carried at registration, if
+    #: any -- surfaced so a caller can confirm what was actually indexed.
+    #: Never authenticated (see `_peek_unauthenticated_subject`); `None`
+    #: for a statement that declared no subject (unindexed, unchanged
+    #: registration behavior).
+    subject: str | None = field(default=None)
 
 
 def _now() -> datetime:
@@ -956,12 +988,29 @@ class AnchorerService:
             entry_hash if scheme == ENTRY_HASH_SCHEME_LEGACY else _legacy_entry_hash(statement_bytes)
         )
 
+        # Best-effort peek at the CWT `subject` claim (RFC 9597) and the raw
+        # payload digest, independent of entry-hash scheme -- ANY well-formed
+        # COSE_Sign1 with an embedded payload can carry a subject, checkpoint
+        # or not (mesh-adjudication-witness-registration: discovery
+        # mechanism 2, "register an adjudication with subject = the judged
+        # node's key"). Never raises: an unparseable or subject-less
+        # statement just registers exactly as before, unindexed.
+        decoded = _decode_cose_sign1(statement_bytes)
+        subject: str | None = None
+        payload_digest: str | None = None
         checkpoint_fields: dict | None = None
-        if scheme == ENTRY_HASH_SCHEME_SIG_STRUCTURE:
-            decoded = _decode_cose_sign1(statement_bytes)
-            assert decoded is not None  # scheme==sig_structure implies a decode
-            _protected_bstr, _unprotected, payload, _signature = decoded
-            checkpoint_fields = parse_checkpoint_payload(payload)  # may raise CheckpointPayloadError
+        if decoded is not None:
+            protected_bstr, _unprotected, payload, _signature = decoded
+            try:
+                protected = cbor2.loads(protected_bstr) if protected_bstr else {}
+            except Exception:  # noqa: BLE001 - untrusted input, never crash registration
+                protected = {}
+            if isinstance(protected, dict):
+                subject = _peek_unauthenticated_subject(protected)
+            if payload is not None:
+                payload_digest = payload.hex()
+            if scheme == ENTRY_HASH_SCHEME_SIG_STRUCTURE:
+                checkpoint_fields = parse_checkpoint_payload(payload)  # may raise CheckpointPayloadError
 
         logged_at = _now()
         with self._lock:
@@ -992,6 +1041,7 @@ class AnchorerService:
                     tree_size=tree_size,
                     entry_hash_scheme=cache_scheme,
                     checkpoint_witness=witness_info,
+                    subject=subject,
                 )
 
             # Not cached: a genuinely new signing act. If it's a checkpoint,
@@ -1033,6 +1083,14 @@ class AnchorerService:
             #    under the (preferred) entry_hash computed above.
             self._store.put_statement(entry_hash, receipt, leaf_index, tree_size)
 
+            # 3b. Index by subject, when the statement claimed one -- lets a
+            #     stranger later resolve "everything registered about
+            #     <subject>" without knowing entry_hash in advance. The
+            #     witness stores the digest + subject + receipt, never
+            #     content -- see AnchorerService.get_statements_by_subject.
+            if subject is not None:
+                self._store.put_subject_index(subject, entry_hash, payload_digest)
+
             # 4. Advance the persisted STH to cover the new entry.
             #    This keeps GET /anchor/sth always current after any registration;
             #    the background refresh task also handles the idle-log case.
@@ -1060,6 +1118,7 @@ class AnchorerService:
             tree_size=tree_size,
             entry_hash_scheme=scheme,
             checkpoint_witness=witness_info,
+            subject=subject,
         )
 
     def _check_checkpoint_consistency(self, cp: dict) -> str:
@@ -1182,6 +1241,36 @@ class AnchorerService:
         resolve route so an unknown capsule_id yields a 404, not a new entry.
         """
         return self._store.get_statement(entry_hash)
+
+    def get_statements_by_subject(self, subject: str) -> list[dict]:
+        """Discovery mechanism 2 (mesh-adjudication-witness-registration):
+        resolve every statement registered under ``subject`` -- e.g. a
+        judged/cited mesh node's key -- to its receipt + claimed payload
+        digest. Purely a read, and purely a witness function: this NEVER
+        verifies the subject claim or anything about the record it points
+        at (see ``_peek_unauthenticated_subject``) -- a caller who queries
+        by subject must independently verify every entry after pulling the
+        actual record through its own evidence door.
+
+        Returns an empty list for a subject nothing was ever registered
+        under (not an error -- an absent subject is a legitimate answer).
+        """
+        results: list[dict] = []
+        for entry_hash, capsule_id_digest in self._store.get_by_subject(subject):
+            cached = self._store.get_statement(entry_hash)
+            if cached is None:
+                continue  # defensive: index and statement store are written together
+            receipt_bytes, leaf_index, tree_size = cached
+            results.append(
+                {
+                    "entry_hash": entry_hash,
+                    "capsule_id_digest": capsule_id_digest,
+                    "receipt": receipt_bytes,
+                    "leaf_index": leaf_index,
+                    "tree_size": tree_size,
+                }
+            )
+        return results
 
     # --- inclusion proofs (TENANT ledger tree) -----------------------------
     def inclusion_proof(self, leaf_hashes: list[str], index: int) -> MerkleProof:

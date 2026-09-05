@@ -44,6 +44,12 @@ Endpoints:
                                            against the log's last witnessed
                                            checkpoint per log_id before co-signing;
                                            see AnchorerService._check_checkpoint_consistency.
+  GET  /transparency/statements         -> discovery mechanism 2: resolve every
+                                           statement registered under a CWT `subject`
+                                           claim (e.g. a judged/cited mesh node's key)
+                                           to its receipt + claimed payload digest.
+                                           Purely a read; verifies nothing -- see
+                                           AnchorerService.get_statements_by_subject.
   POST /v1/digest                       -> legacy alias of /register: register a
                                            capsule_id digest, issue a Receipt.
   GET  /v1/inclusion/{capsule_id}       -> read-only resolve: capsule_id -> inclusion
@@ -265,6 +271,11 @@ class RegisterStatementResponse(BaseModel):
 
     ``checkpoint_witness`` is populated only when the statement self-declared
     ``artifact_type: mmr-checkpoint``; ``None`` for every other statement.
+
+    ``subject`` echoes the CWT ``sub`` claim (RFC 9597) the statement carried,
+    if any -- ``None`` for a statement that declared no subject (unindexed;
+    see ``GET /transparency/statements``). Never authenticated: the witness
+    stores what was claimed, it never verifies who signed it.
     """
 
     receipt_b64: str
@@ -273,6 +284,46 @@ class RegisterStatementResponse(BaseModel):
     leaf_index: int
     tree_size: int
     checkpoint_witness: CheckpointWitnessInfo | None = None
+    subject: str | None = None
+
+
+class WitnessSubjectEntry(BaseModel):
+    """One statement registered under a queried ``subject``.
+
+    ``capsule_id_digest`` is the hex of the statement's raw COSE payload
+    bytes -- for an adjudication-witness registration this is the sealed
+    adjudication capsule's ``capsule_id``, letting the caller fetch the
+    actual record through a mesh evidence door. ``None`` if the statement
+    carried no payload (a detached-payload submission).
+    """
+
+    entry_hash: str
+    capsule_id_digest: str | None
+    receipt_b64: str
+    leaf_index: int
+    tree_size: int
+
+
+class WitnessSubjectResponse(BaseModel):
+    """``GET /transparency/statements?subject=<key>``: every statement
+    registered under ``subject``, oldest-claim-first is NOT guaranteed
+    (see ``AnchorerService.get_statements_by_subject`` -- ordered by
+    ``entry_hash`` for determinism, not registration time).
+
+    Empty ``entries`` is a legitimate answer for a subject nothing was ever
+    registered under -- not an error, and not a 404: the witness holds an
+    open, append-only index, and "nothing yet" is exactly what querying it
+    before any registration looks like.
+
+    This endpoint verifies nothing. Every entry here is an UNAUTHENTICATED
+    claim from whoever registered it -- the witness is a witness, not a
+    judge. A caller must fetch the actual record (via ``capsule_id_digest``,
+    through the mesh's own evidence-door surface) and independently verify
+    it before trusting anything about it.
+    """
+
+    subject: str
+    entries: list[WitnessSubjectEntry]
 
 
 class InclusionResolveResponse(BaseModel):
@@ -556,6 +607,34 @@ def get_router() -> APIRouter:
                 if result.checkpoint_witness is not None
                 else None
             ),
+            subject=result.subject,
+        )
+
+    @ts.get("/statements", response_model=WitnessSubjectResponse)
+    def statements_by_subject(subject: str) -> WitnessSubjectResponse:
+        """Discovery mechanism 2: resolve every statement registered under
+        ``subject`` -- e.g. a judged/cited mesh node's key -- to its receipt
+        and claimed payload digest.
+
+        A pure read; never registers anything and never verifies anything.
+        Returns **200** with an empty ``entries`` list for a subject nothing
+        was ever registered under (a legitimate, non-error answer -- this
+        witness holds an open index, not a lookup table with required keys).
+        """
+        svc = get_service()
+        rows = svc.get_statements_by_subject(subject)
+        return WitnessSubjectResponse(
+            subject=subject,
+            entries=[
+                WitnessSubjectEntry(
+                    entry_hash=row["entry_hash"],
+                    capsule_id_digest=row["capsule_id_digest"],
+                    receipt_b64=base64.b64encode(row["receipt"]).decode("ascii"),
+                    leaf_index=row["leaf_index"],
+                    tree_size=row["tree_size"],
+                )
+                for row in rows
+            ],
         )
 
     # --- Digest registration (/register, canonical; /v1/digest, legacy alias) --
