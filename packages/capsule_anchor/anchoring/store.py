@@ -15,6 +15,7 @@ All backends implement the same interface:
   put_root / get_root
   put_capsule_id / get_capsule_id / entries_for_capsule
   put_statement / get_statement
+  put_subject_index / get_by_subject
   put_checkpoint_witness / get_checkpoint_witness
   put_checkpoint_record / get_last_checkpoint_record / get_checkpoint_equivocations
   put_sth / get_latest_sth
@@ -57,6 +58,8 @@ class InMemoryLogStore:
         self._capsule_ids: dict[int, str] = {}
         # Idempotent dedup: entry_hash -> (receipt_bytes, leaf_index, tree_size)
         self._statements: dict[str, tuple[bytes, int, int]] = {}
+        # Discovery mechanism 2: subject -> [(entry_hash, capsule_id_digest), ...]
+        self._subject_index: dict[str, list[tuple[str, str | None]]] = {}
         # Checkpoint witness state: log_id -> last-witnessed checkpoint fields.
         self._checkpoint_witnesses: dict[str, dict] = {}
         # POST /checkpoints read surface: (log_id, mmr_size) -> full record,
@@ -106,6 +109,17 @@ class InMemoryLogStore:
 
     def get_statement(self, entry_hash: str) -> tuple[bytes, int, int] | None:
         return self._statements.get(entry_hash)
+
+    # --- subject index (discovery mechanism 2) ---
+    def put_subject_index(
+        self, subject: str, entry_hash: str, capsule_id_digest: str | None
+    ) -> None:
+        entries = self._subject_index.setdefault(subject, [])
+        if not any(eh == entry_hash for eh, _ in entries):
+            entries.append((entry_hash, capsule_id_digest))
+
+    def get_by_subject(self, subject: str) -> list[tuple[str, str | None]]:
+        return list(self._subject_index.get(subject, []))
 
     # --- checkpoint witness state ---
     def put_checkpoint_witness(
@@ -231,6 +245,22 @@ class SqliteLogStore:
                     tree_size    INTEGER NOT NULL
                 )
                 """
+            )
+            # Discovery mechanism 2: subject -> registered statements. One row
+            # per (subject, entry_hash) pair; INSERT OR IGNORE dedups a
+            # resubmission of the same signing act (see put_subject_index).
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS subject_index (
+                    subject           TEXT NOT NULL,
+                    entry_hash        TEXT NOT NULL,
+                    capsule_id_digest TEXT,
+                    PRIMARY KEY (subject, entry_hash)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_subject_index_subject ON subject_index(subject)"
             )
             # Singleton latest Signed Tree Head (id=1 enforced by CHECK).
             self._conn.execute(
@@ -445,6 +475,27 @@ class SqliteLogStore:
         if row is None:
             return None
         return (bytes(row[0]), int(row[1]), int(row[2]))
+
+    # --- subject index (discovery mechanism 2) ---
+    def put_subject_index(
+        self, subject: str, entry_hash: str, capsule_id_digest: str | None
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO subject_index "
+                "(subject, entry_hash, capsule_id_digest) VALUES (?, ?, ?)",
+                (subject, entry_hash, capsule_id_digest),
+            )
+
+    def get_by_subject(self, subject: str) -> list[tuple[str, str | None]]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT entry_hash, capsule_id_digest FROM subject_index "
+                "WHERE subject = ? ORDER BY entry_hash ASC",
+                (subject,),
+            )
+            rows = cur.fetchall()
+        return [(str(r[0]), None if r[1] is None else str(r[1])) for r in rows]
 
     # --- checkpoint witness state ---
     def put_checkpoint_witness(
@@ -674,6 +725,20 @@ class PostgresLogStore:
                     tree_size   BIGINT NOT NULL
                 )
             """)
+            # Discovery mechanism 2: subject -> registered statements. One row
+            # per (subject, entry_hash) pair; ON CONFLICT DO NOTHING dedups a
+            # resubmission of the same signing act.
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS subject_index (
+                    subject           TEXT NOT NULL,
+                    entry_hash        TEXT NOT NULL,
+                    capsule_id_digest TEXT,
+                    PRIMARY KEY (subject, entry_hash)
+                )
+            """)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_subject_index_subject ON subject_index(subject)"
+            )
             # Singleton latest Signed Tree Head.
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS signed_tree_heads (
@@ -892,6 +957,30 @@ class PostgresLogStore:
         if row is None:
             return None
         return (bytes(row[0]), int(row[1]), int(row[2]))
+
+    # --- subject index (discovery mechanism 2) ---
+    def put_subject_index(
+        self, subject: str, entry_hash: str, capsule_id_digest: str | None
+    ) -> None:
+        params = (subject, entry_hash, capsule_id_digest)
+        with self._lock:
+            self._transact(
+                lambda: self._conn.execute(
+                    "INSERT INTO subject_index (subject, entry_hash, capsule_id_digest) "
+                    "VALUES (%s, %s, %s) ON CONFLICT (subject, entry_hash) DO NOTHING",
+                    params,
+                )
+            )
+
+    def get_by_subject(self, subject: str) -> list[tuple[str, str | None]]:
+        with self._lock:
+            cur = self._read(
+                "SELECT entry_hash, capsule_id_digest FROM subject_index "
+                "WHERE subject = %s ORDER BY entry_hash ASC",
+                (subject,),
+            )
+            rows = cur.fetchall()
+        return [(str(r[0]), None if r[1] is None else str(r[1])) for r in rows]
 
     # --- checkpoint witness state ---
     def put_checkpoint_witness(
