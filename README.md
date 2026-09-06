@@ -98,7 +98,7 @@ as an upgrade path from a checkpoint stamp.
 that hides `/register`. What keeps a default `capsule-emit` process's egress
 checkpoint-only is (1) `/checkpoints` itself refuses any non-checkpoint artifact with a
 named error before any signature check or log write, and (2) the client never calls
-`/register` from its default `emit()` path — a fact enforced by a CI test, not just
+`/register` from its default `seal()` path — a fact enforced by a CI test, not just
 documentation.
 
 ---
@@ -109,9 +109,9 @@ If you use [`capsule-emit`](https://github.com/action-state-group/capsule-emit),
 anchoring is on by default and hits the free public instance automatically:
 
 ```python
-from capsule_emit import emit
+from capsule_emit import seal
 
-cap = emit(action="summarize", outcome="ok", anchor=True)
+cap = seal({"outcome": "ok"}, action="summarize", anchor=True)
 print(cap.capsule_id)    # SHA-256 hex digest
 print(cap.anchored)      # True
 ```
@@ -126,7 +126,7 @@ python your_script.py
 Or per-call:
 
 ```python
-cap = emit(..., anchor=True, anchor_url="https://your-anchor-host/v1/digest")
+cap = seal(payload, ..., anchor=True, anchor_url="https://your-anchor-host/v1/digest")
 ```
 
 ---
