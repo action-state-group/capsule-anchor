@@ -8,3 +8,6 @@ import os
 
 os.environ.setdefault("CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY", "1")
 os.environ.setdefault("CAPSULE_ANCHOR_INSECURE_IN_MEMORY", "1")
+# The canonical public host, matching the real deployed value -- there is no
+# safe default (see [anchor-did-from-host]), so tests must set one explicitly.
+os.environ.setdefault("CAPSULE_ANCHOR_PUBLIC_HOST", "witness.agentactioncapsule.org")

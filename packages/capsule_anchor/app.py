@@ -89,6 +89,25 @@ def create_app() -> FastAPI:
     attestor = AttestorService(key_provider=provider)
     cfg_attest(attestor)  # keep the shared attestor instance coherent
 
+    # FAIL-CLOSED: the DID this instance publishes at /.well-known/did.json
+    # must name the host it is actually served from. There is no safe
+    # default -- defaulting to our own domain would make every self-hosted
+    # instance falsely claim to be the operator of anchor.agentactioncapsule.org
+    # (see [anchor-did-from-host]). The `Host` header is never used for this
+    # either: per [O4-endpoint-consolidation-ship] this service answers
+    # identically on every hostname that resolves to it, so the DID must
+    # come from static config, not the inbound request.
+    public_host = os.environ.get("CAPSULE_ANCHOR_PUBLIC_HOST")
+    if not public_host:
+        raise RuntimeError(
+            "No public host configured. Set CAPSULE_ANCHOR_PUBLIC_HOST to the "
+            "hostname this instance is actually served from (e.g. "
+            "witness.agentactioncapsule.org for the canonical public instance, "
+            "or your own domain when self-hosting). This value becomes the "
+            "`did:web:<host>` identity published at /.well-known/did.json."
+        )
+    operator = os.environ.get("CAPSULE_ANCHOR_OPERATOR") or None
+
     # Durable storage — FAIL-CLOSED when no DATABASE_URL is set.
     # In-memory storage drops the entire CT log on restart: prior receipts
     # become unverifiable. Require an explicit dev opt-in for volatile mode.
@@ -171,14 +190,19 @@ def create_app() -> FastAPI:
         Allows verifiers and witnesses to resolve the authority's key identity
         out-of-band. The ``x`` field is the raw 32-byte Ed25519 public key
         encoded as base64url (no padding), per RFC 8037 / JWK OKP.
+
+        ``id``/``verificationMethod[].id`` are derived from
+        ``CAPSULE_ANCHOR_PUBLIC_HOST`` (never hard-coded to our own domain) so
+        that a foreign host running this same code serves ITS OWN identity,
+        not ours -- see [anchor-did-from-host].
         """
         from capsule_anchor.anchoring.router import get_service
         svc = get_service()
         pubkey_bytes = svc.authority_pubkey()
         pubkey_b64url = base64.urlsafe_b64encode(pubkey_bytes).rstrip(b"=").decode()
         key_id = svc.attestor.key_id
-        did = "did:web:anchor.agentactioncapsule.org"
-        return {
+        did = f"did:web:{public_host}"
+        doc = {
             "@context": ["https://www.w3.org/ns/did/v1"],
             "id": did,
             "verificationMethod": [
@@ -195,6 +219,11 @@ def create_app() -> FastAPI:
             ],
             "assertionMethod": [f"{did}#{key_id}"],
         }
+        # Self-declared only -- never our own brand as a fallback. Absent
+        # unless the operator running this instance sets it explicitly.
+        if operator:
+            doc["operator"] = operator
+        return doc
 
     return app
 

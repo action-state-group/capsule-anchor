@@ -351,6 +351,10 @@ check available given the accepted wire shape above.
 
 ## Self-host
 
+Anyone can run one. The DID published at `/.well-known/did.json` is derived from
+`CAPSULE_ANCHOR_PUBLIC_HOST` — when you host it, the DID is yours, not ours; there is no default
+to our domain, so you must set it to the hostname you actually serve from.
+
 ### pip
 
 ```bash
@@ -359,7 +363,7 @@ pip install capsule-anchor
 # Generate a signing key — keep it, it is your service's identity
 python3 -c "import os; print(os.urandom(32).hex())"
 
-CAPSULE_ANCHOR_SIGNING_KEY=<your-hex-seed> capsule-anchor
+CAPSULE_ANCHOR_SIGNING_KEY=<your-hex-seed> CAPSULE_ANCHOR_PUBLIC_HOST=your-domain.example.com capsule-anchor
 # Service listening on http://localhost:8000
 ```
 
@@ -369,6 +373,7 @@ CAPSULE_ANCHOR_SIGNING_KEY=<your-hex-seed> capsule-anchor
 docker build -t capsule-anchor .
 docker run -p 8000:8000 \
   -e CAPSULE_ANCHOR_SIGNING_KEY=<your-hex-seed> \
+  -e CAPSULE_ANCHOR_PUBLIC_HOST=your-domain.example.com \
   capsule-anchor
 ```
 
@@ -382,10 +387,11 @@ gcloud run deploy capsule-anchor \
   --port=8000 \
   --max-instances=1 \
   --allow-unauthenticated \
+  --set-env-vars=CAPSULE_ANCHOR_PUBLIC_HOST=your-domain.example.com \
   --set-secrets=CAPSULE_ANCHOR_SIGNING_KEY=your-signing-key-secret:latest
 ```
 
-The public instance at `anchor.agentactioncapsule.org` is deployed this way on
+The public instance at `witness.agentactioncapsule.org` is deployed this way on
 GCP. See [`deploy/DEPLOY.md`](deploy/DEPLOY.md) for the full walkthrough.
 
 ---

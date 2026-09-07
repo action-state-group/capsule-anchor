@@ -7,6 +7,8 @@
 | `CAPSULE_ANCHOR_SIGNING_KEY` | Secret Manager | Hex-encoded Ed25519 seed. **Required** — startup fails without it (see [Key Management](KEY-MANAGEMENT.md)). |
 | `CAPSULE_ANCHOR_SIGNING_KEY_FILE` | Mounted secret file | Alt: path to PEM/seed file. |
 | `CAPSULE_ANCHOR_DATABASE_URL` | Secret Manager | Postgres connection URL. **Required** — startup fails without it. |
+| `CAPSULE_ANCHOR_PUBLIC_HOST` | env | Hostname this instance is served from (e.g. `witness.agentactioncapsule.org`). **Required** — startup fails without it. Becomes the `did:web:<host>` identity at `/.well-known/did.json`; never defaults to our domain (see [anchor-did-from-host]). |
+| `CAPSULE_ANCHOR_OPERATOR` | env | Optional self-declared operator string, published as `did.json`'s `operator` field. Absent unless set — never our brand by default. |
 | `CAPSULE_ANCHOR_HOST` / `CAPSULE_ANCHOR_PORT` | env | Bind address (default `0.0.0.0:8000`). |
 | `CAPSULE_ANCHOR_TSA_ENABLED` | env | Set to `1` to enable RFC 3161 TSA timestamps (opt-in). |
 | `CAPSULE_ANCHOR_TSA_URL` | env | Override TSA endpoint (default: FreeTSA). |
@@ -59,10 +61,15 @@ gcloud run deploy capsule-witness \
   --port=8000 \
   --allow-unauthenticated \
   --add-cloudsql-instances=PROJECT_ID:us-central1:capsule-anchor-pg \
+  --set-env-vars=CAPSULE_ANCHOR_PUBLIC_HOST=witness.agentactioncapsule.org \
   --set-secrets=\
 CAPSULE_ANCHOR_SIGNING_KEY=capsule-anchor-signing-key:latest,\
 CAPSULE_ANCHOR_DATABASE_URL=capsule-anchor-database-url:latest
 ```
+
+**[anchor-did-from-host]: `CAPSULE_ANCHOR_PUBLIC_HOST` is now required** — the service fails
+closed at startup without it (no default to our domain). Any revision deployed after this change
+lands MUST set it, or the service will crash-loop.
 
 No `--max-instances` cap is needed when using Postgres: all instances share the same append-only log,
 and the rate limiter is per-instance (see HA notes below). Remove `--max-instances=1` from any
@@ -95,6 +102,7 @@ are codebase/infra identifiers, not the service name. Only the Cloud Run **servi
 gcloud run deploy capsule-witness \
   --source . --project=PROJECT_ID --region=us-central1 --port=8000 --allow-unauthenticated \
   --add-cloudsql-instances=PROJECT_ID:us-central1:capsule-anchor-pg \
+  --set-env-vars=CAPSULE_ANCHOR_PUBLIC_HOST=witness.agentactioncapsule.org \
   --set-secrets=CAPSULE_ANCHOR_SIGNING_KEY=capsule-anchor-signing-key:latest,CAPSULE_ANCHOR_DATABASE_URL=capsule-anchor-database-url:latest
 
 # Map BOTH hostnames onto the one capsule-witness service:
