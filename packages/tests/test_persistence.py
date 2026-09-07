@@ -418,7 +418,9 @@ class TestDIDDocument:
         resp = client.get("/.well-known/did.json")
         assert resp.status_code == 200
         doc = resp.json()
-        assert doc["id"] == "did:web:anchor.agentactioncapsule.org"
+        # Matches conftest.py's CAPSULE_ANCHOR_PUBLIC_HOST default -- the
+        # canonical public instance's own host, never hard-coded here.
+        assert doc["id"] == "did:web:witness.agentactioncapsule.org"
         assert len(doc["verificationMethod"]) == 1
         vm = doc["verificationMethod"][0]
         assert vm["type"] == "JsonWebKey2020"
@@ -426,6 +428,36 @@ class TestDIDDocument:
         assert jwk["kty"] == "OKP"
         assert jwk["crv"] == "Ed25519"
         assert "x" in jwk
+
+    def test_did_reflects_configured_host_not_our_domain(self, monkeypatch):
+        """[anchor-did-from-host]: a foreign host running this exact code must
+        serve ITS OWN DID, never ours. Regression for the bug where `did.json`
+        hard-coded `did:web:anchor.agentactioncapsule.org` regardless of which
+        host the service was actually configured/deployed as."""
+        monkeypatch.setenv("CAPSULE_ANCHOR_PUBLIC_HOST", "example.org")
+        client = TestClient(create_app())
+        doc = client.get("/.well-known/did.json").json()
+        assert doc["id"] == "did:web:example.org"
+        assert doc["verificationMethod"][0]["id"].startswith("did:web:example.org#")
+        assert doc["assertionMethod"][0].startswith("did:web:example.org#")
+        assert "anchor.agentactioncapsule.org" not in str(doc)
+        assert "witness.agentactioncapsule.org" not in str(doc)
+
+    def test_did_document_startup_refuses_without_public_host(self, monkeypatch):
+        monkeypatch.delenv("CAPSULE_ANCHOR_PUBLIC_HOST", raising=False)
+        with pytest.raises(RuntimeError, match="CAPSULE_ANCHOR_PUBLIC_HOST"):
+            create_app()
+
+    def test_did_document_operator_absent_by_default(self):
+        client = TestClient(create_app())
+        doc = client.get("/.well-known/did.json").json()
+        assert "operator" not in doc
+
+    def test_did_document_operator_self_declared_when_set(self, monkeypatch):
+        monkeypatch.setenv("CAPSULE_ANCHOR_OPERATOR", "Example Corp")
+        client = TestClient(create_app())
+        doc = client.get("/.well-known/did.json").json()
+        assert doc["operator"] == "Example Corp"
 
     def test_did_key_matches_health_key_id(self):
         client = TestClient(create_app())
