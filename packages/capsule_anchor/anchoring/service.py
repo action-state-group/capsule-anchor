@@ -85,14 +85,31 @@ _LOG_KIND_SCITT = "scitt_statement"
 #
 # Wire shape produced (draft-ietf-cose-merkle-tree-proofs-18):
 #   COSE_Sign1 = Tag(18, [protected_bstr, unprotected_map, payload, signature])
-#   protected map (then bstr-wrapped) = {1: -8, 395: 1}
+#   protected map (then bstr-wrapped) = {1: -8, 395: 1, [15: {6: iat}], [-65537: grade]}
 #       1   = alg  -> -8  (EdDSA / Ed25519)
 #       395 = vds  ->  1  (RFC9162_SHA256 verifiable-data-structure)
+#       15  = CWT claims map (RFC 9597 label 15) -- OPTIONAL, present whenever
+#             ``iat`` is given: {6: iat} where 6 is the RFC 8392 §3.1.6 "iat"
+#             claim (int, seconds since epoch) -- the WITNESS's own clock at
+#             registration, never the submitter's self-asserted timestamp.
+#       -65537 = grade (OPTIONAL, present whenever ``grade`` is given) --
+#             private-use protected label (mirrors ``scitt_cose.receipt.HDR_GRADE``)
+#             carrying this witness's qualitative grade string
+#             (``"countersigned-observed"`` | ``"mmr-verified"``).
 #   unprotected map = {396: {-1: [inclusion_bstr]}}
 #       396 = vdp (verifiable-data-proofs); key -1 = inclusion-proofs array
 #       inclusion_bstr = cbor(  [tree_size, leaf_index, [<audit-path 32B bstrs>]] )
 #   payload  = nil  (DETACHED; the CT root is the external_aad-free Sig payload)
 #   signature = Ed25519 over Sig_structure ["Signature1", protected, b"", root]
+#
+# iat + grade land in the PROTECTED header (not unprotected, not the response
+# body alone) precisely because Sig_structure covers the protected bstr --
+# see [witness-receipt-signed-time-and-grade]: neither claim was signed
+# before this, so a receipt could be replayed with a different witness time
+# or grade without invalidating the signature. Both are additive and OPTIONAL
+# (``None`` omits the key entirely) -- a receipt built with neither is
+# byte-identical to the pre-fix wire shape, so existing receipts and their
+# entry_hash/digest are untouched.
 _COSE_ALG_LABEL = 1          # protected: algorithm
 _COSE_ALG_EDDSA = -8         # EdDSA (Ed25519)
 _COSE_VDS_LABEL = 395        # protected: verifiable-data-structure (vds)
@@ -100,6 +117,8 @@ _COSE_VDS_RFC9162_SHA256 = 1
 _COSE_VDP_LABEL = 396        # unprotected: verifiable-data-proofs (vdp)
 _COSE_VDP_INCLUSION_KEY = -1  # vdp map key for the inclusion-proofs array
 _COSE_SIGN1_TAG = 18
+_CWT_IAT = 6                 # RFC 8392 §3.1.6 "iat" claim, inside HDR_CWT_CLAIMS (15)
+_COSE_GRADE_LABEL = -65537   # protected: private-use witness grade label
 
 
 def build_cose_receipt(
@@ -109,6 +128,8 @@ def build_cose_receipt(
     audit_path: list[bytes],
     root: bytes,
     sign: callable,
+    iat: int | None = None,
+    grade: str | None = None,
 ) -> bytes:
     """Assemble a SCITT COSE Receipt (COSE_Sign1, tag 18) -- ~the scitt-cose shape.
 
@@ -119,10 +140,20 @@ def build_cose_receipt(
       root:       CT Merkle root, RAW 32 bytes -- the DETACHED signed payload.
       sign:       callable(bytes) -> bytes producing a raw Ed25519 signature over
                   the COSE Sig_structure (the authority key).
+      iat:        witness-observed registration time (seconds since epoch),
+                  signed into the protected CWT claims map (label 15, claim 6)
+                  when given. ``None`` omits it (pre-fix wire shape).
+      grade:      this witness's qualitative grade string, signed into the
+                  protected header (label -65537) when given. ``None`` omits
+                  it -- same as an un-enrolled submitter today.
 
     Returns the tagged COSE_Sign1 CBOR bytes. See the module-level wire spec.
     """
     protected = {_COSE_ALG_LABEL: _COSE_ALG_EDDSA, _COSE_VDS_LABEL: _COSE_VDS_RFC9162_SHA256}
+    if iat is not None:
+        protected[HDR_CWT_CLAIMS] = {_CWT_IAT: iat}
+    if grade is not None:
+        protected[_COSE_GRADE_LABEL] = grade
     protected_bstr = cbor2.dumps(protected)
 
     inclusion_bstr = cbor2.dumps([tree_size, leaf_index, list(audit_path)])
@@ -953,8 +984,17 @@ class AnchorerService:
         result = self.register_signed_statement_full(statement_bytes)
         return result.receipt, result.entry_hash, result.leaf_index, result.tree_size
 
-    def register_signed_statement_full(self, statement_bytes: bytes) -> StatementRegistration:
+    def register_signed_statement_full(
+        self, statement_bytes: bytes, *, grade: str | None = None
+    ) -> StatementRegistration:
         """SCITT registration with full metadata (entry-hash scheme, checkpoint witness).
+
+        ``grade`` (this witness's qualitative grade for the submission, or
+        ``None``) is signed into the returned receipt's protected header
+        alongside ``iat`` (this witness's own clock at registration, always
+        signed) -- see ``build_cose_receipt``. Only ``witness_checkpoint``
+        passes a non-``None`` grade today; every other caller (plain
+        statement/digest registration) has none to give.
 
         The argument is a SCITT Signed Statement = a COSE_Sign1 (CBOR) blob; we
         treat it as opaque bytes for anchoring purposes -- the CT-log ENTRY hash
@@ -1070,12 +1110,18 @@ class AnchorerService:
             root = bytes.fromhex(root_hex)
 
             # 2. Assemble + sign the COSE Receipt (detached root payload).
+            #    iat is this witness's OWN clock (logged_at, already computed
+            #    above for the log append) -- never the submitter's
+            #    self-asserted checkpoint `issued_at`. grade is the caller's
+            #    (None unless this is an enrolled checkpoint submission).
             receipt = build_cose_receipt(
                 tree_size=tree_size,
                 leaf_index=leaf_index,
                 audit_path=audit_path,
                 root=root,
                 sign=lambda payload: bytes.fromhex(self._attestor.attest(payload).signature),
+                iat=int(logged_at.timestamp()),
+                grade=grade,
             )
 
             # 3. Persist for idempotent dedup (still INSERT OR IGNORE as
@@ -1182,7 +1228,7 @@ class AnchorerService:
         boundary is the stage-2 concern above, not this route's job.
         """
         digest_hex = _checkpoint_digest(cp)
-        result = self.register_signed_statement_full(bytes.fromhex(digest_hex))
+        result = self.register_signed_statement_full(bytes.fromhex(digest_hex), grade=cp.get("grade"))
         self._record_checkpoint_read_surface(cp, result)
         return result
 
