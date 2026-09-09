@@ -214,8 +214,9 @@ Returns:
 }
 ```
 
-Stage 1 is **stateless**: existence-and-time evidence for this checkpoint only, no
-per-`log_id` monotonicity/rollback check. Nothing about this route's storage or keying
+Stage 1 is **stateless**: inclusion verified under the accepted witness key; the receipt
+signs the log root, not a clock, for this checkpoint only, no per-`log_id`
+monotonicity/rollback check. Nothing about this route's storage or keying
 choices precludes the stage-2 checkpoint-aware upgrade (two-check continuity: `prev_*`
 equality AND consistency-proof verification), which lands additively once available.
 

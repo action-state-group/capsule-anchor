@@ -25,7 +25,10 @@ This surface:
     server-side before ever counter-signing -- 401 on failure, never
     appended/counter-signed;
   * is STATELESS: no per-log_id monotonicity/rollback/chain-linkage check,
-    no MMR math -- existence-and-time evidence for one checkpoint only.
+    no MMR math -- inclusion verified under the accepted witness key, the
+    receipt signs the log root, not a clock, for one checkpoint only
+    (wording of record until [witness-receipt-signed-time-and-grade] ships
+    live, which additionally signs `iat` + `grade` into the receipt).
 
 ``/register`` is the explicit opt-in, plain-SCITT-interop digest-registration
 route -- identical behavior to the legacy ``/v1/digest`` alias (see
@@ -38,16 +41,19 @@ this guarantee.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import time
 
 import cbor2
 import pytest
+from capsule_anchor.anchoring.service import _COSE_GRADE_LABEL, _CWT_IAT
 from capsule_anchor.app import create_app
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from fastapi.testclient import TestClient
-from scitt_cose.statement import build_signed_statement
+from scitt_cose.statement import HDR_CWT_CLAIMS, build_signed_statement
 
 #: Must match capsule_anchor.anchoring.checkpoint_cose.CLL_CHECKPOINT_CONTENT_TYPE
 #: (== capsule_emit.checkpoint.cose_wire.CLL_CHECKPOINT_CONTENT_TYPE) exactly.
@@ -226,6 +232,15 @@ def _post_checkpoint(client: TestClient, cose_bytes: bytes) -> tuple[int, dict]:
     return resp.status_code, (resp.json() if resp.content else {})
 
 
+def _receipt_protected_header(receipt_b64: str) -> dict:
+    """Decode a base64 COSE Receipt and return its PROTECTED header map --
+    the [witness-receipt-signed-time-and-grade] tests use this to prove
+    ``iat``/``grade`` are inside the SIGNED bytes, not just the response body."""
+    receipt = base64.b64decode(receipt_b64)
+    protected_bstr = cbor2.loads(receipt).value[0]
+    return dict(cbor2.loads(protected_bstr))
+
+
 # --- accepted path -----------------------------------------------------------
 
 
@@ -242,6 +257,41 @@ def test_checkpoint_accepted_returns_stamp(client, key):
     assert body["leaf_index"] == 0
     assert body["tree_size"] == 1
     assert body["receipt_b64"]
+
+
+def test_checkpoint_receipt_signs_witness_iat(client, key):
+    """[witness-receipt-signed-time-and-grade]: the receipt's PROTECTED
+    header now carries the witness's own registration clock (`iat`, CWT
+    claims label 15 -> claim 6), so it is covered by the signature -- not
+    just present in the unsigned response body."""
+    before = int(time.time())
+    new_peaks = _peaks_for("log-iat-1")
+    cose = _checkpoint_cose(key, log_id="log-iat", mmr_size=1, new_peaks=new_peaks)
+    status, body = _post_checkpoint(client, cose)
+    after = int(time.time())
+    assert status == 200, body
+    protected = _receipt_protected_header(body["receipt_b64"])
+    claims = protected[HDR_CWT_CLAIMS]
+    iat = claims[_CWT_IAT]
+    assert before <= iat <= after
+    # Non-enrolled log_id: no grade to sign.
+    assert _COSE_GRADE_LABEL not in protected
+
+
+def test_enrolled_checkpoint_receipt_signs_grade(client, agentrust_key):
+    """An ENROLLED submission's `grade` (unsigned before this fix -- see
+    ``test_grade_is_not_part_of_the_signing_body_or_digest`` for the digest
+    side of that same finding) now also rides in the SIGNED protected
+    header, matching the response body's `grade` field exactly."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    new_peaks = _peaks_for("log-grade-1")
+    cose = _checkpoint_cose(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1, new_peaks=new_peaks)
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    protected = _receipt_protected_header(body["receipt_b64"])
+    assert protected[_COSE_GRADE_LABEL] == body["grade"]
+    assert HDR_CWT_CLAIMS in protected  # iat still signed too
 
 
 def test_resubmitting_the_same_checkpoint_is_idempotent(client, key):
@@ -407,6 +457,22 @@ def test_register_returns_full_scitt_receipt(client):
     body = resp.json()
     assert body["entry_hash"] == hashlib.sha256(bytes.fromhex(cid)).hexdigest()
     assert body["entry_hash_scheme"] == "legacy"
+
+
+def test_register_receipt_signs_iat_but_never_a_grade(client):
+    """A plain digest registration (no checkpoint, no enrollment) still gets
+    its own registration time signed into the receipt -- but never a
+    `grade`, since this surface has none to give (see the checkpoint-side
+    ``test_checkpoint_receipt_signs_witness_iat`` for the twin assertion)."""
+    before = int(time.time())
+    cid = "e" * 64
+    resp = client.post("/register", json={"capsule_id": cid})
+    after = int(time.time())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    protected = _receipt_protected_header(body["receipt_b64"])
+    assert before <= protected[HDR_CWT_CLAIMS][_CWT_IAT] <= after
+    assert _COSE_GRADE_LABEL not in protected
     assert body["receipt_b64"]
 
 

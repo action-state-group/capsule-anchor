@@ -51,7 +51,8 @@ launch. Foreign checkpoints are, and will remain, countersigned under an
 **"observed" grade** — the witness records that it saw and timestamped your
 checkpoint; it does **not** verify your log's own consistency proofs (that is
 out of scope for v1). Never read a `/checkpoints` acceptance as an MMR-verified
-claim about your log's internal consistency — only about existence-and-time.
+claim about your log's internal consistency — inclusion is verified under the
+accepted witness key; the receipt signs the log root, not a clock.
 
 ## Leg 1 vs leg 2
 

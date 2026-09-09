@@ -358,7 +358,12 @@ class CheckpointStampResponse(BaseModel):
     record can recompute ``entry_hash`` independently and doesn't need to
     trust this response's claim of it.
 
-    This is existence-and-time evidence for THIS checkpoint only — it does
+    Inclusion is verified under the accepted witness key; the receipt signs
+    the log root, not a clock. (Wording of record until this ships live --
+    the receipt's protected header also now carries `iat`, this witness's
+    own registration clock, and `grade`, both SIGNED; once deployed this
+    stamp is inclusion-and-witness-observed-time evidence for THIS
+    checkpoint only. See [witness-receipt-signed-time-and-grade].) It does
     not attest that the log wasn't rewritten around it (no per-log_id
     continuity is checked here; see the module docstring).
 
@@ -833,8 +838,13 @@ def get_router() -> APIRouter:
         the header, or sending the COSE content type, is unchanged from
         today and always routes to the COSE path above.
 
-        STATELESS (stage 1): this stamp proves existence-and-time for THIS
-        checkpoint only. It does not check monotonicity or chain-linkage
+        STATELESS (stage 1): inclusion is verified under the accepted
+        witness key; the receipt signs the log root, not a clock. (Wording
+        of record until this ships live -- the protected header also now
+        signs `iat` + `grade`; once deployed this is inclusion-and-
+        witness-observed-time evidence for THIS checkpoint only. See
+        [witness-receipt-signed-time-and-grade].) It does not check
+        monotonicity or chain-linkage
         against any checkpoint previously seen for the same ``log_id`` -- so
         on its own it does not prove the stream wasn't rewritten around it
         (nor does it verify an attached ``consistency_proof`` claim, if
