@@ -19,9 +19,10 @@ a signed statement, the witness:
 3. Returns a COSE Receipt — a `COSE_Sign1` carrying an RFC 9162 inclusion proof,
    signed by the witness's stable Ed25519 authority key.
 
-A receipt proves that a given entry was in the witness's log at a specific tree size
-and timestamp. The proof is mathematical: a verifier recomputes the Merkle root from
-the audit path and checks the signature, without contacting the witness again.
+A receipt proves that a given entry was in the witness's log at a specific tree size.
+The proof is mathematical: a verifier recomputes the Merkle root from the audit path
+and checks the signature, without contacting the witness again. It does not establish
+a witness-observed time: the receipt signs the log root, not a clock.
 
 **Plurality is the trust story.** A single witness, however well-operated, is
 self-attested to a relying party outside its operator's trust domain. Two or more
@@ -499,9 +500,9 @@ each witness's `/.well-known/did.json`).
 verifies the checkpoint's Ed25519 signature before countersigning, records the entry
 in its own CT log, and issues a COSE Receipt. The witness does not check monotonicity
 or chain-linkage against checkpoints it has previously seen for the same `log_id` at
-this stage (existence-and-time evidence only). Continuity checking (verifying that
-each new checkpoint extends the previous one without gaps or rollbacks) is planned
-for a future stage.
+this stage (inclusion evidence only; the receipt signs the root, not a clock).
+Continuity checking (verifying that each new checkpoint extends the previous one
+without gaps or rollbacks) is planned for a future stage.
 
 **Equivocation detection.** If the same `(log_id, mmr_size)` position is submitted
 twice with different roots, the witness records both as an equivocation event (in the
