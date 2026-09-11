@@ -21,6 +21,13 @@ def _start_sth_refresh_thread(svc: object, interval_s: float) -> threading.Threa
     new entries arrive. A monitor can detect a dark log by checking whether
     ``now - sth.timestamp > MMD_threshold``; without periodic refresh, a
     log that stops accepting entries looks indistinguishable from a dead one.
+
+    Safe with N Cloud Run instances each running this loop independently:
+    the singleton ``signed_tree_heads`` row is written through an atomic
+    compare-and-swap on ``(tree_size, timestamp)`` (see
+    ``LogStore.put_sth``), so a slower writer can never move the persisted
+    STH backwards in time relative to what a client already observed
+    (see [anchor-instance-count-and-sth-refresh-race]).
     """
     def _run() -> None:
         while True:

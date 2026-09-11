@@ -72,8 +72,9 @@ closed at startup without it (no default to our domain). Any revision deployed a
 lands MUST set it, or the service will crash-loop.
 
 No `--max-instances` cap is needed when using Postgres: all instances share the same append-only log,
-and the rate limiter is per-instance (see HA notes below). Remove `--max-instances=1` from any
-prior deploy commands — it was only safe with in-memory storage.
+the singleton STH row is written through an atomic compare-and-swap (safe against N concurrent
+refresh timers — see HA notes below), and the rate limiter is per-instance. Remove
+`--max-instances=1` from any prior deploy commands — it was only safe with in-memory storage.
 
 ## One service, two domains: witness.aac (primary) + anchor.aac (legacy alias)
 
@@ -163,6 +164,12 @@ With Postgres as the backing store, multiple Cloud Run instances are safe:
   primary key, so concurrent appends serialize correctly.
 - **Dedup**: the `submitted_statements` table uses `ON CONFLICT (entry_hash) DO NOTHING`, so
   duplicate submissions from concurrent instances are idempotent.
+- **STH refresh**: each instance re-signs and persists the Signed Tree Head on its own
+  independent `CAPSULE_ANCHOR_STH_REFRESH_INTERVAL` timer. The singleton `signed_tree_heads` row
+  is written through an atomic `(tree_size, timestamp)` compare-and-swap
+  (`LogStore.put_sth`), so a slower writer can never move the persisted STH backwards relative to
+  what a client already observed — verified under real multi-process concurrency in
+  `packages/tests/test_sth_refresh_race.py` ([anchor-instance-count-and-sth-refresh-race]).
 - **Rate limiter**: `_SlidingWindowLimiter` is per-process. For cluster-wide rate limiting, add
   Cloud Armor (`--security-policy`) in front of the Cloud Run service.
 - **Recommended minimum HA config**:

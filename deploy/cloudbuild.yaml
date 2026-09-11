@@ -19,7 +19,13 @@ substitutions:
   # The service refuses to start without it (see app.py fail-closed check).
   _DATABASE_SECRET: "capsule-anchor-database-url"
   _TAG: "latest"
-  _MAX_INSTANCES: "1"
+  # Safe to scale out with the Postgres backend: log_index appends serialize
+  # via a BIGINT primary key, submitted_statements dedup is idempotent, and
+  # the singleton STH row is written through an atomic compare-and-swap (see
+  # LogStore.put_sth) so concurrent instances can never move it backwards.
+  # 10 matches deploy/DEPLOY.md's recommended HA config -- not a safety cap,
+  # just a sane resource ceiling. See [anchor-instance-count-and-sth-refresh-race].
+  _MAX_INSTANCES: "10"
 
 images:
   - "${_REGISTRY}/${_SERVICE}:${_TAG}"

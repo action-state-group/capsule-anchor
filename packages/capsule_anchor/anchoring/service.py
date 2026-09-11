@@ -807,7 +807,7 @@ class AnchorerService:
             timestamp=timestamp,
             signature=signature,
         )
-        self._store.put_sth(sth.model_dump_json())
+        self._store.put_sth(sth.model_dump_json(), tree_size=tree_size, timestamp=timestamp)
         return sth
 
     def get_sth(self) -> SignedTreeHead:
