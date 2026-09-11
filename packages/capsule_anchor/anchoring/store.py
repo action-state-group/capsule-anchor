@@ -69,6 +69,9 @@ class InMemoryLogStore:
         self._checkpoint_equivocations: dict[str, list[dict]] = {}
         # Latest persisted Signed Tree Head (JSON string) or None.
         self._latest_sth: str | None = None
+        # (tree_size, timestamp) of the persisted STH -- the CAS ordering key
+        # put_sth compares against (see put_sth docstring).
+        self._latest_sth_key: tuple[int, datetime] | None = None
 
     # --- log ---
     def append_entry(self, entry: TransparencyLogEntry) -> None:
@@ -170,8 +173,28 @@ class InMemoryLogStore:
         return [dict(e) for e in self._checkpoint_equivocations.get(log_id, [])]
 
     # --- persisted Signed Tree Head ---
-    def put_sth(self, sth_json: str) -> None:
+    def put_sth(self, sth_json: str, *, tree_size: int, timestamp: datetime) -> None:
+        """Persist ``sth_json`` as the latest STH -- unless a fresher one is
+        already stored.
+
+        With N concurrent writers (one per Cloud Run instance's independent
+        refresh timer, see app.py's ``_start_sth_refresh_thread``), "last
+        commit wins" does not imply "latest timestamp wins": a writer that
+        read an earlier tree_size/timestamp can still commit AFTER a writer
+        that read a later one, which would move the singleton row -- and
+        therefore what a polling client observes -- backwards in time. The
+        fix is a strict compare-and-swap on ``(tree_size, timestamp)``: a
+        write only applies if it strictly advances that key. The SQL-backed
+        stores below enforce this atomically in the UPSERT's WHERE clause,
+        which is what actually closes the race (a Python-level read-compare-
+        write here would not, since another writer could commit between the
+        read and the write). See [anchor-instance-count-and-sth-refresh-race].
+        """
+        key = (tree_size, timestamp)
+        if self._latest_sth_key is not None and key <= self._latest_sth_key:
+            return
         self._latest_sth = sth_json
+        self._latest_sth_key = key
 
     def get_latest_sth(self) -> str | None:
         return self._latest_sth
@@ -263,14 +286,36 @@ class SqliteLogStore:
                 "CREATE INDEX IF NOT EXISTS idx_subject_index_subject ON subject_index(subject)"
             )
             # Singleton latest Signed Tree Head (id=1 enforced by CHECK).
+            # tree_size / ts_epoch_us are the CAS ordering key put_sth's
+            # UPSERT compares against -- see put_sth for why the comparison
+            # must live in the WHERE clause, not in Python.
             self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS signed_tree_heads (
-                    id       INTEGER PRIMARY KEY CHECK (id = 1),
-                    sth_json TEXT NOT NULL
+                    id          INTEGER PRIMARY KEY CHECK (id = 1),
+                    sth_json    TEXT NOT NULL,
+                    tree_size   INTEGER NOT NULL,
+                    ts_epoch_us INTEGER NOT NULL
                 )
                 """
             )
+            # Migration for a table created before [anchor-instance-count-and-sth-refresh-race]:
+            # the CREATE TABLE above is a no-op against an already-existing
+            # 2-column table, so backfill the CAS columns explicitly. SQLite's
+            # ALTER TABLE ADD COLUMN has no IF NOT EXISTS modifier (unlike
+            # Postgres), so check PRAGMA table_info first. A legacy row's
+            # NULLs are treated as "always loses" by put_sth's
+            # COALESCE(..., -1), so the first write under the new code just
+            # takes over.
+            existing_cols = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(signed_tree_heads)")
+            }
+            if "tree_size" not in existing_cols:
+                self._conn.execute("ALTER TABLE signed_tree_heads ADD COLUMN tree_size INTEGER")
+            if "ts_epoch_us" not in existing_cols:
+                self._conn.execute(
+                    "ALTER TABLE signed_tree_heads ADD COLUMN ts_epoch_us INTEGER"
+                )
             # Checkpoint witness state: one row per log_id, the last-witnessed
             # checkpoint. Only ever INSERT OR REPLACE -- prior witness history
             # isn't retained, only the current chain-tip needed for the next
@@ -597,11 +642,28 @@ class SqliteLogStore:
         ]
 
     # --- persisted Signed Tree Head ---
-    def put_sth(self, sth_json: str) -> None:
+    def put_sth(self, sth_json: str, *, tree_size: int, timestamp: datetime) -> None:
+        """Atomic compare-and-swap keyed on ``(tree_size, ts_epoch_us)``.
+
+        ``INSERT ... ON CONFLICT DO UPDATE ... WHERE`` is a single statement
+        the engine evaluates against the row's CURRENT state, so this is
+        race-free across processes sharing this file -- unlike a Python-side
+        SELECT-then-compare-then-write, where another writer could commit
+        between the read and the write. See put_sth's docstring on
+        InMemoryLogStore for the concurrency story this closes.
+        """
+        ts_us = int(timestamp.timestamp() * 1_000_000)
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT OR REPLACE INTO signed_tree_heads (id, sth_json) VALUES (1, ?)",
-                (sth_json,),
+                "INSERT INTO signed_tree_heads (id, sth_json, tree_size, ts_epoch_us) "
+                "VALUES (1, ?, ?, ?) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "sth_json = excluded.sth_json, tree_size = excluded.tree_size, "
+                "ts_epoch_us = excluded.ts_epoch_us "
+                "WHERE excluded.tree_size > COALESCE(signed_tree_heads.tree_size, -1) "
+                "OR (excluded.tree_size = COALESCE(signed_tree_heads.tree_size, -1) "
+                "AND excluded.ts_epoch_us > COALESCE(signed_tree_heads.ts_epoch_us, -1))",
+                (sth_json, tree_size, ts_us),
             )
 
     def get_latest_sth(self) -> str | None:
@@ -739,13 +801,24 @@ class PostgresLogStore:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_subject_index_subject ON subject_index(subject)"
             )
-            # Singleton latest Signed Tree Head.
+            # Singleton latest Signed Tree Head. tree_size / ts_epoch_us are
+            # the CAS ordering key put_sth's UPSERT compares against.
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS signed_tree_heads (
-                    id       INTEGER PRIMARY KEY CHECK (id = 1),
-                    sth_json TEXT NOT NULL
+                    id          INTEGER PRIMARY KEY CHECK (id = 1),
+                    sth_json    TEXT NOT NULL,
+                    tree_size   BIGINT NOT NULL,
+                    ts_epoch_us BIGINT NOT NULL
                 )
             """)
+            # Migration for a table created before [anchor-instance-count-and-sth-refresh-race]:
+            # see the matching comment on SqliteLogStore._init_schema.
+            self._conn.execute(
+                "ALTER TABLE signed_tree_heads ADD COLUMN IF NOT EXISTS tree_size BIGINT"
+            )
+            self._conn.execute(
+                "ALTER TABLE signed_tree_heads ADD COLUMN IF NOT EXISTS ts_epoch_us BIGINT"
+            )
             # Checkpoint witness state: one row per log_id, the last-witnessed
             # checkpoint (chain-tip only, no history retained).
             self._conn.execute("""
@@ -1098,13 +1171,23 @@ class PostgresLogStore:
         ]
 
     # --- persisted Signed Tree Head ---
-    def put_sth(self, sth_json: str) -> None:
-        params = (sth_json,)
+    def put_sth(self, sth_json: str, *, tree_size: int, timestamp: datetime) -> None:
+        """Atomic compare-and-swap keyed on ``(tree_size, ts_epoch_us)`` --
+        see SqliteLogStore.put_sth for the full concurrency rationale.
+        """
+        ts_us = int(timestamp.timestamp() * 1_000_000)
+        params = (sth_json, tree_size, ts_us)
         with self._lock:
             self._transact(
                 lambda: self._conn.execute(
-                    "INSERT INTO signed_tree_heads (id, sth_json) VALUES (1, %s) "
-                    "ON CONFLICT (id) DO UPDATE SET sth_json = EXCLUDED.sth_json",
+                    "INSERT INTO signed_tree_heads (id, sth_json, tree_size, ts_epoch_us) "
+                    "VALUES (1, %s, %s, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET "
+                    "sth_json = EXCLUDED.sth_json, tree_size = EXCLUDED.tree_size, "
+                    "ts_epoch_us = EXCLUDED.ts_epoch_us "
+                    "WHERE EXCLUDED.tree_size > COALESCE(signed_tree_heads.tree_size, -1) "
+                    "OR (EXCLUDED.tree_size = COALESCE(signed_tree_heads.tree_size, -1) "
+                    "AND EXCLUDED.ts_epoch_us > COALESCE(signed_tree_heads.ts_epoch_us, -1))",
                     params,
                 )
             )
