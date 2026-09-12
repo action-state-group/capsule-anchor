@@ -11,6 +11,7 @@ import pytest
 from capsule_anchor.anchoring.submitters import (
     ACCUMULATOR_FOREIGN,
     ACCUMULATOR_NATIVE_MMR,
+    DEFAULT_CONFIG_PATH,
     DEFAULT_SUBMITTER_RATE_LIMIT_PER_MIN,
     GRADE_COUNTERSIGNED_OBSERVED,
     GRADE_MMR_VERIFIED,
@@ -79,6 +80,42 @@ def test_log_id_containing_slash_round_trips():
 def test_malformed_entry_fails_closed(entry):
     with pytest.raises(SubmitterConfigError):
         SubmitterAllowlist.from_list([entry])
+
+
+# --- self-test native log [witness-grade-proof-selftest-log] ----------------
+#
+# The real shipped config also enrolls a self-operated native-MMR log purely
+# to exercise the checkpoint-to-signed-grade code path (there is otherwise no
+# way to observe a live grade=mmr-verified receipt -- see the entry's own
+# _comment). This is NOT a second independent witness -- these tests only
+# pin that the SHAPE the config ships is what the honesty framing requires:
+# native_mmr (so it actually grades mmr-verified) and unmistakably
+# self-labeled, never anything that could read as an external party.
+
+
+def test_real_shipped_config_enrolls_selftest_log_with_native_mmr_grade():
+    """Pins the ACTUAL committed config file: the self-test log must grade
+    mmr-verified (proving the grade path is genuinely exercised, not
+    countersigned-observed by omission/default) and must be named so it
+    cannot be mistaken for an independent party."""
+    allowlist = SubmitterAllowlist.load(DEFAULT_CONFIG_PATH)
+    entry = allowlist.get("asg-selftest/v1")
+    assert entry is not None, "asg-selftest/v1 is not enrolled in the shipped config"
+    assert entry.accumulator == ACCUMULATOR_NATIVE_MMR
+    assert entry.grade == GRADE_MMR_VERIFIED
+    assert entry.wire_form == WIRE_FORM_COSE_SIGN1
+
+
+def test_selftest_log_id_is_unambiguously_self_operated():
+    """The log_id and its _comment must read as self-operated to a reader who
+    only sees the config file, never as a second witness or partner
+    identity -- the honesty requirement this entry exists under."""
+    raw = json.loads(DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
+    entry = next(item for item in raw if item["log_id"] == "asg-selftest/v1")
+    assert "selftest" in entry["log_id"].lower()
+    comment = entry.get("_comment", "").lower()
+    assert "self-operated" in comment or "not a second witness" in comment
+    assert "corroborates nothing" in comment or "never as evidence" in comment
 
 
 def test_duplicate_log_id_fails_closed():

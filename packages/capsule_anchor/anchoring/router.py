@@ -854,7 +854,18 @@ def get_router() -> APIRouter:
         consistency-proof verification) -- see
         ``AnchorerService.witness_checkpoint``'s docstring for the seam.
 
-        Idempotent: resubmitting the same checkpoint returns the original stamp.
+        Idempotent: resubmitting the same checkpoint (identical `log_id`,
+        `mmr_size`, and root) returns the original stamp -- including its
+        original protected header -- without creating a new log entry or
+        recomputing anything. This holds even across a witness redeploy that
+        changes what a NEW checkpoint's receipt carries (e.g. adding `grade`
+        or any other field): idempotency is keyed on the checkpoint's own
+        content-addressed `entry_hash`, never on when it was submitted or
+        what code was live at the time, so a checkpoint already witnessed
+        before an upgrade is never re-stamped in the new format by
+        resubmission. Only a checkpoint this witness has never seen before
+        (a new `mmr_size`/root for that `log_id`) gets a receipt reflecting
+        the currently-deployed format.
         """
         body = await request.body()
         if not body:
