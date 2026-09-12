@@ -414,6 +414,20 @@ If a checkpoint was accepted but the network dropped the response before the cli
 received it, the same resubmit behavior applies — the response on resubmit is the
 original stamp.
 
+**A witness upgrade does not re-stamp already-witnessed checkpoints.** Idempotency is
+keyed on the content-addressed `entry_hash` of the checkpoint itself (`v`, `kind`,
+`log_id`, `mmr_size`, `root`, `prev_size`, `prev_root`, `key_id`, `timestamp`), never
+on when it was submitted or what code was deployed at the time. If the witness is
+redeployed with new receipt fields, a new grade, or any other change to what the
+protected header carries, **re-submitting a checkpoint you already submitted before
+the redeploy still returns the original stamp — including its original protected
+header** — because the bytes are identical and the dedup fires before any new
+receipt is built. This has already surprised two of us and an external integrator
+who each expected a resubmission to pick up the new format. To see a receipt in the
+new format, submit a checkpoint this witness has genuinely never seen before (a new
+`mmr_size`/root for that `log_id`) — there is no way to force a re-stamp of an
+already-witnessed position short of that.
+
 ---
 
 ## 5. Verify — offline, without the witness
@@ -540,6 +554,18 @@ An enrolled entry's stamp additionally carries a `grade`:
 Enrollment is a committed config change and redeploy, not an open signup mechanism.
 Every `log_id` that is not enrolled keeps the default open self-asserted-key behavior
 and receives no grade.
+
+**One entry in the shipped config, `asg-selftest/v1`, is self-operated — read it as
+zero evidence, not a second witness.** It exists solely so the `grade: mmr-verified`
+code path can be exercised end to end at all (there is otherwise no live way to
+observe it: the one native-MMR checkpoint this witness has ever seen was witnessed
+before that grade existed, and re-submitting it returns the original pre-upgrade
+stamp — see "A witness upgrade does not re-stamp already-witnessed checkpoints"
+above). A grade this witness assigns to a log it also operates corroborates nothing
+about independence — the same "producer-operated witness is not independent" limit
+that applies to every self-hosted witness applies here with no exception. If you see
+a receipt for `asg-selftest/v1`, it proves the code emits a signed grade; it is never
+citable as a second party's attestation.
 
 ---
 

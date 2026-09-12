@@ -6,5 +6,13 @@
     "rate_limit_per_min": 60,
     "wire_form": "json-ed25519",
     "_comment": "AgenTrust trace registry (OPAQUE/AgenTrust). Identity from Imran, 2026-09-01. Foreign accumulator: this witness countersigns observed commitments for this log_id, it does not verify AgenTrust's own consistency proofs (v1 scope; see submitters.py docstring and README). wire_form=json-ed25519 (added 2026-09-02): their pipeline (trace_verify._checkpoint.CheckpointRecord, agentrust-io/trace-registry) mints the CLL checkpoint as deterministic JSON + a bare Ed25519 signature, not COSE_Sign1 -- COSE alignment (trace-registry PR #51 / [trace-registry-align-51-cose-envelope]) is a held, unmerged follow-up, not what ships today. field_map omitted: their CheckpointRecord field set (v/kind/log_id/mmr_size/root/prev_size/prev_root/key_id/timestamp/signature) is byte-identical to ours (verified directly against src/trace_verify/_checkpoint.py and their live checkpoint 1, registry/2026/09/01.ndjson entry .mmr_checkpoint, upstream commit 55e1270), so the identity mapping applies -- see checkpoint_json.py."
+  },
+  {
+    "log_id": "asg-selftest/v1",
+    "pubkey_hex": "9bb6a7e5d06cda25db7c288fa4b296585a945aa3dfde783a6d7272999f65d521",
+    "accumulator": "native_mmr",
+    "rate_limit_per_min": 6,
+    "wire_form": "cose",
+    "_comment": "SELF-OPERATED, NOT A SECOND WITNESS. [witness-grade-proof-selftest-log], 2026-09-11. This log is generated and submitted by the same party that operates this witness -- it exists ONLY to exercise the checkpoint-to-signed-grade code path end to end (there was otherwise no way to observe a live `grade=mmr-verified` receipt: witness_checkpoint dedups on content-addressed entry_hash, so re-submitting the one already-witnessed native-MMR checkpoint we hold returns the pre-existing stamp, never a fresh one). A grade this witness assigns to a log it also operates corroborates NOTHING about independence -- see the manifesto's own 'producer-operated witness is not independent' line; treat any receipt from this log_id as an engineering proof that the code path works, never as evidence, never as a second witness. rate_limit_per_min deliberately low (this log_id should see occasional self-test traffic only, never production volume)."
   }
 ]
