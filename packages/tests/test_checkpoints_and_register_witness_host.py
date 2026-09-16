@@ -24,11 +24,17 @@ This surface:
   * independently verifies the checkpoint's own COSE_Sign1 signature
     server-side before ever counter-signing -- 401 on failure, never
     appended/counter-signed;
-  * is STATELESS: no per-log_id monotonicity/rollback/chain-linkage check,
-    no MMR math -- inclusion verified under the accepted witness key, the
-    receipt signs the log root, not a clock, for one checkpoint only
-    (wording of record until [witness-receipt-signed-time-and-grade] ships
-    live, which additionally signs `iat` + `grade` into the receipt).
+  * is CHECKPOINT-AWARE (stage 2, [capsule-anchor-checkpoint-aware-witness]):
+    inclusion verified under the accepted witness key, the receipt signs the
+    log root plus a signed `iat` + `grade`
+    ([witness-receipt-signed-time-and-grade]). A checkpoint WITHOUT a
+    `consistency_proof` claim is still accepted unconditionally (graded
+    `registered`, or `first-seen` for an unknown `log_id`) -- this file's own
+    per-log_id-state tests below cover that. A checkpoint WITH a
+    `consistency_proof` is additionally checked against this witness's own
+    last-accepted state for that `log_id` and refused (409) on a mismatch --
+    see ``test_checkpoint_continuity.py`` for that coverage; this file stays
+    scoped to the proof-LESS default path plus signature/structural gates.
 
 ``/register`` is the explicit opt-in, plain-SCITT-interop digest-registration
 route -- identical behavior to the legacy ``/v1/digest`` alias (see
@@ -409,15 +415,18 @@ def test_missing_kid_refused_400_not_500(client, key):
     assert status == 400, body
 
 
-# --- statelessness: no MMR math, no per-log_id continuity check --------------
+# --- proof-less submissions: never refused for lack of a consistency_proof --
 
 
 def test_stateless_no_rollback_check_across_same_log_id(client, key):
-    """Unlike /transparency/register-statement's mmr-checkpoint path, this
-    surface does NOT track per-log_id state -- a checkpoint that would be a
-    rollback/fork against a prior one for the SAME log_id is still accepted
-    (each checkpoint is judged only on its own signature), because stage 1
-    is stateless by design."""
+    """A checkpoint that carries NO `consistency_proof` is never refused for
+    a rollback/fork shape against a prior one for the SAME log_id -- the
+    stage-2 continuity gate (test_checkpoint_continuity.py) only ever runs
+    when a proof is attached; absent proof always grades `registered` (or
+    `first-seen`), by design, so a pre-stage-2 client keeps working
+    unmodified. This is NOT "no per-log_id state exists" (it does -- see
+    checkpoint_witnesses); it is "the state is never consulted to REFUSE a
+    proof-less write"."""
     cose1 = _checkpoint_cose(key, log_id="log-J", mmr_size=100, new_peaks=_peaks_for("log-J-100"))
     s1, b1 = _post_checkpoint(client, cose1)
     assert s1 == 200, b1

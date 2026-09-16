@@ -210,15 +210,40 @@ Returns:
   "entry_hash": "<SHA-256 of the checkpoint digest>",
   "entry_hash_scheme": "legacy",
   "leaf_index": 0,
-  "tree_size": 1
+  "tree_size": 1,
+  "continuity_grade": "first-seen"
 }
 ```
 
-Stage 1 is **stateless**: inclusion verified under the accepted witness key; the receipt
-signs the log root, not a clock, for this checkpoint only, no per-`log_id`
-monotonicity/rollback check. Nothing about this route's storage or keying
-choices precludes the stage-2 checkpoint-aware upgrade (two-check continuity: `prev_*`
-equality AND consistency-proof verification), which lands additively once available.
+**Checkpoint-aware witness (stage 2).** This witness remembers, per `log_id`, the last
+checkpoint it accepted, and returns exactly one of three continuity grades — never bare
+"witnessed":
+
+| `continuity_grade` | Meaning |
+|---|---|
+| `first-seen` | This witness has never seen `log_id` before. Nothing to be consistent with; no continuity is implied, even if the log itself has a long history elsewhere. |
+| `registered` | A known `log_id`, but the checkpoint carried no `consistency_proof`. Registration only — **never refused** for the proof's absence, so a client on an older wire version keeps working unmodified. |
+| `continuity-witnessed` | A known `log_id`, a `consistency_proof` was submitted, and this witness independently verified BOTH that the submitted `prev_size`/`prev_root` equal its own last-accepted checkpoint for `log_id` (fork detection) AND that the proof itself (checked with the neutral CLL core's `verify_consistency` — this witness never builds trees) bridges its last-accepted state to the new one. Only this grade signs a continuity assertion into the receipt's protected header. |
+
+A checkpoint carrying a `consistency_proof` that fails either check is refused with
+**409** — never counter-signed, no log append, treated as evidence of log mutation, never
+retried. The response body carries this witness's own last-accepted `(mmr_size, root)` so
+an honest client that skipped a cadence can re-prove from the witness's view:
+
+```json
+{
+  "error": "checkpoint for log_id='...' prev_size/prev_root does not match this witness's own last-accepted checkpoint ...",
+  "last_accepted_mmr_size": 100,
+  "last_accepted_root": "<64-hex>"
+}
+```
+
+**Honesty.** This service registers checkpoints and, when a consistency proof is
+supplied, verifies that the new checkpoint extends the last one it accepted. It is
+operated by the party that publishes the specification; independence is yours to assess.
+A single witness's `continuity-witnessed` grade describes rewriting relative to *this*
+witness's own view only — running more than one independent witness remains the
+anti-equivocation lever a single witness's own claim cannot provide.
 
 ### `/register` — record registration (legacy: `/v1/digest`), opt-in route (SCITT-interop)
 

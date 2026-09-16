@@ -34,6 +34,14 @@ dependencies = [
     # capsule-emit (boundary rule: the witness verifies what a stranger's
     # bytes claim, not what a trusted co-deployed library says about them).
     "scitt-cose>=0.2.2",
+    # Checkpoint-aware witness (stage 2, [capsule-anchor-checkpoint-aware-witness]):
+    # the neutral CLL core's PURE consistency-proof verification math
+    # (cll.checkpoint.core.verify_consistency) -- imported, never
+    # reimplemented, per the ruling's "the witness never builds trees".
+    # Distinct from the capsule-emit boundary rule above: cll is the shared
+    # neutral spec core both capsule-anchor and capsule-emit depend on
+    # independently, not a co-deployed product library.
+    "checkpointed-local-log>=0.3.0",
 ]
 
 [project.urls]

@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import cbor2
+from cll.checkpoint.core import verify_consistency
 from pydantic import BaseModel
 from scitt_cose.statement import CWT_SUB, HDR_CWT_CLAIMS
 
@@ -85,7 +86,8 @@ _LOG_KIND_SCITT = "scitt_statement"
 #
 # Wire shape produced (draft-ietf-cose-merkle-tree-proofs-18):
 #   COSE_Sign1 = Tag(18, [protected_bstr, unprotected_map, payload, signature])
-#   protected map (then bstr-wrapped) = {1: -8, 395: 1, [15: {6: iat}], [-65537: grade]}
+#   protected map (then bstr-wrapped) =
+#       {1: -8, 395: 1, [15: {6: iat}], [-65537: grade], [-65538: continuity]}
 #       1   = alg  -> -8  (EdDSA / Ed25519)
 #       395 = vds  ->  1  (RFC9162_SHA256 verifiable-data-structure)
 #       15  = CWT claims map (RFC 9597 label 15) -- OPTIONAL, present whenever
@@ -96,20 +98,30 @@ _LOG_KIND_SCITT = "scitt_statement"
 #             private-use protected label (mirrors ``scitt_cose.receipt.HDR_GRADE``)
 #             carrying this witness's qualitative grade string
 #             (``"countersigned-observed"`` | ``"mmr-verified"``).
+#       -65538 = continuity (OPTIONAL, present only for a ``POST /checkpoints``
+#             registration graded ``CONTINUITY_GRADE_WITNESSED`` -- see
+#             [capsule-anchor-checkpoint-aware-witness]) -- a CBOR map
+#             ``{policy_id, log_id, prev_size, prev_root, mmr_size, root,
+#             checked, witness_key_id, ts}`` asserting THIS witness
+#             independently checked (a) field-equality against its own
+#             last-accepted checkpoint for ``log_id`` and (b) the submitted
+#             MMR consistency (extension) proof, both before co-signing.
+#             Distinct from ``grade`` above (the SUBMITTER's accumulator
+#             credibility) -- this is the WITNESS's own continuity claim.
 #   unprotected map = {396: {-1: [inclusion_bstr]}}
 #       396 = vdp (verifiable-data-proofs); key -1 = inclusion-proofs array
 #       inclusion_bstr = cbor(  [tree_size, leaf_index, [<audit-path 32B bstrs>]] )
 #   payload  = nil  (DETACHED; the CT root is the external_aad-free Sig payload)
 #   signature = Ed25519 over Sig_structure ["Signature1", protected, b"", root]
 #
-# iat + grade land in the PROTECTED header (not unprotected, not the response
-# body alone) precisely because Sig_structure covers the protected bstr --
-# see [witness-receipt-signed-time-and-grade]: neither claim was signed
-# before this, so a receipt could be replayed with a different witness time
-# or grade without invalidating the signature. Both are additive and OPTIONAL
-# (``None`` omits the key entirely) -- a receipt built with neither is
-# byte-identical to the pre-fix wire shape, so existing receipts and their
-# entry_hash/digest are untouched.
+# iat + grade + continuity land in the PROTECTED header (not unprotected, not
+# the response body alone) precisely because Sig_structure covers the
+# protected bstr -- see [witness-receipt-signed-time-and-grade]: neither
+# claim was signed before this, so a receipt could be replayed with a
+# different witness time or grade without invalidating the signature. All
+# three are additive and OPTIONAL (``None`` omits the key entirely) -- a
+# receipt built with none of them is byte-identical to the pre-fix wire
+# shape, so existing receipts and their entry_hash/digest are untouched.
 _COSE_ALG_LABEL = 1          # protected: algorithm
 _COSE_ALG_EDDSA = -8         # EdDSA (Ed25519)
 _COSE_VDS_LABEL = 395        # protected: verifiable-data-structure (vds)
@@ -119,6 +131,12 @@ _COSE_VDP_INCLUSION_KEY = -1  # vdp map key for the inclusion-proofs array
 _COSE_SIGN1_TAG = 18
 _CWT_IAT = 6                 # RFC 8392 §3.1.6 "iat" claim, inside HDR_CWT_CLAIMS (15)
 _COSE_GRADE_LABEL = -65537   # protected: private-use witness grade label
+_COSE_CONTINUITY_LABEL = -65538  # protected: private-use witness continuity assertion
+#: ``policy_id`` value stamped into every signed continuity assertion --
+#: identifies the two-check scheme (prev-equality + consistency-proof
+#: verification) a relying party is agreeing to trust when it sees this
+#: string, distinct from any future/alternative continuity policy.
+CONTINUITY_POLICY_ID = "cll-continuity/v1"
 
 
 def build_cose_receipt(
@@ -130,6 +148,7 @@ def build_cose_receipt(
     sign: callable,
     iat: int | None = None,
     grade: str | None = None,
+    continuity: dict | None = None,
 ) -> bytes:
     """Assemble a SCITT COSE Receipt (COSE_Sign1, tag 18) -- ~the scitt-cose shape.
 
@@ -146,6 +165,13 @@ def build_cose_receipt(
       grade:      this witness's qualitative grade string, signed into the
                   protected header (label -65537) when given. ``None`` omits
                   it -- same as an un-enrolled submitter today.
+      continuity: this witness's signed continuity assertion (a
+                  ``policy_id``/``log_id``/``prev_size``/``prev_root``/
+                  ``mmr_size``/``root``/``checked``/``witness_key_id``/``ts``
+                  map -- see ``AnchorerService._continuity_assertion``),
+                  signed into the protected header (label -65538) when given.
+                  ``None`` omits it (every non-``continuity-witnessed``
+                  registration).
 
     Returns the tagged COSE_Sign1 CBOR bytes. See the module-level wire spec.
     """
@@ -154,6 +180,8 @@ def build_cose_receipt(
         protected[HDR_CWT_CLAIMS] = {_CWT_IAT: iat}
     if grade is not None:
         protected[_COSE_GRADE_LABEL] = grade
+    if continuity is not None:
+        protected[_COSE_CONTINUITY_LABEL] = continuity
     protected_bstr = cbor2.dumps(protected)
 
     inclusion_bstr = cbor2.dumps([tree_size, leaf_index, list(audit_path)])
@@ -307,6 +335,36 @@ class RollbackError(RuntimeError):
     rollback or fork."""
 
 
+class ContinuityMismatchError(RollbackError):
+    """A ``POST /checkpoints`` submission carries a ``consistency_proof`` but
+    fails one of the stage-2 two-check continuity gate's checks against THIS
+    witness's own last-accepted checkpoint for ``log_id``
+    ([capsule-anchor-checkpoint-aware-witness]):
+
+    (a) the submitted ``prev_size``/``prev_root`` do not equal the witness's
+        own last-accepted ``(mmr_size, mmr_root)`` for ``log_id`` (fork
+        detection -- field equality); or
+    (b) ``cll.checkpoint.core.verify_consistency`` rejects the proof against
+        that same last-accepted state (extension-proof failure -- field
+        equality alone would accept a rewritten tree with honest-looking
+        ``prev_*`` fields, since the checkpoint's signature covers the LIE,
+        not the truth of the claim).
+
+    Refuse-on-mismatch on EITHER check: registration MUST be refused before
+    any log append / counter-signature -- treated as evidence of log
+    mutation, never retried. Carries the witness's OWN last-accepted
+    ``(mmr_size, root)`` so an honest client that skipped a cadence (or
+    submitted out of order) can re-prove FROM the witness's view rather than
+    its own stale ``prev``."""
+
+    def __init__(
+        self, message: str, *, last_accepted_mmr_size: int, last_accepted_root: str
+    ) -> None:
+        super().__init__(message)
+        self.last_accepted_mmr_size = last_accepted_mmr_size
+        self.last_accepted_root = last_accepted_root
+
+
 def parse_checkpoint_payload(payload: bytes | None) -> dict | None:
     """Return the checkpoint witness fields if ``payload`` is a self-declared
     ``mmr-checkpoint`` submission, else ``None`` (unknown/other type -- the
@@ -367,7 +425,7 @@ def parse_checkpoint_payload(payload: bytes | None) -> dict | None:
     }
 
 
-# --- checkpoint-only witness surface (POST /v1/checkpoint, stateless) -------
+# --- checkpoint-only witness surface (POST /checkpoints) --------------------
 #
 # A SEPARATE, stricter surface from the ``mmr-checkpoint`` recognition above:
 # where ``register_signed_statement_full`` accepts any Signed Statement and
@@ -379,11 +437,16 @@ def parse_checkpoint_payload(payload: bytes | None) -> dict | None:
 # Ed25519 signature server-side before ever counter-signing -- something the
 # ``mmr-checkpoint`` payload path above does not do.
 #
-# STATELESS by construction: registration is dispatched as a bare digest
-# (see ``AnchorerService.witness_checkpoint``), which never decodes as a
-# COSE_Sign1, so it can never trigger ``_check_checkpoint_consistency`` --
-# no per-``log_id`` state is read or written here. See
-# ``AnchorerService.witness_checkpoint`` for the stage-2 seam.
+# STAGE 2 ([capsule-anchor-checkpoint-aware-witness]): registration is
+# dispatched as a bare digest (see ``AnchorerService.witness_checkpoint``),
+# which never decodes as a COSE_Sign1, so it can never trigger the LEGACY
+# ``_check_checkpoint_consistency`` (that method stays scoped to the
+# ``mmr-checkpoint`` payload path above, unchanged). This route instead
+# threads its own parsed ``cp`` dict through ``register_signed_statement_full``
+# via the ``checkpoint_continuity`` parameter, which runs
+# ``_check_checkpoint_continuity`` INSIDE the same lock as the statement
+# cache-check + log append -- see that method's docstring for the two-check
+# design.
 _CHECKPOINT_RECORD_FIELDS = (
     "v",
     "kind",
@@ -395,6 +458,18 @@ _CHECKPOINT_RECORD_FIELDS = (
     "key_id",
     "timestamp",
 )
+
+#: Unknown ``log_id`` -- nothing to be consistent with, no continuity implied.
+CONTINUITY_GRADE_FIRST_SEEN = "first-seen"
+#: Known ``log_id`` but no ``consistency_proof`` was submitted -- registered
+#: only, exactly like stage 1; NEVER refused for lack of proof (clients that
+#: predate stage 2 keep working). This witness's own chain-tip state is NOT
+#: advanced by a "registered" acceptance -- see ``_check_checkpoint_continuity``.
+CONTINUITY_GRADE_REGISTERED = "registered"
+#: Known ``log_id``, ``consistency_proof`` present, BOTH checks passed:
+#: prev_* field-equality against this witness's own last-accepted checkpoint,
+#: AND ``cll.checkpoint.core.verify_consistency`` of the proof itself.
+CONTINUITY_GRADE_WITNESSED = "continuity-witnessed"
 
 
 class NotACheckpointError(ValueError):
@@ -443,6 +518,14 @@ class StatementRegistration:
     #: for a statement that declared no subject (unindexed, unchanged
     #: registration behavior).
     subject: str | None = field(default=None)
+    #: Stage-2 continuity grade for a ``POST /checkpoints`` registration --
+    #: one of ``CONTINUITY_GRADE_FIRST_SEEN`` / ``_REGISTERED`` / ``_WITNESSED``
+    #: -- ``None`` for every non-checkpoint registration (this witness's
+    #: qualitative continuity claim, distinct from the enrolled-submitter
+    #: ``grade`` above, which describes the SUBMITTER's own accumulator
+    #: credibility, not this witness's OWN chain-tip check). See
+    #: ``AnchorerService._check_checkpoint_continuity``.
+    continuity_grade: str | None = field(default=None)
 
 
 def _now() -> datetime:
@@ -985,7 +1068,11 @@ class AnchorerService:
         return result.receipt, result.entry_hash, result.leaf_index, result.tree_size
 
     def register_signed_statement_full(
-        self, statement_bytes: bytes, *, grade: str | None = None
+        self,
+        statement_bytes: bytes,
+        *,
+        grade: str | None = None,
+        checkpoint_continuity: dict | None = None,
     ) -> StatementRegistration:
         """SCITT registration with full metadata (entry-hash scheme, checkpoint witness).
 
@@ -1010,12 +1097,32 @@ class AnchorerService:
         signature-malleated twin, or bytes registered before the entry_hash
         migration under the legacy scheme -- the dual-lookup window) returns
         the cached ORIGINAL receipt without appending a duplicate log entry.
+        Because idempotency is keyed on this exact digest (a function of every
+        one of a checkpoint's 9 signing-body fields), a genuinely NEW
+        ``checkpoint_continuity`` submission can NEVER cache-hit against an
+        earlier DIFFERENT checkpoint for the same ``log_id`` -- so the
+        continuity check below only ever runs against a truly new position,
+        never spuriously re-evaluated on a resubmission.
 
         A statement that self-declares ``artifact_type: mmr-checkpoint`` in its
         payload additionally runs the checkpoint witness check (monotonic size +
         chain-linkage vs. the log's last witnessed checkpoint for that ``log_id``)
         BEFORE being appended -- a rollback/fork raises ``RollbackError`` and is
         never co-signed. Any other type registers exactly as before.
+
+        ``checkpoint_continuity`` (only ``witness_checkpoint`` passes this):
+        the ALREADY-PARSED ``POST /checkpoints`` checkpoint dict (see
+        ``checkpoint_cose.parse_and_verify_checkpoint_cose`` /
+        ``checkpoint_json.parse_and_verify_checkpoint_json``) -- separate from
+        ``checkpoint_fields`` above (the LEGACY ``mmr-checkpoint`` payload
+        path's own, differently-shaped dict; the two never coincide, since
+        ``witness_checkpoint`` always dispatches a bare digest, which never
+        decodes as a COSE_Sign1). When given, runs
+        ``_check_checkpoint_continuity`` (stage 2, two-check continuity gate)
+        INSIDE the same lock as the cache-check + append, exactly mirroring
+        how ``_check_checkpoint_consistency`` gates the legacy path above --
+        raises ``ContinuityMismatchError`` (a ``RollbackError``) on either
+        check failing, never co-signed.
         """
         if len(statement_bytes) > MAX_STATEMENT_BYTES:
             raise ValueError(
@@ -1074,6 +1181,23 @@ class AnchorerService:
                 witness_info = None
                 if checkpoint_fields is not None:
                     witness_info = {**checkpoint_fields, "status": "already-registered"}
+                # Resubmission of an ALREADY-registered checkpoint: the
+                # continuity grade it originally earned is already on the
+                # read-surface record (written by
+                # AnchorerService._record_checkpoint_read_surface the first
+                # time this exact checkpoint was accepted) -- read it back
+                # rather than recomputing, since this witness's chain-tip
+                # state may have ALREADY ADVANCED PAST this position (a
+                # newer checkpoint for the same log_id accepted since), which
+                # would make a fresh check(a) fail for a perfectly legitimate
+                # resubmission of an OLDER, already-accepted checkpoint.
+                cached_continuity_grade: str | None = None
+                if checkpoint_continuity is not None:
+                    stored = self._store.get_checkpoint_record(
+                        checkpoint_continuity["log_id"], checkpoint_continuity["mmr_size"]
+                    )
+                    if stored is not None:
+                        cached_continuity_grade = stored.get("continuity_grade")
                 return StatementRegistration(
                     receipt=receipt_bytes,
                     entry_hash=returned_hash,
@@ -1082,6 +1206,7 @@ class AnchorerService:
                     entry_hash_scheme=cache_scheme,
                     checkpoint_witness=witness_info,
                     subject=subject,
+                    continuity_grade=cached_continuity_grade,
                 )
 
             # Not cached: a genuinely new signing act. If it's a checkpoint,
@@ -1090,6 +1215,15 @@ class AnchorerService:
             witness_status: str | None = None
             if checkpoint_fields is not None:
                 witness_status = self._check_checkpoint_consistency(checkpoint_fields)
+
+            # Stage-2 continuity gate for POST /checkpoints -- see
+            # _check_checkpoint_continuity's docstring. Raises
+            # ContinuityMismatchError (never co-signed) on either check
+            # failing; runs BEFORE any append, same discipline as the
+            # legacy path just above.
+            continuity_grade: str | None = None
+            if checkpoint_continuity is not None:
+                continuity_grade = self._check_checkpoint_continuity(checkpoint_continuity)
 
             # 1. Append to the SAME append-only CT log; the entry's payload_hash
             #    IS the SCITT entry hash, and (per ct_leaf_payload) its CT leaf
@@ -1109,6 +1243,26 @@ class AnchorerService:
             audit_path = [bytes.fromhex(h) for h in audit_hex]
             root = bytes.fromhex(root_hex)
 
+            # Stage-2: the signed continuity assertion (Amendment 2026-09-06
+            # point 4) -- ONLY for a submission that actually earned
+            # CONTINUITY_GRADE_WITNESSED (both checks ran and passed). Never
+            # attached for first-seen/registered: neither establishes
+            # continuity, and a signed assertion on either would misrepresent
+            # what this witness actually checked.
+            continuity_assertion: dict | None = None
+            if checkpoint_continuity is not None and continuity_grade == CONTINUITY_GRADE_WITNESSED:
+                continuity_assertion = {
+                    "policy_id": CONTINUITY_POLICY_ID,
+                    "log_id": checkpoint_continuity["log_id"],
+                    "prev_size": checkpoint_continuity["prev_size"],
+                    "prev_root": checkpoint_continuity["prev_root"],
+                    "mmr_size": checkpoint_continuity["mmr_size"],
+                    "root": checkpoint_continuity["root"],
+                    "checked": ["prev_equality", "consistency_proof"],
+                    "witness_key_id": self._attestor.key_id,
+                    "ts": logged_at.isoformat(),
+                }
+
             # 2. Assemble + sign the COSE Receipt (detached root payload).
             #    iat is this witness's OWN clock (logged_at, already computed
             #    above for the log append) -- never the submitter's
@@ -1122,6 +1276,7 @@ class AnchorerService:
                 sign=lambda payload: bytes.fromhex(self._attestor.attest(payload).signature),
                 iat=int(logged_at.timestamp()),
                 grade=grade,
+                continuity=continuity_assertion,
             )
 
             # 3. Persist for idempotent dedup (still INSERT OR IGNORE as
@@ -1154,6 +1309,27 @@ class AnchorerService:
                     timestamp=checkpoint_fields["timestamp"],
                 )
 
+            # Stage-2: advance this witness's own chain-tip state ONLY on
+            # first-seen (establishes the baseline) or a VERIFIED extension
+            # (continuity-witnessed) -- never on a bare "registered"
+            # (unproven) acceptance. Otherwise an unproven submission could
+            # plant a bogus chain-tip and permanently break continuity
+            # checking for every future HONEST, proof-bearing submission of
+            # this log_id (a downgrade-triggered DoS on the exact property
+            # this feature exists to provide) -- see
+            # _check_checkpoint_continuity's docstring.
+            if checkpoint_continuity is not None and continuity_grade in (
+                CONTINUITY_GRADE_FIRST_SEEN,
+                CONTINUITY_GRADE_WITNESSED,
+            ):
+                self._store.put_checkpoint_witness(
+                    checkpoint_continuity["log_id"],
+                    mmr_size=checkpoint_continuity["mmr_size"],
+                    mmr_root=checkpoint_continuity["root"],
+                    key_id=checkpoint_continuity["key_id"],
+                    timestamp=checkpoint_continuity["timestamp"],
+                )
+
         witness_info = (
             {**checkpoint_fields, "status": witness_status} if checkpoint_fields is not None else None
         )
@@ -1165,6 +1341,7 @@ class AnchorerService:
             entry_hash_scheme=scheme,
             checkpoint_witness=witness_info,
             subject=subject,
+            continuity_grade=continuity_grade,
         )
 
     def _check_checkpoint_consistency(self, cp: dict) -> str:
@@ -1193,42 +1370,128 @@ class AnchorerService:
             )
         return "witnessed"
 
+    def _check_checkpoint_continuity(self, cp: dict) -> str:
+        """Stage-2 continuity gate for ``POST /checkpoints``
+        ([capsule-anchor-checkpoint-aware-witness]). Caller holds ``self._lock``
+        (same discipline as ``_check_checkpoint_consistency``).
+
+        ``cp`` is the output of ``checkpoint_cose.parse_and_verify_checkpoint_cose``
+        / ``checkpoint_json.parse_and_verify_checkpoint_json`` -- already
+        structurally validated, signature already independently verified by
+        the caller, and (per ``register_signed_statement_full``'s docstring)
+        guaranteed to be a GENUINELY NEW checkpoint, never a resubmission.
+
+        Three outcomes:
+
+        * ``CONTINUITY_GRADE_FIRST_SEEN`` -- this witness has never seen
+          ``cp['log_id']`` before. Nothing to be consistent with; no
+          continuity implied. This is the honest grade even if the LOG
+          ITSELF has a long history -- "first-seen" describes what THIS
+          witness knows, not what is objectively true of the log.
+        * ``CONTINUITY_GRADE_REGISTERED`` -- a known ``log_id``, but ``cp``
+          carries no ``consistency_proof``. Registered only, exactly like
+          stage 1 -- NEVER refused for lack of proof (a pre-stage-2 client
+          keeps working). This witness's chain-tip state is deliberately NOT
+          advanced for this grade -- see the caller.
+        * ``CONTINUITY_GRADE_WITNESSED`` -- a known ``log_id``, ``cp`` carries
+          a ``consistency_proof``, and BOTH checks below passed.
+
+        Two checks, refuse on either (raises ``ContinuityMismatchError``,
+        carrying this witness's own last-accepted ``(mmr_size, root)`` so an
+        honest client that skipped a cadence can re-prove FROM the witness's
+        view rather than its own stale ``prev``):
+
+        (a) **Fork detection** -- ``cp['prev_size']``/``cp['prev_root']`` must
+            equal this witness's own last-accepted ``(mmr_size, mmr_root)``
+            for ``log_id`` EXACTLY. A checkpoint whose claimed prior doesn't
+            match what this witness itself last accepted is presenting a
+            DIFFERENT history than the one this witness has been building --
+            whether that's a genuine fork or the client got confused about
+            which checkpoint it was extending, it must not be co-signed as
+            continuous.
+        (b) **Extension-proof verification** --
+            ``cll.checkpoint.core.verify_consistency`` must accept ``cp``'s
+            ``consistency_proof`` as bridging this witness's last-accepted
+            ``(root, mmr_size)`` to ``cp``'s own ``(root, mmr_size)``. Check
+            (a) alone is NOT sufficient: it only compares CLAIMED field
+            values, and a rewritten/truncated tail could be submitted with
+            honest-looking (i.e. copied) ``prev_*`` fields -- the
+            checkpoint's own signature covers the LIE, not the truth of the
+            claim. Only an independently-checkable extension proof closes
+            that gap. The witness never builds trees itself here: this calls
+            the PURE, imported ``cll.checkpoint.core.verify_consistency``
+            function, never a capsule-anchor reimplementation of MMR math.
+        """
+        prev = self._store.get_checkpoint_witness(cp["log_id"])
+        if prev is None:
+            return CONTINUITY_GRADE_FIRST_SEEN
+
+        proof = cp.get("consistency_proof")
+        if proof is None:
+            return CONTINUITY_GRADE_REGISTERED
+
+        if cp["prev_size"] != prev["mmr_size"] or cp["prev_root"] != prev["mmr_root"]:
+            raise ContinuityMismatchError(
+                f"checkpoint for log_id={cp['log_id']!r} prev_size/prev_root does not match "
+                f"this witness's own last-accepted checkpoint (accepted mmr_size="
+                f"{prev['mmr_size']}, root={prev['mmr_root']}; submitted prev_size="
+                f"{cp['prev_size']}, prev_root={cp['prev_root']}) -- refusing to co-sign "
+                "(fork or misordered continuity claim)",
+                last_accepted_mmr_size=prev["mmr_size"],
+                last_accepted_root=prev["mmr_root"],
+            )
+
+        if not verify_consistency(
+            bytes.fromhex(prev["mmr_root"]),
+            prev["mmr_size"],
+            bytes.fromhex(cp["root"]),
+            cp["mmr_size"],
+            proof,
+        ):
+            raise ContinuityMismatchError(
+                f"checkpoint for log_id={cp['log_id']!r} consistency_proof does not bridge "
+                f"this witness's last-accepted (mmr_size={prev['mmr_size']}, "
+                f"root={prev['mmr_root']}) to the submitted (mmr_size={cp['mmr_size']}, "
+                f"root={cp['root']}) -- refusing to co-sign (possible rewritten/truncated tree)",
+                last_accepted_mmr_size=prev["mmr_size"],
+                last_accepted_root=prev["mmr_root"],
+            )
+
+        return CONTINUITY_GRADE_WITNESSED
+
     def witness_checkpoint(self, cp: dict) -> StatementRegistration:
-        """Stateless checkpoint-only registration for ``POST /checkpoints``.
+        """Checkpoint-only registration for ``POST /checkpoints``, stage 2
+        ([capsule-anchor-checkpoint-aware-witness]): checkpoint-aware,
+        per-``log_id`` continuity checking.
 
         ``cp`` is the output of ``checkpoint_cose.parse_and_verify_checkpoint_cose``
         (already structurally validated, with its COSE_Sign1 signature
         already independently verified by the caller) -- this method does
-        not re-check either, it only registers.
+        not re-check either, it only registers + continuity-checks.
 
         Dispatches as a bare digest (``bytes.fromhex(_checkpoint_digest(cp))``)
         through the SAME CT-log append/dedup/counter-sign path as
-        ``POST /v1/digest``, so the digest bytes never decode as a
-        COSE_Sign1 and ``register_signed_statement_full`` never runs
-        ``_check_checkpoint_consistency`` -- STAGE 1 is deliberately
-        stateless: no per-``log_id`` continuity, no rollback/fork check, no
-        MMR math. That is what makes this route's guarantee "this exact
-        checkpoint existed and was seen at this time", not "this stream
-        wasn't rewritten" -- the latter is a stage-2 claim.
-
-        STAGE-2 SEAM: ``cp`` already carries ``log_id``, ``mmr_size``,
-        ``prev_size``, and ``root`` (== the existing ``mmr_root`` key
-        elsewhere, just renamed) -- exactly the shape
-        ``_check_checkpoint_consistency`` and ``_store.put_checkpoint_witness``
-        already accept for the ``mmr-checkpoint`` payload path above. A
-        stage-2 upgrade adds per-``log_id`` state to THIS route by calling
-        those two (consistency check before the append, state commit after a
-        successful one) -- additive, not a rewrite of this method or its
-        storage/keying choices.
+        ``POST /v1/digest``. The digest bytes never decode as a COSE_Sign1,
+        so this never triggers the LEGACY ``_check_checkpoint_consistency``
+        (that stays scoped to the ``mmr-checkpoint`` payload path). Instead
+        ``cp`` itself is threaded through as ``checkpoint_continuity``, which
+        runs ``_check_checkpoint_continuity`` inside the SAME lock as the
+        statement cache-check + append (see
+        ``register_signed_statement_full``'s docstring) -- never co-signing a
+        checkpoint that fails either continuity check.
 
         Also updates the queryable read surface (``get_checkpoint_readback``)
-        and equivocation flag -- see ``_record_checkpoint_read_surface``.
-        This NEVER refuses the write: detect-and-surface-loudly on the READ
-        side is in scope, refusing a conflicting submission at the write
-        boundary is the stage-2 concern above, not this route's job.
+        and equivocation flag -- see ``_record_checkpoint_read_surface``. That
+        surface detects a DIFFERENT root at the SAME (log_id, mmr_size)
+        position (an equivocation already flagged loudly on read); this
+        method's own continuity gate additionally REFUSES a NEW submission at
+        a NEW position whose claimed continuity is fork/rewrite evidence,
+        before it is ever co-signed.
         """
         digest_hex = _checkpoint_digest(cp)
-        result = self.register_signed_statement_full(bytes.fromhex(digest_hex), grade=cp.get("grade"))
+        result = self.register_signed_statement_full(
+            bytes.fromhex(digest_hex), grade=cp.get("grade"), checkpoint_continuity=cp
+        )
         self._record_checkpoint_read_surface(cp, result)
         return result
 
@@ -1258,6 +1521,7 @@ class AnchorerService:
                     "leaf_index": result.leaf_index,
                     "tree_size": result.tree_size,
                     "receipt": result.receipt,
+                    "continuity_grade": result.continuity_grade,
                 },
             )
 

@@ -41,7 +41,7 @@ The canonical witness surface exposes two routes at the top level (no prefix):
 
 | Method | Path | What it does |
 |--------|------|-------------|
-| `POST` | `/checkpoints` | Register a CLL checkpoint (`draft-mih-scitt-checkpointed-local-log`). The default path for any `capsule-emit` client. Returns a `CheckpointStampResponse` with `receipt_b64` and `entry_hash`. Verifies the submitter's Ed25519 signature before countersigning; refuses non-checkpoint bodies with a named 400. |
+| `POST` | `/checkpoints` | Register a CLL checkpoint (`draft-mih-scitt-checkpointed-local-log`). The default path for any `capsule-emit` client. Returns a `CheckpointStampResponse` with `receipt_b64`, `entry_hash`, and `continuity_grade` (`first-seen` / `registered` / `continuity-witnessed`). Verifies the submitter's Ed25519 signature before countersigning; refuses non-checkpoint bodies with a named 400, and refuses a `consistency_proof`-bearing checkpoint that fails either continuity check with a named 409. |
 | `GET`  | `/checkpoints/{log_id}` | Read back the last checkpoint witnessed for `log_id`, including any equivocations detected. 200 if witnessed at least once, 404 if never. |
 | `POST` | `/register` | Explicit opt-in, plain-SCITT-interop digest registration. Accepts `{"capsule_id": "<64-hex SHA-256>"}`. Returns a full COSE Receipt. A default `capsule-emit` client never calls this. |
 
@@ -71,8 +71,8 @@ tables are:
 |-------|---------|
 | `log_entries` | Append-only CT log. PK: `log_index BIGINT`. Hash-chained via `prev_log_hash`; per-entry Ed25519 `log_signature` over the tree head. |
 | `submitted_statements` | Idempotent dedup: `entry_hash TEXT PRIMARY KEY` → `receipt BYTEA`, `leaf_index`, `tree_size`. |
-| `checkpoint_records` | One row per `(log_id, mmr_size)` position ever witnessed. First-seen root wins; a conflicting later root triggers an equivocation record instead. |
-| `checkpoint_witnesses` | Chain-tip only: the last-witnessed checkpoint per `log_id` (for monotonicity checks). |
+| `checkpoint_records` | One row per `(log_id, mmr_size)` position ever witnessed. First-seen root wins; a conflicting later root triggers an equivocation record instead. Carries the `continuity_grade` this witness assigned when it was accepted. |
+| `checkpoint_witnesses` | Chain-tip only: the last-ACCEPTED checkpoint per `log_id`. Backs both the legacy `mmr-checkpoint` monotonicity check and stage 2's continuity gate (`POST /checkpoints`, [capsule-anchor-checkpoint-aware-witness]) -- only advanced on `first-seen` or a verified `continuity-witnessed` acceptance, never on a bare `registered` one. |
 | `checkpoint_equivocations` | Fork evidence: appended whenever a different root arrives for an already-witnessed `(log_id, mmr_size)`. Never deleted. |
 | `countersigned_roots` | Legacy anchoring path. |
 | `log_capsule_bindings` | Sidecar: `log_index → capsule_id` binding for the legacy `GET /v1/inclusion/{capsule_id}` resolve. |
@@ -510,13 +510,24 @@ Each response carries its own `receipt_b64` and `entry_hash`. A relying party ca
 verify each receipt independently against each witness's own public key (resolved from
 each witness's `/.well-known/did.json`).
 
-**What witnesses check (stage 1, current behavior).** Each witness independently
-verifies the checkpoint's Ed25519 signature before countersigning, records the entry
-in its own CT log, and issues a COSE Receipt. The witness does not check monotonicity
-or chain-linkage against checkpoints it has previously seen for the same `log_id` at
-this stage (inclusion evidence only; the receipt signs the root, not a clock).
-Continuity checking (verifying that each new checkpoint extends the previous one
-without gaps or rollbacks) is planned for a future stage.
+**What witnesses check.** Each witness independently verifies the checkpoint's
+Ed25519 signature before countersigning, records the entry in its own CT log, and
+issues a COSE Receipt. It also remembers, per `log_id`, the last checkpoint it
+accepted: a checkpoint that omits the optional `consistency_proof` claim is
+registered only (graded `registered`, exactly the original inclusion-only behavior —
+never refused for the proof's absence), while one that carries a `consistency_proof`
+is checked on two axes — the claimed `prev_size`/`prev_root` must equal what this
+witness itself last accepted, AND the proof must independently verify (via the
+neutral CLL core's `verify_consistency`) as extending that same state — refused with
+409 on either failing, graded `continuity-witnessed` on both passing. A `log_id` this
+witness has never seen is graded `first-seen`. See the main README's
+[`/checkpoints`](README.md#checkpoints--checkpoint-witnessing-default-witness-host)
+section for the full three-grade table. **Honesty:** a `continuity-witnessed` grade
+describes only what THIS witness independently checked against its own recorded
+view — it is operated by the party that publishes the specification, and
+independence of that operator is yours to assess. Running more than one witness (see
+above) remains the anti-equivocation lever a single witness's own claim cannot
+provide.
 
 **Equivocation detection.** If the same `(log_id, mmr_size)` position is submitted
 twice with different roots, the witness records both as an equivocation event (in the
