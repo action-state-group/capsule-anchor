@@ -162,6 +162,31 @@ def create_app() -> FastAPI:
 
     app.include_router(anchor_router())
 
+    # Countersign module -- additive, mounted only when the operator has
+    # explicitly chosen strict registration AND opted into the countersign
+    # endpoints. The default (permissive) witness instance never gains this
+    # router; see countersign/config.py.
+    from capsule_anchor.countersign.config import strict_countersign_active
+
+    if strict_countersign_active():
+        from capsule_anchor.countersign.issuers import IssuerAllowlist
+        from capsule_anchor.countersign.router import (
+            configure_issuers as cfg_countersign_issuers,
+        )
+        from capsule_anchor.countersign.router import (
+            configure_service as cfg_countersign,
+        )
+        from capsule_anchor.countersign.router import get_router as countersign_router
+
+        cfg_countersign(attestor, _svc)
+        # Registration-policy trust anchor -- which issuers (ledger_ids) this
+        # instance accepts a withheld bundle from, and the one key pinned
+        # for each. Empty (nothing enrolled, every registration refused) is
+        # a valid starting state; a PRESENT-but-malformed file fails startup
+        # closed -- see IssuerAllowlist.from_env_or_default.
+        cfg_countersign_issuers(IssuerAllowlist.from_env_or_default())
+        app.include_router(countersign_router())
+
     @app.get("/", response_class=HTMLResponse, include_in_schema=False)
     def root() -> HTMLResponse:
         return HTMLResponse(_ROOT_HTML.read_text(encoding="utf-8"))
