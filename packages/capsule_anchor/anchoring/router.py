@@ -6,14 +6,23 @@ This subsystem IS the Action State **Transparency Service (TS)**: a SCITT-style
 
 Endpoints:
   --- Witness-host canonical surface (witness.agentactioncapsule.org) ---
-  POST /checkpoints                     -> DEFAULT route: the checkpoint-only WITNESS
-                                           surface (stateless). Accepts a CLL
-                                           CheckpointRecord verbatim, refuses anything
-                                           else with a NAMED error, verifies its Ed25519
-                                           signature, and counter-signs -- see
-                                           AnchorerService.witness_checkpoint. This is
-                                           the only route a default capsule-emit client
-                                           ever calls.
+  POST /checkpoints                     -> DEFAULT route: the checkpoint-only,
+                                           checkpoint-AWARE witness surface (stage 2,
+                                           [capsule-anchor-checkpoint-aware-witness]).
+                                           Accepts a CLL CheckpointRecord verbatim,
+                                           refuses anything else with a NAMED error,
+                                           verifies its Ed25519 signature, and
+                                           counter-signs -- see
+                                           AnchorerService.witness_checkpoint. Also
+                                           remembers, per log_id, the last checkpoint
+                                           accepted, so a checkpoint carrying an
+                                           optional consistency_proof is graded
+                                           first-seen / registered / continuity-
+                                           witnessed and refused (409) on a fork or
+                                           rewritten-tree mismatch -- absence of the
+                                           proof is never refused. This is the only
+                                           route a default capsule-emit client ever
+                                           calls.
   GET  /checkpoints/{log_id}            -> read-only resolve: the LAST checkpoint
                                            witnessed for log_id (claims + receipt
                                            evidence + countersign grade), plus any
@@ -100,6 +109,7 @@ from .service import (
     AnchorerService,
     CheckpointPayloadError,
     CheckpointSignatureError,
+    ContinuityMismatchError,
     NotACheckpointError,
     RollbackError,
 )
@@ -359,13 +369,24 @@ class CheckpointStampResponse(BaseModel):
     trust this response's claim of it.
 
     Inclusion is verified under the accepted witness key; the receipt signs
-    the log root, not a clock. (Wording of record until this ships live --
-    the receipt's protected header also now carries `iat`, this witness's
-    own registration clock, and `grade`, both SIGNED; once deployed this
-    stamp is inclusion-and-witness-observed-time evidence for THIS
-    checkpoint only. See [witness-receipt-signed-time-and-grade].) It does
-    not attest that the log wasn't rewritten around it (no per-log_id
-    continuity is checked here; see the module docstring).
+    the log root, not a clock. The receipt's protected header also carries
+    `iat` (this witness's own registration clock) and `grade`, both SIGNED
+    -- see [witness-receipt-signed-time-and-grade].
+
+    ``continuity_grade`` is this witness's OWN per-``log_id`` continuity
+    claim ([capsule-anchor-checkpoint-aware-witness], stage 2) -- one of
+    exactly three values, never bare "witnessed": ``"first-seen"`` (unknown
+    ``log_id``, nothing to be consistent with), ``"registered"`` (known
+    ``log_id`` but no ``consistency_proof`` was submitted -- registration
+    only, never refused for its absence), or ``"continuity-witnessed"``
+    (known ``log_id``, proof submitted, BOTH the prev-equality and
+    consistency-proof checks passed against this witness's own
+    last-accepted checkpoint). Only ``"continuity-witnessed"`` additionally
+    signs a continuity assertion into the receipt's protected header (label
+    -65538) -- see ``AnchorerService._check_checkpoint_continuity``. A
+    mismatch on either check is never returned here: it is refused with
+    **409** before any signature (see ``ContinuityMismatchError``), body
+    carrying this witness's own last-accepted ``(mmr_size, root)``.
 
     ``grade`` is populated only when ``log_id`` is an ENROLLED submitter
     (``submitters.py``): ``"mmr-verified"`` for a native CLL log, or
@@ -373,7 +394,9 @@ class CheckpointStampResponse(BaseModel):
     not independently verify -- it only observed and countersigned the
     submitted commitment. ``None`` for every non-enrolled ``log_id``, same
     as before enrollment existed; never presented as equivalent to either
-    grade.
+    grade. Distinct from ``continuity_grade`` above: this describes the
+    SUBMITTER's own accumulator credibility, not this witness's chain-tip
+    check.
     """
 
     receipt_b64: str
@@ -382,6 +405,7 @@ class CheckpointStampResponse(BaseModel):
     leaf_index: int
     tree_size: int
     grade: str | None = None
+    continuity_grade: str | None = None
 
 
 class CheckpointEquivocationSighting(BaseModel):
@@ -434,6 +458,7 @@ class CheckpointReadBackResponse(BaseModel):
     leaf_index: int
     tree_size: int
     equivocations: list[CheckpointEquivocation]
+    continuity_grade: str | None = None
 
 
 def get_router() -> APIRouter:
@@ -770,7 +795,22 @@ def get_router() -> APIRouter:
                     detail=f"rate limit exceeded for submitter {entry.log_id!r} — try again later",
                 )
         svc = get_service()
-        result = svc.witness_checkpoint(cp)
+        try:
+            result = svc.witness_checkpoint(cp)
+        except ContinuityMismatchError as exc:
+            # Refuse-on-mismatch (stage 2, [capsule-anchor-checkpoint-aware-witness]):
+            # never co-signed, never appended. The body carries THIS witness's
+            # own last-accepted (mmr_size, root) so an honest client that
+            # skipped a cadence can re-prove from the witness's view rather
+            # than retrying its own stale prev.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": str(exc),
+                    "last_accepted_mmr_size": exc.last_accepted_mmr_size,
+                    "last_accepted_root": exc.last_accepted_root,
+                },
+            ) from exc
         return CheckpointStampResponse(
             receipt_b64=base64.b64encode(result.receipt).decode("ascii"),
             entry_hash=result.entry_hash,
@@ -778,6 +818,7 @@ def get_router() -> APIRouter:
             leaf_index=result.leaf_index,
             tree_size=result.tree_size,
             grade=cp.get("grade"),
+            continuity_grade=result.continuity_grade,
         )
 
     @canonical.post("/checkpoints", response_model=CheckpointStampResponse)
@@ -838,21 +879,37 @@ def get_router() -> APIRouter:
         the header, or sending the COSE content type, is unchanged from
         today and always routes to the COSE path above.
 
-        STATELESS (stage 1): inclusion is verified under the accepted
-        witness key; the receipt signs the log root, not a clock. (Wording
-        of record until this ships live -- the protected header also now
-        signs `iat` + `grade`; once deployed this is inclusion-and-
-        witness-observed-time evidence for THIS checkpoint only. See
-        [witness-receipt-signed-time-and-grade].) It does not check
-        monotonicity or chain-linkage
-        against any checkpoint previously seen for the same ``log_id`` -- so
-        on its own it does not prove the stream wasn't rewritten around it
-        (nor does it verify an attached ``consistency_proof`` claim, if
-        present -- that is a stage-2 concern). Nothing about this route's
-        storage or keying choices precludes the stage-2 checkpoint-aware
-        upgrade (two-check continuity: ``prev_*`` equality AND
-        consistency-proof verification) -- see
-        ``AnchorerService.witness_checkpoint``'s docstring for the seam.
+        CHECKPOINT-AWARE (stage 2, [capsule-anchor-checkpoint-aware-witness]):
+        inclusion is verified under the accepted witness key; the receipt
+        signs the log root, not a clock, and the protected header also signs
+        `iat` + `grade` (see [witness-receipt-signed-time-and-grade]). This
+        witness additionally remembers, per `log_id`, the last checkpoint it
+        accepted. A checkpoint that omits the optional `consistency_proof`
+        claim is **registered only** (graded `"registered"`) -- exactly stage
+        1's behavior, NEVER refused for the proof's absence, so a client on
+        an older wire version keeps working. A checkpoint that CARRIES a
+        `consistency_proof` is checked against this witness's own
+        last-accepted state for `log_id` on TWO axes, refused with **409** on
+        either failing (never counter-signed, no log append): (a) the
+        submitted `prev_size`/`prev_root` must equal what this witness itself
+        last accepted (fork detection), and (b) the proof must independently
+        verify (via the neutral CLL core's pure `verify_consistency` -- this
+        witness never builds trees) as extending that same last-accepted
+        state to the new one (closes the gap field-equality alone leaves: a
+        rewritten/truncated tree can carry honest-looking `prev_*` fields).
+        The 409 body carries this witness's own last-accepted
+        `(mmr_size, root)` so an honest client that skipped a cadence can
+        re-prove from the witness's view. A checkpoint from a `log_id` this
+        witness has never seen is graded `"first-seen"` -- nothing to be
+        consistent with yet, no continuity implied, regardless of whether a
+        (moot) proof was attached. See
+        ``AnchorerService._check_checkpoint_continuity``'s docstring for the
+        full design, and ``CheckpointStampResponse.continuity_grade`` for
+        what's returned. **Honesty:** a receipt's continuity claim describes
+        only what THIS witness has independently checked against its own
+        view -- it is operated by the party that publishes the specification;
+        independence is yours to assess. Multi-witness deployment remains the
+        anti-equivocation lever a single witness's own claim cannot provide.
 
         Idempotent: resubmitting the same checkpoint (identical `log_id`,
         `mmr_size`, and root) returns the original stamp -- including its
@@ -914,6 +971,7 @@ def get_router() -> APIRouter:
             entry_hash_scheme=record["entry_hash_scheme"],
             leaf_index=record["leaf_index"],
             tree_size=record["tree_size"],
+            continuity_grade=record.get("continuity_grade"),
             equivocations=[
                 CheckpointEquivocation(
                     mmr_size=e["mmr_size"],

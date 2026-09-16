@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 
 import cbor2
+from cll.checkpoint.core import ConsistencyProof
 
 from .service import CheckpointSignatureError, NotACheckpointError
 from .submitters import SubmitterAllowlist
@@ -100,6 +101,64 @@ def _decode_commitment(raw, *, what: str) -> list[bytes]:
     return [bytes(p) for p in peaks]
 
 
+def _decode_consistency_proof(raw: object) -> ConsistencyProof:
+    """Decode a wire-form ``consistency_proof`` claim (a CBOR map with
+    ``size_a, size_b, old_peaks, witness, new_peaks`` -- see
+    ``cll.checkpoint.cose_wire``'s field-mapping) into a
+    ``cll.checkpoint.core.ConsistencyProof``.
+
+    Reimplemented HERE, independently of
+    ``cll.checkpoint.cose_wire._consistency_proof_from_cbor`` (a private
+    helper on a module this witness never imports), matching this file's own
+    boundary discipline: decode structurally from what a stranger's bytes
+    actually contain, never trust a co-deployed library's parse of them.
+    Only the pure verification MATH (``cll.checkpoint.core.verify_consistency``)
+    is imported -- the witness never builds trees, per the ruling
+    [capsule-anchor-checkpoint-aware-witness].
+
+    Raises ``NotACheckpointError`` for anything structurally invalid.
+    """
+    if not isinstance(raw, dict):
+        raise NotACheckpointError("consistency_proof claim is not a CBOR map")
+    try:
+        size_a = raw["size_a"]
+        size_b = raw["size_b"]
+        old_peaks = raw["old_peaks"]
+        witness = raw["witness"]
+        new_peaks = raw["new_peaks"]
+    except KeyError as exc:
+        raise NotACheckpointError(f"consistency_proof claim missing field: {exc}") from exc
+    if not isinstance(size_a, int) or isinstance(size_a, bool) or size_a < 0:
+        raise NotACheckpointError("consistency_proof.size_a must be a non-negative integer")
+    if not isinstance(size_b, int) or isinstance(size_b, bool) or size_b < 0:
+        raise NotACheckpointError("consistency_proof.size_b must be a non-negative integer")
+    if not isinstance(old_peaks, list) or not all(
+        isinstance(p, (bytes, bytearray)) and len(p) == _DIGEST_LEN for p in old_peaks
+    ):
+        raise NotACheckpointError("consistency_proof.old_peaks must be an array of 32-byte hashes")
+    if not isinstance(new_peaks, list) or not all(
+        isinstance(p, (bytes, bytearray)) and len(p) == _DIGEST_LEN for p in new_peaks
+    ):
+        raise NotACheckpointError("consistency_proof.new_peaks must be an array of 32-byte hashes")
+    if not isinstance(witness, list) or not all(
+        isinstance(w, list)
+        and all(isinstance(h, (bytes, bytearray)) and len(h) == _DIGEST_LEN for h in w)
+        for w in witness
+    ):
+        raise NotACheckpointError(
+            "consistency_proof.witness must be an array of arrays of 32-byte hashes"
+        )
+    return ConsistencyProof(
+        v=1,
+        kind="consistency",
+        size_a=size_a,
+        size_b=size_b,
+        old_peaks=tuple(bytes(p).hex() for p in old_peaks),
+        witness=tuple(tuple(bytes(h).hex() for h in w) for w in witness),
+        new_peaks=tuple(bytes(p).hex() for p in new_peaks),
+    )
+
+
 def _extract_protected_fields(cose_bytes: bytes) -> tuple[bytes | None, str | None, str | None]:
     """Structurally read ``kid``, ``content_type``, and the (unauthenticated)
     CWT ``iss`` claim out of the protected header WITHOUT verifying the
@@ -156,10 +215,13 @@ def parse_and_verify_checkpoint_cose(
     Returns a dict shaped like the legacy JSON ``CheckpointRecord`` path's
     9 signing-body fields (``v, kind, log_id, mmr_size, root, prev_size,
     prev_root, key_id, timestamp``) PLUS a ``grade`` key (``None`` unless
-    ``log_id`` is an enrolled submitter -- see below), suitable for
-    ``AnchorerService.witness_checkpoint`` unchanged (``grade`` is not one of
-    the signing-body fields ``_checkpoint_signing_body`` hashes, so its
-    presence never changes the digest/signature math).
+    ``log_id`` is an enrolled submitter -- see below) and a
+    ``consistency_proof`` key (a ``cll.checkpoint.core.ConsistencyProof``, or
+    ``None`` if the claims carried none), suitable for
+    ``AnchorerService.witness_checkpoint`` unchanged (neither ``grade`` nor
+    ``consistency_proof`` is one of the signing-body fields
+    ``_checkpoint_signing_body`` hashes, so their presence never changes the
+    digest/signature math).
 
     Order of checks (BEFORE any counter-signing, matching the JSON path's
     own two-phase gate):
@@ -189,9 +251,17 @@ def parse_and_verify_checkpoint_cose(
        reads AUTHENTICATED fields (``parsed["payload"]``/``parsed["issuer"]``/
        ``parsed["subject"]``), i.e. only once step 2 has already passed.
 
-    Deliberately does NOT verify an attached ``consistency_proof`` (that is
-    stage-2, per-``log_id`` continuity state this stateless route does not
-    keep -- same STAGE 1 scope as the JSON path's ``witness_checkpoint``).
+    Decodes (but does NOT itself verify) an attached ``consistency_proof``
+    claim -- structural validation only (shape, digest lengths). The actual
+    per-``log_id`` continuity check (field-equality against this witness's
+    last-accepted checkpoint, AND ``cll.checkpoint.core.verify_consistency``
+    against it) is stage-2 state this stateless PARSE function does not have
+    -- see ``AnchorerService._check_checkpoint_continuity``, called by
+    ``witness_checkpoint``. A checkpoint with ``prev_size == 0`` (a log's
+    first-ever checkpoint) carrying a ``consistency_proof`` is accepted here
+    structurally; the continuity check itself always grades a truly-unknown
+    ``log_id`` ``"first-seen"`` regardless.
+
     Foreign-accumulator entries (``grade`` ==
     ``submitters.GRADE_COUNTERSIGNED_OBSERVED``) are explicitly NEVER
     checked for internal consistency in v1 regardless -- this witness only
@@ -280,6 +350,17 @@ def parse_and_verify_checkpoint_cose(
     if not isinstance(issued_at, str):
         raise NotACheckpointError("issued_at must be a string (ISO 8601)")
 
+    consistency_proof = None
+    raw_proof = claims.get("consistency_proof")
+    if raw_proof is not None:
+        consistency_proof = _decode_consistency_proof(raw_proof)
+        if consistency_proof.size_a != prev_size or consistency_proof.size_b != mmr_size:
+            raise NotACheckpointError(
+                "consistency_proof does not span this checkpoint's own "
+                f"prev_size={prev_size}/log_size={mmr_size} "
+                f"(claims size_a={consistency_proof.size_a}, size_b={consistency_proof.size_b})"
+            )
+
     expected_subject = f"{issuer}#{mmr_size}"
     if parsed["subject"] != expected_subject:
         raise NotACheckpointError(
@@ -302,4 +383,7 @@ def parse_and_verify_checkpoint_cose(
         # Not part of _CHECKPOINT_RECORD_FIELDS / the signing body -- purely
         # informational, served on the stamp for an enrolled submitter only.
         "grade": entry.grade if entry is not None else None,
+        # Structurally decoded but NOT yet verified -- see this function's
+        # docstring. None if the claims carried no consistency_proof.
+        "consistency_proof": consistency_proof,
     }

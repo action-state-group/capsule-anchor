@@ -17,7 +17,8 @@ All backends implement the same interface:
   put_statement / get_statement
   put_subject_index / get_by_subject
   put_checkpoint_witness / get_checkpoint_witness
-  put_checkpoint_record / get_last_checkpoint_record / get_checkpoint_equivocations
+  put_checkpoint_record / get_checkpoint_record / get_last_checkpoint_record
+  get_checkpoint_equivocations
   put_sth / get_latest_sth
   close
 
@@ -158,6 +159,10 @@ class InMemoryLogStore:
             {"mmr_size": mmr_size, "first": _evidence(existing), "conflicting": _evidence(record)}
         )
         return True
+
+    def get_checkpoint_record(self, log_id: str, mmr_size: int) -> dict | None:
+        rec = self._checkpoint_records.get((log_id, mmr_size))
+        return {"mmr_size": mmr_size, **rec} if rec is not None else None
 
     def get_last_checkpoint_record(self, log_id: str) -> dict | None:
         rows = [
@@ -356,6 +361,20 @@ class SqliteLogStore:
                 )
                 """
             )
+            # Migration for a table created before
+            # [capsule-anchor-checkpoint-aware-witness] (stage 2): backfill
+            # the continuity-grade column the same way the STH table's CAS
+            # columns were backfilled above -- SQLite's ALTER TABLE ADD
+            # COLUMN has no IF NOT EXISTS, so check PRAGMA table_info first.
+            # NULL on a legacy/registered-only row is the correct value
+            # (see put_checkpoint_record/get_last_checkpoint_record).
+            existing_cp_cols = {
+                row[1] for row in self._conn.execute("PRAGMA table_info(checkpoint_records)")
+            }
+            if "continuity_grade" not in existing_cp_cols:
+                self._conn.execute(
+                    "ALTER TABLE checkpoint_records ADD COLUMN continuity_grade TEXT"
+                )
             # Loud-surface evidence: appended whenever a NEW submission's
             # root conflicts with the root already recorded for the same
             # (log_id, mmr_size) -- i.e. an equivocation/fork attempt.
@@ -583,12 +602,14 @@ class SqliteLogStore:
                 self._conn.execute(
                     "INSERT INTO checkpoint_records (log_id, mmr_size, root, prev_size, "
                     "prev_root, key_id, timestamp, grade, entry_hash, entry_hash_scheme, "
-                    "leaf_index, tree_size, receipt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "leaf_index, tree_size, receipt, continuity_grade) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         log_id, mmr_size, record["root"], int(record["prev_size"]),
                         record["prev_root"], record["key_id"], record["timestamp"],
                         record.get("grade"), record["entry_hash"], record["entry_hash_scheme"],
                         int(record["leaf_index"]), int(record["tree_size"]), record["receipt"],
+                        record.get("continuity_grade"),
                     ),
                 )
                 return False
@@ -605,23 +626,40 @@ class SqliteLogStore:
             )
             return True
 
-    def get_last_checkpoint_record(self, log_id: str) -> dict | None:
-        with self._lock:
-            cur = self._conn.execute(
-                "SELECT mmr_size, root, prev_size, prev_root, key_id, timestamp, grade, "
-                "entry_hash, entry_hash_scheme, leaf_index, tree_size, receipt "
-                "FROM checkpoint_records WHERE log_id = ? ORDER BY mmr_size DESC LIMIT 1",
-                (log_id,),
-            )
-            row = cur.fetchone()
-        if row is None:
-            return None
+    _CHECKPOINT_RECORD_SELECT = (
+        "SELECT mmr_size, root, prev_size, prev_root, key_id, timestamp, grade, "
+        "entry_hash, entry_hash_scheme, leaf_index, tree_size, receipt, continuity_grade "
+        "FROM checkpoint_records"
+    )
+
+    @staticmethod
+    def _row_to_checkpoint_record(row: tuple) -> dict:
         return {
             "mmr_size": int(row[0]), "root": str(row[1]), "prev_size": int(row[2]),
             "prev_root": str(row[3]), "key_id": str(row[4]), "timestamp": str(row[5]),
             "grade": row[6], "entry_hash": str(row[7]), "entry_hash_scheme": str(row[8]),
             "leaf_index": int(row[9]), "tree_size": int(row[10]), "receipt": bytes(row[11]),
+            "continuity_grade": row[12],
         }
+
+    def get_checkpoint_record(self, log_id: str, mmr_size: int) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                f"{self._CHECKPOINT_RECORD_SELECT} WHERE log_id = ? AND mmr_size = ?",
+                (log_id, mmr_size),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_checkpoint_record(row)
+
+    def get_last_checkpoint_record(self, log_id: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                f"{self._CHECKPOINT_RECORD_SELECT} WHERE log_id = ? "
+                "ORDER BY mmr_size DESC LIMIT 1",
+                (log_id,),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_checkpoint_record(row)
 
     def get_checkpoint_equivocations(self, log_id: str) -> list[dict]:
         with self._lock:
@@ -852,6 +890,13 @@ class PostgresLogStore:
                     PRIMARY KEY (log_id, mmr_size)
                 )
             """)
+            # Migration for a table created before
+            # [capsule-anchor-checkpoint-aware-witness] (stage 2): backfill
+            # the continuity-grade column -- NULL on a legacy/registered-only
+            # row is the correct value (see put_checkpoint_record).
+            self._conn.execute(
+                "ALTER TABLE checkpoint_records ADD COLUMN IF NOT EXISTS continuity_grade TEXT"
+            )
             # Loud-surface evidence: appended whenever a NEW submission's
             # root conflicts with the root already recorded for the same
             # (log_id, mmr_size) -- i.e. an equivocation/fork attempt.
@@ -1098,13 +1143,15 @@ class PostgresLogStore:
             cur = self._conn.execute(
                 "INSERT INTO checkpoint_records (log_id, mmr_size, root, prev_size, "
                 "prev_root, key_id, timestamp, grade, entry_hash, entry_hash_scheme, "
-                "leaf_index, tree_size, receipt) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "leaf_index, tree_size, receipt, continuity_grade) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
                 "ON CONFLICT (log_id, mmr_size) DO NOTHING",
                 (
                     log_id, mmr_size, record["root"], int(record["prev_size"]),
                     record["prev_root"], record["key_id"], record["timestamp"],
                     record.get("grade"), record["entry_hash"], record["entry_hash_scheme"],
                     int(record["leaf_index"]), int(record["tree_size"]), record["receipt"],
+                    record.get("continuity_grade"),
                 ),
             )
             if cur.rowcount:
@@ -1134,23 +1181,40 @@ class PostgresLogStore:
             self._transact(_run)
         return outcome["equivocation"]
 
-    def get_last_checkpoint_record(self, log_id: str) -> dict | None:
-        with self._lock:
-            cur = self._read(
-                "SELECT mmr_size, root, prev_size, prev_root, key_id, timestamp, grade, "
-                "entry_hash, entry_hash_scheme, leaf_index, tree_size, receipt "
-                "FROM checkpoint_records WHERE log_id = %s ORDER BY mmr_size DESC LIMIT 1",
-                (log_id,),
-            )
-            row = cur.fetchone()
-        if row is None:
-            return None
+    _CHECKPOINT_RECORD_SELECT = (
+        "SELECT mmr_size, root, prev_size, prev_root, key_id, timestamp, grade, "
+        "entry_hash, entry_hash_scheme, leaf_index, tree_size, receipt, continuity_grade "
+        "FROM checkpoint_records"
+    )
+
+    @staticmethod
+    def _row_to_checkpoint_record(row: tuple) -> dict:
         return {
             "mmr_size": int(row[0]), "root": str(row[1]), "prev_size": int(row[2]),
             "prev_root": str(row[3]), "key_id": str(row[4]), "timestamp": str(row[5]),
             "grade": row[6], "entry_hash": str(row[7]), "entry_hash_scheme": str(row[8]),
             "leaf_index": int(row[9]), "tree_size": int(row[10]), "receipt": bytes(row[11]),
+            "continuity_grade": row[12],
         }
+
+    def get_checkpoint_record(self, log_id: str, mmr_size: int) -> dict | None:
+        with self._lock:
+            cur = self._read(
+                f"{self._CHECKPOINT_RECORD_SELECT} WHERE log_id = %s AND mmr_size = %s",
+                (log_id, mmr_size),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_checkpoint_record(row)
+
+    def get_last_checkpoint_record(self, log_id: str) -> dict | None:
+        with self._lock:
+            cur = self._read(
+                f"{self._CHECKPOINT_RECORD_SELECT} WHERE log_id = %s "
+                "ORDER BY mmr_size DESC LIMIT 1",
+                (log_id,),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_checkpoint_record(row)
 
     def get_checkpoint_equivocations(self, log_id: str) -> list[dict]:
         with self._lock:
