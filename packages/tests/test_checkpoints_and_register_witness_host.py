@@ -25,10 +25,9 @@ This surface:
     server-side before ever counter-signing -- 401 on failure, never
     appended/counter-signed;
   * is STATELESS: no per-log_id monotonicity/rollback/chain-linkage check,
-    no MMR math -- inclusion verified under the accepted witness key, the
-    receipt signs the log root, not a clock, for one checkpoint only
-    (wording of record until [witness-receipt-signed-time-and-grade] ships
-    live, which additionally signs `iat` + `grade` into the receipt).
+    no MMR math -- inclusion verified under the accepted witness key, for
+    one checkpoint only; the receipt's protected header also signs `iat`
+    + `grade` (see [witness-receipt-signed-time-and-grade], shipped).
 
 ``/register`` is the explicit opt-in, plain-SCITT-interop digest-registration
 route -- identical behavior to the legacy ``/v1/digest`` alias (see
@@ -53,7 +52,7 @@ from capsule_anchor.app import create_app
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from fastapi.testclient import TestClient
-from scitt_cose.statement import HDR_CWT_CLAIMS, build_signed_statement
+from scitt_cose.statement import CWT_ISS, CWT_SUB, HDR_CWT_CLAIMS, HDR_KID, build_signed_statement
 
 #: Must match capsule_anchor.anchoring.checkpoint_cose.CLL_CHECKPOINT_CONTENT_TYPE
 #: (== capsule_emit.checkpoint.cose_wire.CLL_CHECKPOINT_CONTENT_TYPE) exactly.
@@ -278,6 +277,26 @@ def test_checkpoint_receipt_signs_witness_iat(client, key):
     assert _COSE_GRADE_LABEL not in protected
 
 
+def test_checkpoint_receipt_signs_iss_sub_kid(client, key):
+    """[anchor-rfc9943-and-docs-truth]: the receipt's PROTECTED header now
+    also carries `iss` (this witness's did:web identity), `sub` (a
+    PLACEHOLDER -- entry_hash -- NEEDS-STEVEN + NEEDS-FABIO, not a settled
+    value) and `kid` (label 4, this witness's active key_id) -- all inside
+    the SIGNED bytes, matching RFC 9943 SS6's MUSTs."""
+    new_peaks = _peaks_for("log-iss-1")
+    cose = _checkpoint_cose(key, log_id="log-iss", mmr_size=1, new_peaks=new_peaks)
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    protected = _receipt_protected_header(body["receipt_b64"])
+    claims = protected[HDR_CWT_CLAIMS]
+    assert claims[CWT_ISS] == "did:web:witness.agentactioncapsule.org"
+    # sub is a flagged placeholder (entry_hash) -- NEEDS-STEVEN + NEEDS-FABIO,
+    # see anchor-rfc9943-results.md; asserted here only to prove it's SIGNED,
+    # not to bless this as the final semantics.
+    assert claims[CWT_SUB] == body["entry_hash"]
+    assert protected[HDR_KID] == bytes.fromhex(client.get("/anchor/authority-pubkey").json()["key_id"])
+
+
 def test_enrolled_checkpoint_receipt_signs_grade(client, agentrust_key):
     """An ENROLLED submission's `grade` (unsigned before this fix -- see
     ``test_grade_is_not_part_of_the_signing_body_or_digest`` for the digest
@@ -301,6 +320,11 @@ def test_resubmitting_the_same_checkpoint_is_idempotent(client, key):
     assert s1 == s2 == 200
     assert b1["entry_hash"] == b2["entry_hash"]
     assert b1["leaf_index"] == b2["leaf_index"]
+    # [anchor-rfc9943-and-docs-truth]: a cache-hit reply returns the ORIGINAL
+    # stored receipt bytes verbatim, never a freshly rebuilt one -- so a wire
+    # change (like this one, adding iss/sub/kid) never retroactively alters
+    # an already-issued receipt's bytes/entry_hash/digest.
+    assert b1["receipt_b64"] == b2["receipt_b64"]
 
 
 # --- checkpoint-only gate: reject non-checkpoint / malformed artifacts -------
@@ -407,6 +431,91 @@ def test_missing_kid_refused_400_not_500(client, key):
     )
     status, body = _post_checkpoint(client, cose)
     assert status == 400, body
+
+
+# --- RFC 9943 receipt claims are SIGNATURE-COVERED (mutant-checked) ----------
+#
+# These tamper the ISSUED RECEIPT's protected header after signing (not the
+# submitted checkpoint) -- proving iss/sub/kid ride inside the Sig_structure
+# bstr the COSE_Sign1 signature actually covers, same discipline as
+# [witness-receipt-signed-time-and-grade]'s iat/grade tests. A verifier that
+# doesn't check these -- or checks them against the response body instead of
+# the signed protected bytes -- would accept a receipt with a swapped
+# identity/subject/key; this must not verify.
+
+
+def _tamper_receipt_protected(receipt: bytes, mutate) -> bytes:
+    """Return ``receipt`` with its protected header rebuilt by ``mutate``
+    (a ``dict -> dict`` callable), signature bytes left untouched -- so any
+    change lands outside what the signature was computed over."""
+    outer = cbor2.loads(receipt)
+    protected = dict(cbor2.loads(outer.value[0]))
+    protected = mutate(protected)
+    tampered_protected_bstr = cbor2.dumps(protected)
+    tampered = cbor2.CBORTag(
+        outer.tag, [tampered_protected_bstr, outer.value[1], outer.value[2], outer.value[3]]
+    )
+    return cbor2.dumps(tampered)
+
+
+def _verify_receipt_signature(client: TestClient, receipt: bytes, entry_hash: str):
+    """Full offline verification (inclusion proof + COSE_Sign1 signature)
+    against the LIVE authority key this client's app instance is using --
+    the same check any real relying party would run."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+    from scitt_cose.receipt import verify_receipt
+
+    pubkey_hex = client.get("/anchor/authority-pubkey").json()["pubkey_hex"]
+    pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex))
+    pem = pub.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo)
+    return verify_receipt(receipt, leaf_entry_hex=entry_hash, log_public_key_pem=pem)
+
+
+@pytest.mark.parametrize("claim_label", [CWT_ISS, CWT_SUB])
+def test_tampered_receipt_iss_or_sub_fails_verification(client, key, claim_label):
+    new_peaks = _peaks_for("log-tamper-claim-1")
+    cose = _checkpoint_cose(key, log_id="log-tamper-claim", mmr_size=1, new_peaks=new_peaks)
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    receipt = base64.b64decode(body["receipt_b64"])
+
+    # Sanity: the untampered receipt verifies first.
+    ok = _verify_receipt_signature(client, receipt, body["entry_hash"])
+    assert ok.ok, ok.errors
+
+    def mutate(protected):
+        protected = dict(protected)
+        claims = dict(protected[HDR_CWT_CLAIMS])
+        claims[claim_label] = "tampered-value"
+        protected[HDR_CWT_CLAIMS] = claims
+        return protected
+
+    tampered = _tamper_receipt_protected(receipt, mutate)
+    bad = _verify_receipt_signature(client, tampered, body["entry_hash"])
+    assert not bad.ok
+    assert any("signature did not verify" in e for e in bad.errors)
+
+
+def test_tampered_receipt_kid_fails_verification(client, key):
+    new_peaks = _peaks_for("log-tamper-kid-1")
+    cose = _checkpoint_cose(key, log_id="log-tamper-kid", mmr_size=1, new_peaks=new_peaks)
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    receipt = base64.b64decode(body["receipt_b64"])
+
+    ok = _verify_receipt_signature(client, receipt, body["entry_hash"])
+    assert ok.ok, ok.errors
+
+    def mutate(protected):
+        protected = dict(protected)
+        protected[HDR_KID] = bytes.fromhex("ffffffffffffffff")
+        return protected
+
+    tampered = _tamper_receipt_protected(receipt, mutate)
+    bad = _verify_receipt_signature(client, tampered, body["entry_hash"])
+    assert not bad.ok
+    assert any("signature did not verify" in e for e in bad.errors)
 
 
 # --- statelessness: no MMR math, no per-log_id continuity check --------------
