@@ -18,7 +18,12 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   gains a `grade` field (`null` for non-enrolled submissions), `"mmr-verified"` or
   `"countersigned-observed"` for an enrolled submitter depending on its configured
   `accumulator` — a foreign accumulator is honestly labeled distinct from an MMR-verified one
-  and is never checked for internal consistency (v1 scope). Each enrolled entry also gets its
+  and is never checked for internal consistency (v1 scope -- **NEEDS-STEVEN, flagged
+  2026-09-16, not resolved:** this "v1 scope" wording reads as temporary debt, while the
+  published joint blog and AgenTrust's own `LIMITATIONS.md` describe this same
+  foreign-accumulator behavior as permanent, by design. The two descriptions disagree and
+  should say the same thing; which side changes -- this wording, or the blog sentence -- is
+  Steven's call, not decided here. See `anchor-rfc9943-results.md`.). Each enrolled entry also gets its
   own `rate_limit_per_min`, additive to the existing global limiter. First entry: the AgenTrust
   trace registry (`trace-registry/v1`, foreign accumulator).
 - **Witness-host canonical routes, `POST /checkpoints` (default) + `POST /register`

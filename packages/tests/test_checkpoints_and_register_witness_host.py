@@ -25,10 +25,9 @@ This surface:
     server-side before ever counter-signing -- 401 on failure, never
     appended/counter-signed;
   * is STATELESS: no per-log_id monotonicity/rollback/chain-linkage check,
-    no MMR math -- inclusion verified under the accepted witness key, the
-    receipt signs the log root, not a clock, for one checkpoint only
-    (wording of record until [witness-receipt-signed-time-and-grade] ships
-    live, which additionally signs `iat` + `grade` into the receipt).
+    no MMR math -- inclusion verified under the accepted witness key, for
+    one checkpoint only; the receipt's protected header also signs `iat`
+    + `grade` (see [witness-receipt-signed-time-and-grade], shipped).
 
 ``/register`` is the explicit opt-in, plain-SCITT-interop digest-registration
 route -- identical behavior to the legacy ``/v1/digest`` alias (see

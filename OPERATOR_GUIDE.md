@@ -368,9 +368,36 @@ picks up the new secret automatically if you use `--set-secrets … :latest`).
 
 ### Key rotation
 
-Rotation does not invalidate historical receipts. Every receipt carries a `key_id`
-that a verifier uses to look up the correct key. Receipts issued before a rotation
-remain verifiable as long as the old public key is known.
+**A receipt carries no key identifier today** (`build_cose_receipt` in
+`anchoring/service.py` signs only `{alg, vds}` plus optional `iat`/`grade` --
+`key_id` is not one of the protected-header fields). Until the RFC 9943 `kid`
+header lands (tracked as part of receipt conformance work, not yet shipped),
+key selection is entirely out-of-band: a verifier has no in-band way to tell
+which key signed a given receipt, and must already know (or discover) the
+right key before it can verify.
+
+Rotation does not invalidate historical receipts -- signature verification
+against the correct key still succeeds -- but **a holder of an older receipt
+has no in-band way to select that key** if more than one has ever been valid.
+Today's actual key-selection paths:
+
+- `GET /anchor/authority-pubkey` -- returns the CURRENT `pubkey_hex` and its
+  `key_id` for out-of-band pinning. There is only ever one active key here;
+  it does not serve historical keys.
+- `GET /.well-known/did.json` -- same current key, as a `did:web` document.
+  Also single-key only: rotating replaces the one `verificationMethod` entry,
+  it does not accumulate history.
+- Pin the key you verified against at receipt-issuance time, out of band, and
+  keep that pin per key generation. This repo does not yet give you a
+  built-in way to publish or resolve retired keys; if you need one, maintain
+  it yourself (e.g. your own `key_id -> pubkey_hex` table, keyed by rotation
+  date) until Phase 2 lands.
+
+**Until a receipt carries a `kid`, do not describe rotation as though a
+verifier can resolve the right key from the receipt alone** -- it cannot. Once
+RFC 9943 `kid`/`iss`/`sub` land in the protected header (see
+[anchor-rfc9943-and-docs-truth]), this section should be rewritten again to
+describe the in-band lookup; it is not shipped as of this writing.
 
 **Rotation procedure:**
 
@@ -388,19 +415,30 @@ remain verifiable as long as the old public key is known.
      --update-secrets=CAPSULE_ANCHOR_SIGNING_KEY=YOUR_SIGNING_KEY_SECRET_NAME:latest \
      --project=YOUR_PROJECT_ID
    ```
-   Receipts issued after this redeploy carry the new `key_id`.
+   Receipts issued after this redeploy are signed by the new key -- but, as noted
+   above, carry no `key_id` field of their own to announce that fact.
 
 3. Publish the old public key alongside the new one. After rotation,
-   `GET /.well-known/did.json` returns only the new key. Verifiers that resolve the
-   DID document at verify-time pick up the new key automatically. Verifiers that
-   pinned the old key out-of-band must update their pin. Two approaches for
-   historical-receipt verifiability:
+   `GET /anchor/authority-pubkey` and `GET /.well-known/did.json` both return
+   only the new key -- today's `did_document()` builds its single
+   `verificationMethod` entry from the live `AttestorService`'s current key on
+   every request, with no history mechanism, so rotation doesn't just make the
+   old key harder to find, it stops being served at all. Verifiers that
+   resolve the DID document at verify-time pick up the new key automatically
+   (and silently lose the ability to resolve the old one this way). Verifiers
+   that pinned the old key out-of-band must update their pin using a
+   side-channel you provide -- there are two options, and this repo does not
+   currently implement either one for you:
 
-   - **DID document history (recommended):** include the retired key as an additional
-     `verificationMethod` entry in `/.well-known/did.json`, so a verifier can find
-     the old key by `key_id` from the document itself.
-   - **Out-of-band publication:** publish retired public keys (with `key_id`, raw hex,
-     and rotation date) in your `CHANGELOG.md` or a `keys/` directory in this repo.
+   - **DID document history (recommended target, not yet built):** would mean
+     changing `did_document()` (`capsule_anchor/app.py`) to keep serving retired
+     keys as additional `verificationMethod` entries instead of overwriting the
+     one entry it has today -- a code change, not just an operational step.
+     Until that lands, self-hosters who want this must fork/patch it themselves.
+   - **Out-of-band publication (works today):** publish retired public keys
+     (with `key_id`, raw hex, and rotation date) in your `CHANGELOG.md` or a
+     `keys/` directory in this repo, and tell your verifiers where to look.
+     This is the only historical-key path that exists without a code change.
 
 ### Recovery after a failed checkpoint
 
