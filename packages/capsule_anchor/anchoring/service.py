@@ -45,7 +45,8 @@ from datetime import UTC, datetime
 
 import cbor2
 from pydantic import BaseModel
-from scitt_cose.statement import CWT_SUB, HDR_CWT_CLAIMS
+from scitt_cose.receipt import HDR_GRADE
+from scitt_cose.statement import CWT_ISS, CWT_SUB, HDR_CWT_CLAIMS, HDR_KID
 
 from capsule_anchor.attestation.service import AttestorService
 from capsule_anchor.contracts.protocols import CryptoCore, KeyProvider
@@ -83,33 +84,48 @@ _LOG_KIND_SCITT = "scitt_statement"
 # ``verify_scitt_receipt`` consumes); once ``scitt-cose`` is published this
 # should consolidate onto that library rather than re-encoding here.
 #
-# Wire shape produced (draft-ietf-cose-merkle-tree-proofs-18):
+# Wire shape produced (draft-ietf-cose-merkle-tree-proofs-18 + RFC 9943 §6):
 #   COSE_Sign1 = Tag(18, [protected_bstr, unprotected_map, payload, signature])
-#   protected map (then bstr-wrapped) = {1: -8, 395: 1, [15: {6: iat}], [-65537: grade]}
+#   protected map (then bstr-wrapped) = {1: -8, 395: 1, 4: kid, 15: {1: iss, 2: sub, [6: iat]}, [-65537: grade]}
 #       1   = alg  -> -8  (EdDSA / Ed25519)
 #       395 = vds  ->  1  (RFC9162_SHA256 verifiable-data-structure)
-#       15  = CWT claims map (RFC 9597 label 15) -- OPTIONAL, present whenever
-#             ``iat`` is given: {6: iat} where 6 is the RFC 8392 §3.1.6 "iat"
-#             claim (int, seconds since epoch) -- the WITNESS's own clock at
+#       4   = kid  -- this witness's active key_id, raw bytes. RFC 9943 line
+#             912 makes this a MUST on a Receipt when neither x5t nor x5chain
+#             is present -- we carry neither, so this is UNCONDITIONAL, not
+#             optional like iat/grade below. [anchor-rfc9943-and-docs-truth]
+#       15  = CWT claims map (RFC 9597 label 15) -- RFC 9943 §6 makes this
+#             MUST on a Receipt (a Receipt IS a Signed Statement), and makes
+#             claim 1 (iss) and claim 2 (sub) MUST inside it. Also carries
+#             claim 6 (``iat``, RFC 8392 §3.1.6, OPTIONAL, present whenever
+#             the caller's ``iat`` is given) -- the WITNESS's own clock at
 #             registration, never the submitter's self-asserted timestamp.
 #       -65537 = grade (OPTIONAL, present whenever ``grade`` is given) --
-#             private-use protected label (mirrors ``scitt_cose.receipt.HDR_GRADE``)
-#             carrying this witness's qualitative grade string
-#             (``"countersigned-observed"`` | ``"mmr-verified"``).
+#             private-use protected label, single-sourced from
+#             ``scitt_cose.receipt.HDR_GRADE`` (see the migration-plan
+#             docstring there) carrying this witness's qualitative grade
+#             string (``"countersigned-observed"`` | ``"mmr-verified"``).
 #   unprotected map = {396: {-1: [inclusion_bstr]}}
 #       396 = vdp (verifiable-data-proofs); key -1 = inclusion-proofs array
 #       inclusion_bstr = cbor(  [tree_size, leaf_index, [<audit-path 32B bstrs>]] )
 #   payload  = nil  (DETACHED; the CT root is the external_aad-free Sig payload)
 #   signature = Ed25519 over Sig_structure ["Signature1", protected, b"", root]
 #
-# iat + grade land in the PROTECTED header (not unprotected, not the response
-# body alone) precisely because Sig_structure covers the protected bstr --
-# see [witness-receipt-signed-time-and-grade]: neither claim was signed
-# before this, so a receipt could be replayed with a different witness time
-# or grade without invalidating the signature. Both are additive and OPTIONAL
-# (``None`` omits the key entirely) -- a receipt built with neither is
-# byte-identical to the pre-fix wire shape, so existing receipts and their
-# entry_hash/digest are untouched.
+# iss/sub/kid/iat/grade all land in the PROTECTED header (not unprotected, not
+# the response body alone) precisely because Sig_structure covers the
+# protected bstr -- see [witness-receipt-signed-time-and-grade] (iat/grade)
+# and [anchor-rfc9943-and-docs-truth] (iss/sub/kid): none of these claims are
+# meaningful if a holder could replay a receipt with a different value
+# without invalidating the signature.
+#
+# BACKWARD COMPAT, PRECISELY: iat and grade remain OPTIONAL and additive --
+# ``None`` omits each, so a call passing neither reproduces the exact
+# pre-[witness-receipt-signed-time-and-grade] wire shape. iss/sub/kid are NOT
+# optional the same way: RFC 9943 makes them MUST on every receipt, so this
+# is a WIRE CHANGE for every NEW receipt going forward, not an opt-in --
+# EXISTING/cached receipts are untouched (idempotent replies return the
+# original stored bytes, never rebuilt -- see
+# ``register_signed_statement_full``'s cache-hit branch), so no previously
+# issued receipt's entry_hash/digest changes retroactively.
 _COSE_ALG_LABEL = 1          # protected: algorithm
 _COSE_ALG_EDDSA = -8         # EdDSA (Ed25519)
 _COSE_VDS_LABEL = 395        # protected: verifiable-data-structure (vds)
@@ -118,7 +134,26 @@ _COSE_VDP_LABEL = 396        # unprotected: verifiable-data-proofs (vdp)
 _COSE_VDP_INCLUSION_KEY = -1  # vdp map key for the inclusion-proofs array
 _COSE_SIGN1_TAG = 18
 _CWT_IAT = 6                 # RFC 8392 §3.1.6 "iat" claim, inside HDR_CWT_CLAIMS (15)
-_COSE_GRADE_LABEL = -65537   # protected: private-use witness grade label
+_COSE_GRADE_LABEL = HDR_GRADE  # protected: private-use witness grade label -- SINGLE-SOURCED
+#                                from scitt_cose.receipt.HDR_GRADE (was defined
+#                                independently as a bare literal here; see that
+#                                module's docstring for the migration plan).
+
+#: PLACEHOLDER for the receipt's CWT ``sub`` claim (RFC 9943 §6, CWT claim 2)
+#: -- NOT A DECIDED VALUE. Candidate semantics: (a) the registered entry's own
+#: identifier (``entry_hash`` -- "this receipt is about entry X", used below);
+#: (b) the ORIGINAL submitted statement's own self-asserted ``sub`` claim,
+#: when present ("this receipt inherits the submission's claimed subject").
+#: These differ concretely for a checkpoint receipt: the submitted
+#: checkpoint's ``sub`` is the SUBMITTER's identity, while the receipt's
+#: subject is arguably the registered entry, not the submitter.
+#: NEEDS-STEVEN + NEEDS-FABIO (Infoblox/AAIF, publicly invited to weigh in on
+#: this exact question) -- do not settle without his answer, and this wire
+#: change does NOT merge/deploy until he does. Option (a) is wired at the
+#: ``register_signed_statement_full`` call site ONLY so the rest of the
+#: RFC 9943 shape (iss, kid, signature coverage, mutant tests) can be built
+#: and tested end to end while this one field is decided -- it is scaffolding
+#: for review, not a shipped decision. See anchor-rfc9943-results.md.
 
 
 def build_cose_receipt(
@@ -128,6 +163,9 @@ def build_cose_receipt(
     audit_path: list[bytes],
     root: bytes,
     sign: callable,
+    iss: str,
+    sub: str,
+    kid: bytes,
     iat: int | None = None,
     grade: str | None = None,
 ) -> bytes:
@@ -140,6 +178,16 @@ def build_cose_receipt(
       root:       CT Merkle root, RAW 32 bytes -- the DETACHED signed payload.
       sign:       callable(bytes) -> bytes producing a raw Ed25519 signature over
                   the COSE Sig_structure (the authority key).
+      iss:        this witness's own identity (e.g. ``did:web:<host>``), signed
+                  into the protected CWT claims map (label 15, claim 1).
+                  RFC 9943 MUST -- always present, never ``None``.
+      sub:        RFC 9943 MUST subject claim (label 15, claim 2). See the
+                  module comment above ``build_cose_receipt`` -- THE VALUE
+                  PASSED HERE IS NOT YET A SETTLED DECISION for a checkpoint
+                  receipt (NEEDS-STEVEN + NEEDS-FABIO).
+      kid:        this witness's active key identifier, raw bytes, signed into
+                  the protected header (label 4). RFC 9943 MUST when neither
+                  x5t nor x5chain is present (true here) -- always present.
       iat:        witness-observed registration time (seconds since epoch),
                   signed into the protected CWT claims map (label 15, claim 6)
                   when given. ``None`` omits it (pre-fix wire shape).
@@ -149,9 +197,15 @@ def build_cose_receipt(
 
     Returns the tagged COSE_Sign1 CBOR bytes. See the module-level wire spec.
     """
-    protected = {_COSE_ALG_LABEL: _COSE_ALG_EDDSA, _COSE_VDS_LABEL: _COSE_VDS_RFC9162_SHA256}
+    protected = {
+        _COSE_ALG_LABEL: _COSE_ALG_EDDSA,
+        _COSE_VDS_LABEL: _COSE_VDS_RFC9162_SHA256,
+        HDR_KID: kid,
+    }
+    claims: dict = {CWT_ISS: iss, CWT_SUB: sub}
     if iat is not None:
-        protected[HDR_CWT_CLAIMS] = {_CWT_IAT: iat}
+        claims[_CWT_IAT] = iat
+    protected[HDR_CWT_CLAIMS] = claims
     if grade is not None:
         protected[_COSE_GRADE_LABEL] = grade
     protected_bstr = cbor2.dumps(protected)
@@ -588,6 +642,7 @@ class AnchorerService:
         db_path: str | None = None,
         key_provider: KeyProvider | None = None,
         store=None,
+        issuer: str | None = None,
     ) -> None:
         # If a key_provider is given (and no explicit attestor), build the
         # attestor against the custody seam; otherwise the in-process key.
@@ -597,6 +652,13 @@ class AnchorerService:
             self._attestor = AttestorService(key_provider=key_provider)
         self._crypto: CryptoCore = self._attestor.crypto
         self._lock = threading.RLock()
+
+        # RFC 9943 receipt `iss` claim: this witness's own identity, normally
+        # the did:web configured in app.py from CAPSULE_ANCHOR_PUBLIC_HOST.
+        # Callers that don't configure one (tests, ad-hoc scripts) still get a
+        # present, deterministic value derived from the active key, so every
+        # receipt always carries SOME iss -- never silently omitted.
+        self._issuer = issuer
 
         # Append-only public log store, in priority order:
         #   1. ``store`` injected directly (PostgresLogStore from the app factory
@@ -610,6 +672,10 @@ class AnchorerService:
             self._store = InMemoryLogStore()
         else:
             self._store = SqliteLogStore(db_path)
+
+    @property
+    def _receipt_issuer(self) -> str:
+        return self._issuer or f"key:{self._attestor.key_id}"
 
     # --- AnchorerService protocol ------------------------------------------
     def anchor(
@@ -1114,12 +1180,20 @@ class AnchorerService:
             #    above for the log append) -- never the submitter's
             #    self-asserted checkpoint `issued_at`. grade is the caller's
             #    (None unless this is an enrolled checkpoint submission).
+            #    iss is this witness's own identity; kid is its active key_id
+            #    as raw bytes (matches Signature.key_id / GET /anchor/authority-pubkey).
+            #    sub uses entry_hash as a PLACEHOLDER -- NEEDS-STEVEN + NEEDS-FABIO,
+            #    see the module comment above build_cose_receipt. Do not treat
+            #    this as a settled value.
             receipt = build_cose_receipt(
                 tree_size=tree_size,
                 leaf_index=leaf_index,
                 audit_path=audit_path,
                 root=root,
                 sign=lambda payload: bytes.fromhex(self._attestor.attest(payload).signature),
+                iss=self._receipt_issuer,
+                sub=entry_hash,
+                kid=bytes.fromhex(self._attestor.key_id),
                 iat=int(logged_at.timestamp()),
                 grade=grade,
             )

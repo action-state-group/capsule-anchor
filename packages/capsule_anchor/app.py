@@ -134,12 +134,17 @@ def create_app() -> FastAPI:
             "to acknowledge this risk and start with volatile in-memory storage."
         )
 
+    # RFC 9943 receipt `iss` claim: this instance's own did:web identity --
+    # same identity published at /.well-known/did.json, never our own domain
+    # (see [anchor-did-from-host] above).
+    _receipt_issuer = f"did:web:{public_host}"
+
     if database_url:
         from capsule_anchor.anchoring.store import PostgresLogStore
         _store: object = PostgresLogStore(database_url)
-        _svc = AnchorerService(attestor=attestor, store=_store)
+        _svc = AnchorerService(attestor=attestor, store=_store, issuer=_receipt_issuer)
     else:
-        _svc = AnchorerService(attestor=attestor)
+        _svc = AnchorerService(attestor=attestor, issuer=_receipt_issuer)
     cfg_anchor(_svc)
 
     # Enrolled external checkpoint submitters (POST /checkpoints identity
