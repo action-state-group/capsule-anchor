@@ -279,10 +279,11 @@ def test_checkpoint_receipt_signs_witness_iat(client, key):
 
 def test_checkpoint_receipt_signs_iss_sub_kid(client, key):
     """[anchor-rfc9943-and-docs-truth]: the receipt's PROTECTED header now
-    also carries `iss` (this witness's did:web identity), `sub` (a
-    PLACEHOLDER -- entry_hash -- NEEDS-STEVEN + NEEDS-FABIO, not a settled
-    value) and `kid` (label 4, this witness's active key_id) -- all inside
-    the SIGNED bytes, matching RFC 9943 SS6's MUSTs."""
+    also carries `iss` (this witness's did:web identity), `sub` (RULED: the
+    checkpoint's own CWT subject, `<log_id>#<mmr_size>`, mirrored
+    byte-for-byte -- RFC 9943 Figure 10 + SS3) and `kid` (label 4, this
+    witness's active key_id) -- all inside the SIGNED bytes, matching
+    RFC 9943 SS6's MUSTs."""
     new_peaks = _peaks_for("log-iss-1")
     cose = _checkpoint_cose(key, log_id="log-iss", mmr_size=1, new_peaks=new_peaks)
     status, body = _post_checkpoint(client, cose)
@@ -290,10 +291,12 @@ def test_checkpoint_receipt_signs_iss_sub_kid(client, key):
     protected = _receipt_protected_header(body["receipt_b64"])
     claims = protected[HDR_CWT_CLAIMS]
     assert claims[CWT_ISS] == "did:web:witness.agentactioncapsule.org"
-    # sub is a flagged placeholder (entry_hash) -- NEEDS-STEVEN + NEEDS-FABIO,
-    # see anchor-rfc9943-results.md; asserted here only to prove it's SIGNED,
-    # not to bless this as the final semantics.
-    assert claims[CWT_SUB] == body["entry_hash"]
+    # sub mirrors the checkpoint's own authenticated subject byte-for-byte --
+    # a relying party (Imran's trace-verify) can assert receipt.sub ==
+    # checkpoint.sub. Never entry_hash for a checkpoint receipt: that was
+    # the pre-ruling placeholder.
+    assert claims[CWT_SUB] == "log-iss#1"
+    assert claims[CWT_SUB] != body["entry_hash"]
     assert protected[HDR_KID] == bytes.fromhex(client.get("/anchor/authority-pubkey").json()["key_id"])
 
 
@@ -1088,6 +1091,25 @@ def test_json_enrolled_submission_accepted_with_grade(client, agentrust_key):
     assert status == 200, body
     assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
     assert body["receipt_b64"]
+
+
+def test_json_enrolled_checkpoint_receipt_sub_falls_back_to_entry_hash(client, agentrust_key):
+    """[anchor-rfc9943-and-docs-truth] Decision 3, fallback case: a plain-JSON
+    ``CheckpointRecord`` carries no CWT claims map, so it has no checkpoint
+    ``sub`` to mirror (contrast ``test_checkpoint_receipt_signs_iss_sub_kid``,
+    the COSE-wire case). The receipt's ``sub`` falls back to the documented
+    entry digest -- never a synthesized ``log_id#mmr_size`` this module
+    cannot actually authenticate for the JSON wire form."""
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        wire_form=WIRE_FORM_JSON_ED25519,
+    )
+    cp = _json_checkpoint(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1)
+    status, body = _post_json_checkpoint(client, cp)
+    assert status == 200, body
+    protected = _receipt_protected_header(body["receipt_b64"])
+    claims = protected[HDR_CWT_CLAIMS]
+    assert claims[CWT_SUB] == body["entry_hash"]
 
 
 def test_json_real_live_checkpoint_1_accepted_end_to_end(client):

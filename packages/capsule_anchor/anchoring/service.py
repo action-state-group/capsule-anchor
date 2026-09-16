@@ -139,21 +139,24 @@ _COSE_GRADE_LABEL = HDR_GRADE  # protected: private-use witness grade label -- S
 #                                independently as a bare literal here; see that
 #                                module's docstring for the migration plan).
 
-#: PLACEHOLDER for the receipt's CWT ``sub`` claim (RFC 9943 §6, CWT claim 2)
-#: -- NOT A DECIDED VALUE. Candidate semantics: (a) the registered entry's own
-#: identifier (``entry_hash`` -- "this receipt is about entry X", used below);
-#: (b) the ORIGINAL submitted statement's own self-asserted ``sub`` claim,
-#: when present ("this receipt inherits the submission's claimed subject").
-#: These differ concretely for a checkpoint receipt: the submitted
-#: checkpoint's ``sub`` is the SUBMITTER's identity, while the receipt's
-#: subject is arguably the registered entry, not the submitter.
-#: NEEDS-STEVEN + NEEDS-FABIO (Infoblox/AAIF, publicly invited to weigh in on
-#: this exact question) -- do not settle without his answer, and this wire
-#: change does NOT merge/deploy until he does. Option (a) is wired at the
-#: ``register_signed_statement_full`` call site ONLY so the rest of the
-#: RFC 9943 shape (iss, kid, signature coverage, mutant tests) can be built
-#: and tested end to end while this one field is decided -- it is scaffolding
-#: for review, not a shipped decision. See anchor-rfc9943-results.md.
+#: RULED (Steven, 2026-09-16): the receipt's CWT ``sub`` claim (RFC 9943 §6,
+#: CWT claim 2) is the REGISTERED STATEMENT'S OWN subject -- RFC 9943 Figure
+#: 10 + §3: a Receipt's ``iss`` is the Transparency Service (this witness);
+#: its ``sub`` is what the Statement (and therefore the Receipt) is made
+#: about. For a checkpoint receipt this means ``receipt.sub`` mirrors the
+#: checkpoint's own ``sub`` byte-for-byte (a verifier can assert
+#: ``receipt.sub == checkpoint.sub``) -- NEVER the submitter's identity
+#: (that is the statement's ``iss``), and NEVER this witness's own identity.
+#: Where the registered bytes are not a parseable Signed Statement carrying
+#: its own subject (the open ``/v1/digest`` path, or a checkpoint dispatched
+#: as a bare digest with no externally-resolved subject given), the
+#: documented fallback is the entry digest (``entry_hash``): still "this
+#: receipt is about entry X", never a stand-in for issuer identity. Wired at
+#: the ``register_signed_statement_full`` call site below; see
+#: ``witness_checkpoint`` for how a checkpoint's own authenticated CWT
+#: subject (``<log_id>#<mmr_size>``, validated in ``checkpoint_cose.py``) is
+#: threaded through as the explicit ``sub`` override. This does not apply
+#: retroactively -- already-issued/cached receipts are returned unchanged.
 
 
 def build_cose_receipt(
@@ -181,10 +184,11 @@ def build_cose_receipt(
       iss:        this witness's own identity (e.g. ``did:web:<host>``), signed
                   into the protected CWT claims map (label 15, claim 1).
                   RFC 9943 MUST -- always present, never ``None``.
-      sub:        RFC 9943 MUST subject claim (label 15, claim 2). See the
-                  module comment above ``build_cose_receipt`` -- THE VALUE
-                  PASSED HERE IS NOT YET A SETTLED DECISION for a checkpoint
-                  receipt (NEEDS-STEVEN + NEEDS-FABIO).
+      sub:        RFC 9943 MUST subject claim (label 15, claim 2): the
+                  registered statement's own subject (RFC 9943 Figure 10 +
+                  SS3), never the submitter and never this witness -- see the
+                  module comment above ``build_cose_receipt`` for the ruling
+                  and the documented entry-digest fallback for opaque bytes.
       kid:        this witness's active key identifier, raw bytes, signed into
                   the protected header (label 4). RFC 9943 MUST when neither
                   x5t nor x5chain is present (true here) -- always present.
@@ -1051,7 +1055,7 @@ class AnchorerService:
         return result.receipt, result.entry_hash, result.leaf_index, result.tree_size
 
     def register_signed_statement_full(
-        self, statement_bytes: bytes, *, grade: str | None = None
+        self, statement_bytes: bytes, *, grade: str | None = None, sub: str | None = None
     ) -> StatementRegistration:
         """SCITT registration with full metadata (entry-hash scheme, checkpoint witness).
 
@@ -1061,6 +1065,18 @@ class AnchorerService:
         signed) -- see ``build_cose_receipt``. Only ``witness_checkpoint``
         passes a non-``None`` grade today; every other caller (plain
         statement/digest registration) has none to give.
+
+        ``sub`` is an explicit override for the receipt's RFC 9943 CWT
+        subject claim, for a caller that already resolved the registered
+        artifact's true subject externally (``witness_checkpoint`` passes
+        the checkpoint's own authenticated CWT subject here, since the
+        bytes actually hashed/appended in that path are a bare digest, not
+        the checkpoint's own COSE envelope this method could peek a subject
+        out of itself). When ``None``, this method falls back to the
+        submitted statement's own peeked CWT ``sub`` claim (``subject``,
+        below) when it parses as one, and to ``entry_hash`` -- the entry
+        digest, documented -- when it does not. Never the submitter's
+        identity, never this witness's.
 
         The argument is a SCITT Signed Statement = a COSE_Sign1 (CBOR) blob; we
         treat it as opaque bytes for anchoring purposes -- the CT-log ENTRY hash
@@ -1182,9 +1198,12 @@ class AnchorerService:
             #    (None unless this is an enrolled checkpoint submission).
             #    iss is this witness's own identity; kid is its active key_id
             #    as raw bytes (matches Signature.key_id / GET /anchor/authority-pubkey).
-            #    sub uses entry_hash as a PLACEHOLDER -- NEEDS-STEVEN + NEEDS-FABIO,
-            #    see the module comment above build_cose_receipt. Do not treat
-            #    this as a settled value.
+            #    sub is the registered statement's own subject (RFC 9943
+            #    Figure 10 + SS3, see the module comment above
+            #    build_cose_receipt): the caller's explicit override when
+            #    given (witness_checkpoint's authenticated checkpoint
+            #    subject), else this statement's own peeked CWT sub, else
+            #    entry_hash -- the documented entry-digest fallback.
             receipt = build_cose_receipt(
                 tree_size=tree_size,
                 leaf_index=leaf_index,
@@ -1192,7 +1211,7 @@ class AnchorerService:
                 root=root,
                 sign=lambda payload: bytes.fromhex(self._attestor.attest(payload).signature),
                 iss=self._receipt_issuer,
-                sub=entry_hash,
+                sub=sub if sub is not None else (subject if subject is not None else entry_hash),
                 kid=bytes.fromhex(self._attestor.key_id),
                 iat=int(logged_at.timestamp()),
                 grade=grade,
@@ -1300,9 +1319,24 @@ class AnchorerService:
         This NEVER refuses the write: detect-and-surface-loudly on the READ
         side is in scope, refusing a conflicting submission at the write
         boundary is the stage-2 concern above, not this route's job.
+
+        The receipt's RFC 9943 ``sub`` claim mirrors the checkpoint's own
+        ``sub`` byte-for-byte (RFC 9943 Figure 10 + SS3): ``cp.get("sub")``
+        is the checkpoint's AUTHENTICATED CWT subject (``<log_id>#<mmr_size>``,
+        already verified in ``checkpoint_cose.parse_and_verify_checkpoint_cose``)
+        for a COSE-wire checkpoint, threaded through explicitly because the
+        bytes actually dispatched below are a bare digest, not the
+        checkpoint's own COSE envelope ``register_signed_statement_full``
+        could otherwise peek a subject out of. A ``json-ed25519`` checkpoint
+        (``checkpoint_json.py``) carries no CWT subject at all -- ``cp`` has
+        no ``"sub"`` key for that wire form, so ``.get`` returns ``None`` and
+        ``register_signed_statement_full`` falls back to the entry digest,
+        documented.
         """
         digest_hex = _checkpoint_digest(cp)
-        result = self.register_signed_statement_full(bytes.fromhex(digest_hex), grade=cp.get("grade"))
+        result = self.register_signed_statement_full(
+            bytes.fromhex(digest_hex), grade=cp.get("grade"), sub=cp.get("sub")
+        )
         self._record_checkpoint_read_surface(cp, result)
         return result
 
