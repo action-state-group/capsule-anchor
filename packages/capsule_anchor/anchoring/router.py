@@ -70,6 +70,12 @@ Endpoints:
   GET  /anchor/consistency-proof      -> RFC6962 consistency proof between sizes
   GET  /anchor/authority-pubkey       -> authority public key (out-of-band pin)
 
+  --- Public-log rail (Rekor by default; off unless CAPSULE_ANCHOR_PUBLIC_LOG=rekor) ---
+  GET  /anchor/public-log/latest       -> most recent STH published to the external
+                                           log, 404 if disabled or nothing published yet
+  GET  /anchor/public-log/entries      -> publication history (?since=<tree_size>),
+                                           always 200 (possibly empty)
+
 One signing root: the authority Ed25519 key signs all STHs, COSE Receipts,
 and countersigned roots.  The public key is exposed at ``/.well-known/did.json``
 (no sign-oracle endpoint is provided).
@@ -89,6 +95,7 @@ from __future__ import annotations
 import base64
 import collections
 import hashlib
+import json
 import threading
 import time
 
@@ -101,6 +108,8 @@ from capsule_anchor.contracts.types import (
     MerkleProof,
     TransparencyLogEntry,
 )
+
+from capsule_anchor.public_log import augment_receipt_with_public_log
 
 from .checkpoint_cose import parse_and_verify_checkpoint_cose
 from .checkpoint_json import CLL_CHECKPOINT_JSON_CONTENT_TYPE, parse_and_verify_checkpoint_json
@@ -174,6 +183,39 @@ def configure_service(service: AnchorerService) -> None:
     """Install a durable-backed anchorer (called by the app factory from config)."""
     global _SERVICE
     _SERVICE = service
+
+
+# [capsule-anchor-rekor-rail]: the active public-log publisher, or None when
+# CAPSULE_ANCHOR_PUBLIC_LOG=none (the default) -- installed by the app
+# factory. Absence means the surfacing endpoints below answer 404/empty and
+# the checkpoint stamp never carries a ``public_log`` key.
+_PUBLIC_LOG_PUBLISHER = None
+
+
+def get_public_log_publisher():
+    return _PUBLIC_LOG_PUBLISHER
+
+
+def _public_log_receipt_json(row: dict) -> dict:
+    """Persisted receipt row -> JSON-friendly dict for the surfacing GETs.
+
+    ``raw_response`` is stored as a JSON string (the backend's own response
+    shape, e.g. Rekor's ``{uuid, logIndex, ...}``); parse it back so callers
+    get a real nested object instead of a stringified one.
+    """
+    out = dict(row)
+    try:
+        out["raw_response"] = json.loads(row["raw_response"])
+    except (TypeError, ValueError):
+        pass
+    return out
+
+
+
+def configure_public_log_publisher(publisher) -> None:
+    """Install the active public-log publisher (called by the app factory)."""
+    global _PUBLIC_LOG_PUBLISHER
+    _PUBLIC_LOG_PUBLISHER = publisher
 
 
 def get_submitters() -> SubmitterAllowlist:
@@ -397,6 +439,17 @@ class CheckpointStampResponse(BaseModel):
     grade. Distinct from ``continuity_grade`` above: this describes the
     SUBMITTER's own accumulator credibility, not this witness's chain-tip
     check.
+
+    ``public_log`` ([capsule-anchor-rekor-rail]) is present only when an
+    external public log (Rekor by default) has ALREADY published an STH
+    covering this checkpoint's ``tree_size`` at response time -- ``None`` on
+    every fresh registration (the scheduled publisher runs on its own
+    interval, never inline here) and on any resubmission not yet covered.
+    ``{backend, uuid, log_index, sth_tree_size}`` -- content-free coordinates
+    into the external log. The receipt's COSE bytes carry the SAME evidence
+    in their UNPROTECTED header (label 397) when present; the PROTECTED
+    content and signature are never affected -- see
+    ``public_log.receipt_augment``.
     """
 
     receipt_b64: str
@@ -406,6 +459,7 @@ class CheckpointStampResponse(BaseModel):
     tree_size: int
     grade: str | None = None
     continuity_grade: str | None = None
+    public_log: dict | None = None
 
 
 class CheckpointEquivocationSighting(BaseModel):
@@ -575,6 +629,38 @@ def get_router() -> APIRouter:
         raw: bytes = svc.authority_pubkey()
         pubkey_hex = raw.hex()
         return {"pubkey_hex": pubkey_hex, "key_id": svc.attestor.key_id}
+
+    # --- external public-log rail (Rekor by default) [capsule-anchor-rekor-rail] --
+    @router.get("/public-log/latest")
+    def public_log_latest() -> dict:
+        """Most recently persisted external-public-log receipt plus the STH
+        it covers. **404** when the rail is disabled (``CAPSULE_ANCHOR_PUBLIC_LOG=none``,
+        the default) or enabled but nothing has published yet (a fresh
+        instance, before the first scheduled publish interval elapses).
+        """
+        publisher = get_public_log_publisher()
+        if publisher is None:
+            raise HTTPException(status_code=404, detail="public log rail is not enabled")
+        latest = get_service()._store.get_latest_public_log_receipt(publisher.backend_name)  # noqa: SLF001
+        if latest is None:
+            raise HTTPException(status_code=404, detail="no public-log entry published yet")
+        return _public_log_receipt_json(latest)
+
+    @router.get("/public-log/entries")
+    def public_log_entries(since: int = 0) -> list[dict]:
+        """Every external-public-log receipt with ``sth_tree_size > since``,
+        oldest first -- for monitors and the Trust page. Empty list (never
+        404) both when the rail is disabled and when there is simply nothing
+        newer than ``since``: this is a read surface over a possibly-empty
+        set, not a lookup with a required key.
+        """
+        publisher = get_public_log_publisher()
+        if publisher is None:
+            return []
+        rows = get_service()._store.get_public_log_receipts_since(  # noqa: SLF001
+            publisher.backend_name, since
+        )
+        return [_public_log_receipt_json(r) for r in rows]
 
     # --- SCITT Transparency Service (TS) ------------------------------------
     # Mounted at the top level (``/transparency``), distinct from the ``/anchor``
@@ -811,14 +897,30 @@ def get_router() -> APIRouter:
                     "last_accepted_root": exc.last_accepted_root,
                 },
             ) from exc
+        receipt_bytes = result.receipt
+        public_log_entry = None
+        publisher = get_public_log_publisher()
+        if publisher is not None:
+            covering = svc._store.get_public_log_receipt_covering(  # noqa: SLF001
+                publisher.backend_name, result.tree_size
+            )
+            if covering is not None:
+                public_log_entry = {
+                    "backend": covering["backend"],
+                    "uuid": covering["uuid"],
+                    "log_index": covering["log_index"],
+                    "sth_tree_size": covering["sth_tree_size"],
+                }
+                receipt_bytes = augment_receipt_with_public_log(receipt_bytes, public_log_entry)
         return CheckpointStampResponse(
-            receipt_b64=base64.b64encode(result.receipt).decode("ascii"),
+            receipt_b64=base64.b64encode(receipt_bytes).decode("ascii"),
             entry_hash=result.entry_hash,
             entry_hash_scheme=result.entry_hash_scheme,
             leaf_index=result.leaf_index,
             tree_size=result.tree_size,
             grade=cp.get("grade"),
             continuity_grade=result.continuity_grade,
+            public_log=public_log_entry,
         )
 
     @canonical.post("/checkpoints", response_model=CheckpointStampResponse)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import threading
 import time
@@ -12,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 _ROOT_HTML = Path(__file__).parent / "static" / "root.html"
+logger = logging.getLogger("capsule_anchor")
 
 
 def _start_sth_refresh_thread(svc: object, interval_s: float) -> threading.Thread:
@@ -160,6 +162,67 @@ def create_app() -> FastAPI:
     _sth_interval = float(os.environ.get("CAPSULE_ANCHOR_STH_REFRESH_INTERVAL", "60"))
     _start_sth_refresh_thread(_svc, _sth_interval)
 
+    # External public-log rail (Rekor by default) [capsule-anchor-rekor-rail].
+    # Off by default (CAPSULE_ANCHOR_PUBLIC_LOG=none); additive to everything
+    # above -- existing /checkpoints, /register, and /anchor/anchor receipts
+    # are byte-for-byte unaffected when disabled, and Rekor is never called
+    # inline from any of those request paths when enabled (see
+    # public_log/scheduler.py).
+    _public_log_backend = os.environ.get("CAPSULE_ANCHOR_PUBLIC_LOG", "none").strip().lower()
+    if _public_log_backend not in ("none", "rekor"):
+        raise RuntimeError(
+            f"Unknown CAPSULE_ANCHOR_PUBLIC_LOG backend {_public_log_backend!r} "
+            "(expected 'rekor' or 'none')"
+        )
+    _public_log_publisher = None
+    if _public_log_backend == "rekor":
+        # FAIL-CLOSED: an ephemeral key changes identity on every restart --
+        # publishing its STHs into a permanent external log is noise a
+        # relying party can never pin to a stable authority. This check is
+        # independent of CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY: that flag
+        # only acknowledges the ephemeral-key risk for LOCAL use, it does not
+        # make publishing that identity externally meaningful.
+        if loaded.ephemeral:
+            raise RuntimeError(
+                "CAPSULE_ANCHOR_PUBLIC_LOG=rekor requires a stable signing key. "
+                "Set CAPSULE_ANCHOR_SIGNING_KEY (or _SIGNING_KEY_FILE) first -- "
+                "an ephemeral key's STHs would be published to Rekor under an "
+                "identity that changes on every restart."
+            )
+        from capsule_anchor.public_log import (
+            PublicLogPublisher,
+            RekorPublicLog,
+            start_publisher_thread,
+        )
+
+        _rekor_url = os.environ.get("CAPSULE_ANCHOR_REKOR_URL", "https://rekor.sigstore.dev")
+        _rekor_timeout = float(os.environ.get("CAPSULE_ANCHOR_PUBLIC_LOG_TIMEOUT", "10"))
+        _rekor_interval = float(os.environ.get("CAPSULE_ANCHOR_PUBLIC_LOG_INTERVAL", "300"))
+        _rekor_log = RekorPublicLog(
+            authority_pubkey=_svc.authority_pubkey(),
+            rekor_url=_rekor_url,
+            timeout=_rekor_timeout,
+        )
+        _public_log_publisher = PublicLogPublisher(_svc, _rekor_log, _svc._store)
+        logger.info(
+            "public log rail enabled: backend=rekor url=%s interval=%ss",
+            _rekor_url,
+            _rekor_interval,
+        )
+        start_publisher_thread(_public_log_publisher, _rekor_interval)
+
+    from capsule_anchor.anchoring.router import configure_public_log_publisher
+
+    configure_public_log_publisher(_public_log_publisher)
+
+    @app.on_event("shutdown")
+    def _shutdown_public_log() -> None:
+        if _public_log_publisher is not None:
+            # Best-effort final publish so the last-known STH before shutdown
+            # is externally visible; never blocks shutdown on failure.
+            _public_log_publisher.publish_if_new()
+            _public_log_publisher.close()
+
     app.include_router(anchor_router())
 
     # Countersign module -- additive, mounted only when the operator has
@@ -213,6 +276,12 @@ def create_app() -> FastAPI:
                 result["latest_root_hash"] = sth.root_hash
             except Exception:  # noqa: BLE001, S110
                 pass
+        # [capsule-anchor-rekor-rail] step 4: surfaced only when the rail is
+        # enabled. A degraded rail NEVER flips `ok` to false -- the witness's
+        # core function (countersigning + the CT log) is unaffected by an
+        # external log being unreachable.
+        if _public_log_publisher is not None:
+            result["public_log"] = "degraded" if _public_log_publisher.degraded else "ok"
         return result
 
     @app.get("/.well-known/did.json", tags=["meta"])

@@ -20,6 +20,8 @@ All backends implement the same interface:
   put_checkpoint_record / get_checkpoint_record / get_last_checkpoint_record
   get_checkpoint_equivocations
   put_sth / get_latest_sth
+  put_public_log_receipt / get_public_log_receipt / get_latest_public_log_receipt /
+  get_public_log_receipts_since / get_public_log_receipt_covering / put_public_log_failure
   close
 
 Only the storage of records lives here; all crypto / chain / CT semantics stay
@@ -73,6 +75,11 @@ class InMemoryLogStore:
         # (tree_size, timestamp) of the persisted STH -- the CAS ordering key
         # put_sth compares against (see put_sth docstring).
         self._latest_sth_key: tuple[int, datetime] | None = None
+        # [capsule-anchor-rekor-rail]: (backend, sth_tree_size, sth_root_hash) ->
+        # receipt dict, one row per external-public-log publication.
+        self._public_log_receipts: dict[tuple[str, int, str], dict] = {}
+        # Append-only publish-failure audit trail: (backend, occurred_at, error).
+        self._public_log_failures: list[tuple[str, str, str]] = []
 
     # --- log ---
     def append_entry(self, entry: TransparencyLogEntry) -> None:
@@ -203,6 +210,54 @@ class InMemoryLogStore:
 
     def get_latest_sth(self) -> str | None:
         return self._latest_sth
+
+    # --- external public-log receipts (Rekor rail) ---
+    def put_public_log_receipt(self, receipt: dict) -> bool:
+        key = (receipt["backend"], int(receipt["sth_tree_size"]), receipt["sth_root_hash"])
+        if key in self._public_log_receipts:
+            return False
+        self._public_log_receipts[key] = dict(receipt)
+        return True
+
+    def get_public_log_receipt(
+        self, backend: str, sth_tree_size: int, sth_root_hash: str
+    ) -> dict | None:
+        row = self._public_log_receipts.get((backend, int(sth_tree_size), sth_root_hash))
+        return dict(row) if row is not None else None
+
+    def get_latest_public_log_receipt(self, backend: str) -> dict | None:
+        rows = [r for r in self._public_log_receipts.values() if r["backend"] == backend]
+        if not rows:
+            return None
+        return dict(max(rows, key=lambda r: r["sth_tree_size"]))
+
+    def get_public_log_receipts_since(self, backend: str, since_tree_size: int) -> list[dict]:
+        rows = [
+            dict(r)
+            for r in self._public_log_receipts.values()
+            if r["backend"] == backend and r["sth_tree_size"] > since_tree_size
+        ]
+        return sorted(rows, key=lambda r: r["sth_tree_size"])
+
+    def get_public_log_receipt_covering(self, backend: str, min_tree_size: int) -> dict | None:
+        """The earliest-published receipt whose ``sth_tree_size >= min_tree_size``.
+
+        An append-only Merkle tree's inclusion proof for a leaf present at
+        ``min_tree_size`` also holds against any LATER (larger) published
+        tree -- so the first publication that covers ``min_tree_size`` is the
+        one a relying party can point to as external evidence for that leaf.
+        """
+        rows = [
+            r
+            for r in self._public_log_receipts.values()
+            if r["backend"] == backend and r["sth_tree_size"] >= min_tree_size
+        ]
+        if not rows:
+            return None
+        return dict(min(rows, key=lambda r: r["sth_tree_size"]))
+
+    def put_public_log_failure(self, backend: str, occurred_at: str, error: str) -> None:
+        self._public_log_failures.append((backend, occurred_at, error))
 
 
 class SqliteLogStore:
@@ -396,6 +451,44 @@ class SqliteLogStore:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_checkpoint_equivocations_log_id "
                 "ON checkpoint_equivocations(log_id)"
+            )
+            # [capsule-anchor-rekor-rail]: one row per STH published to an
+            # external public log (Sigstore Rekor by default). Idempotent on
+            # (backend, sth_tree_size, sth_root_hash) -- at most one
+            # publication per tree_size per backend.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS public_log_receipts (
+                    backend                TEXT NOT NULL,
+                    sth_tree_size          INTEGER NOT NULL,
+                    sth_root_hash          TEXT NOT NULL,
+                    sth_timestamp          TEXT NOT NULL,
+                    uuid                   TEXT NOT NULL,
+                    log_index              INTEGER,
+                    integrated_time        TEXT,
+                    signed_entry_timestamp TEXT,
+                    raw_response           TEXT NOT NULL,
+                    submitted_at           TEXT NOT NULL,
+                    PRIMARY KEY (backend, sth_tree_size, sth_root_hash)
+                )
+                """
+            )
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_public_log_receipts_backend_size "
+                "ON public_log_receipts(backend, sth_tree_size)"
+            )
+            # Append-only audit trail of publish failures -- lets a later
+            # auditor see the gap honestly rather than inferring it from
+            # absence alone.
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS public_log_failures (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    backend      TEXT NOT NULL,
+                    occurred_at  TEXT NOT NULL,
+                    error        TEXT NOT NULL
+                )
+                """
             )
 
     # --- row <-> model ---
@@ -712,6 +805,101 @@ class SqliteLogStore:
             row = cur.fetchone()
         return None if row is None else str(row[0])
 
+    # --- external public-log receipts (Rekor rail) ---
+    _PUBLIC_LOG_RECEIPT_SELECT = (
+        "SELECT backend, sth_tree_size, sth_root_hash, sth_timestamp, uuid, "
+        "log_index, integrated_time, signed_entry_timestamp, raw_response, "
+        "submitted_at FROM public_log_receipts"
+    )
+
+    @staticmethod
+    def _row_to_public_log_receipt(row: tuple) -> dict:
+        return {
+            "backend": str(row[0]),
+            "sth_tree_size": int(row[1]),
+            "sth_root_hash": str(row[2]),
+            "sth_timestamp": str(row[3]),
+            "uuid": str(row[4]),
+            "log_index": None if row[5] is None else int(row[5]),
+            "integrated_time": row[6],
+            "signed_entry_timestamp": row[7],
+            "raw_response": str(row[8]),
+            "submitted_at": str(row[9]),
+        }
+
+    def put_public_log_receipt(self, receipt: dict) -> bool:
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO public_log_receipts "
+                "(backend, sth_tree_size, sth_root_hash, sth_timestamp, uuid, "
+                " log_index, integrated_time, signed_entry_timestamp, raw_response, "
+                " submitted_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    receipt["backend"],
+                    int(receipt["sth_tree_size"]),
+                    receipt["sth_root_hash"],
+                    receipt["sth_timestamp"],
+                    receipt["uuid"],
+                    receipt.get("log_index"),
+                    receipt.get("integrated_time"),
+                    receipt.get("signed_entry_timestamp"),
+                    receipt["raw_response"],
+                    receipt["submitted_at"],
+                ),
+            )
+            return cur.rowcount > 0
+
+    def get_public_log_receipt(
+        self, backend: str, sth_tree_size: int, sth_root_hash: str
+    ) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                f"{self._PUBLIC_LOG_RECEIPT_SELECT} "
+                "WHERE backend = ? AND sth_tree_size = ? AND sth_root_hash = ?",
+                (backend, int(sth_tree_size), sth_root_hash),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_public_log_receipt(row)
+
+    def get_latest_public_log_receipt(self, backend: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                f"{self._PUBLIC_LOG_RECEIPT_SELECT} WHERE backend = ? "
+                "ORDER BY sth_tree_size DESC LIMIT 1",
+                (backend,),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_public_log_receipt(row)
+
+    def get_public_log_receipts_since(self, backend: str, since_tree_size: int) -> list[dict]:
+        with self._lock:
+            cur = self._conn.execute(
+                f"{self._PUBLIC_LOG_RECEIPT_SELECT} "
+                "WHERE backend = ? AND sth_tree_size > ? ORDER BY sth_tree_size ASC",
+                (backend, int(since_tree_size)),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_public_log_receipt(r) for r in rows]
+
+    def get_public_log_receipt_covering(self, backend: str, min_tree_size: int) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                f"{self._PUBLIC_LOG_RECEIPT_SELECT} "
+                "WHERE backend = ? AND sth_tree_size >= ? "
+                "ORDER BY sth_tree_size ASC LIMIT 1",
+                (backend, int(min_tree_size)),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_public_log_receipt(row)
+
+    def put_public_log_failure(self, backend: str, occurred_at: str, error: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO public_log_failures (backend, occurred_at, error) "
+                "VALUES (?, ?, ?)",
+                (backend, occurred_at, error),
+            )
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
@@ -917,6 +1105,36 @@ class PostgresLogStore:
                 "CREATE INDEX IF NOT EXISTS idx_checkpoint_equivocations_log_id "
                 "ON checkpoint_equivocations(log_id)"
             )
+            # [capsule-anchor-rekor-rail]: see SqliteLogStore._init_schema for
+            # the matching comment -- idempotent on (backend, sth_tree_size,
+            # sth_root_hash).
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS public_log_receipts (
+                    backend                TEXT NOT NULL,
+                    sth_tree_size          BIGINT NOT NULL,
+                    sth_root_hash          TEXT NOT NULL,
+                    sth_timestamp          TEXT NOT NULL,
+                    uuid                   TEXT NOT NULL,
+                    log_index              BIGINT,
+                    integrated_time        TEXT,
+                    signed_entry_timestamp TEXT,
+                    raw_response           TEXT NOT NULL,
+                    submitted_at           TEXT NOT NULL,
+                    PRIMARY KEY (backend, sth_tree_size, sth_root_hash)
+                )
+            """)
+            self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_public_log_receipts_backend_size "
+                "ON public_log_receipts(backend, sth_tree_size)"
+            )
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS public_log_failures (
+                    id           BIGSERIAL PRIMARY KEY,
+                    backend      TEXT NOT NULL,
+                    occurred_at  TEXT NOT NULL,
+                    error        TEXT NOT NULL
+                )
+            """)
 
     @staticmethod
     def _row_to_entry(row: tuple) -> TransparencyLogEntry:
@@ -1263,6 +1481,112 @@ class PostgresLogStore:
             )
             row = cur.fetchone()
         return None if row is None else str(row[0])
+
+    # --- external public-log receipts (Rekor rail) ---
+    _PUBLIC_LOG_RECEIPT_SELECT = (
+        "SELECT backend, sth_tree_size, sth_root_hash, sth_timestamp, uuid, "
+        "log_index, integrated_time, signed_entry_timestamp, raw_response, "
+        "submitted_at FROM public_log_receipts"
+    )
+
+    @staticmethod
+    def _row_to_public_log_receipt(row: tuple) -> dict:
+        return {
+            "backend": str(row[0]),
+            "sth_tree_size": int(row[1]),
+            "sth_root_hash": str(row[2]),
+            "sth_timestamp": str(row[3]),
+            "uuid": str(row[4]),
+            "log_index": None if row[5] is None else int(row[5]),
+            "integrated_time": row[6],
+            "signed_entry_timestamp": row[7],
+            "raw_response": str(row[8]),
+            "submitted_at": str(row[9]),
+        }
+
+    def put_public_log_receipt(self, receipt: dict) -> bool:
+        params = (
+            receipt["backend"],
+            int(receipt["sth_tree_size"]),
+            receipt["sth_root_hash"],
+            receipt["sth_timestamp"],
+            receipt["uuid"],
+            receipt.get("log_index"),
+            receipt.get("integrated_time"),
+            receipt.get("signed_entry_timestamp"),
+            receipt["raw_response"],
+            receipt["submitted_at"],
+        )
+        outcome = {"inserted": False}
+
+        def _run() -> None:
+            cur = self._conn.execute(
+                "INSERT INTO public_log_receipts "
+                "(backend, sth_tree_size, sth_root_hash, sth_timestamp, uuid, "
+                " log_index, integrated_time, signed_entry_timestamp, raw_response, "
+                " submitted_at) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+                "ON CONFLICT (backend, sth_tree_size, sth_root_hash) DO NOTHING",
+                params,
+            )
+            outcome["inserted"] = bool(cur.rowcount)
+
+        with self._lock:
+            self._transact(_run)
+        return outcome["inserted"]
+
+    def get_public_log_receipt(
+        self, backend: str, sth_tree_size: int, sth_root_hash: str
+    ) -> dict | None:
+        with self._lock:
+            cur = self._read(
+                f"{self._PUBLIC_LOG_RECEIPT_SELECT} "
+                "WHERE backend = %s AND sth_tree_size = %s AND sth_root_hash = %s",
+                (backend, int(sth_tree_size), sth_root_hash),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_public_log_receipt(row)
+
+    def get_latest_public_log_receipt(self, backend: str) -> dict | None:
+        with self._lock:
+            cur = self._read(
+                f"{self._PUBLIC_LOG_RECEIPT_SELECT} WHERE backend = %s "
+                "ORDER BY sth_tree_size DESC LIMIT 1",
+                (backend,),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_public_log_receipt(row)
+
+    def get_public_log_receipts_since(self, backend: str, since_tree_size: int) -> list[dict]:
+        with self._lock:
+            cur = self._read(
+                f"{self._PUBLIC_LOG_RECEIPT_SELECT} "
+                "WHERE backend = %s AND sth_tree_size > %s ORDER BY sth_tree_size ASC",
+                (backend, int(since_tree_size)),
+            )
+            rows = cur.fetchall()
+        return [self._row_to_public_log_receipt(r) for r in rows]
+
+    def get_public_log_receipt_covering(self, backend: str, min_tree_size: int) -> dict | None:
+        with self._lock:
+            cur = self._read(
+                f"{self._PUBLIC_LOG_RECEIPT_SELECT} "
+                "WHERE backend = %s AND sth_tree_size >= %s "
+                "ORDER BY sth_tree_size ASC LIMIT 1",
+                (backend, int(min_tree_size)),
+            )
+            row = cur.fetchone()
+        return None if row is None else self._row_to_public_log_receipt(row)
+
+    def put_public_log_failure(self, backend: str, occurred_at: str, error: str) -> None:
+        params = (backend, occurred_at, error)
+        with self._lock:
+            self._transact(
+                lambda: self._conn.execute(
+                    "INSERT INTO public_log_failures (backend, occurred_at, error) "
+                    "VALUES (%s, %s, %s)",
+                    params,
+                )
+            )
 
     def close(self) -> None:
         with self._lock:
