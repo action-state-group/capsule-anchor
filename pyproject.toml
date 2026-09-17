@@ -42,6 +42,15 @@ dependencies = [
     # neutral spec core both capsule-anchor and capsule-emit depend on
     # independently, not a co-deployed product library.
     "checkpointed-local-log>=0.3.0",
+    # The countersign module ingests the canonical AAC Evidence Bundle
+    # (-00 / v2, the same shape capsule-cli's `capsulectl bundle` produces)
+    # -- its digest (JCS-canonical) and structural/completeness verification
+    # (graph closure, CLL #13 range proof, per-record inclusion proof) are
+    # imported from the neutral reference library, never reimplemented here
+    # ([countersign-whole-bundle-shape]): a second JCS/MMR implementation in
+    # this repo is exactly the kind of divergence that made the ad-hoc
+    # bundle model this replaces reject 100% of capsulectl's real output.
+    "agent-action-capsule>=0.3.0",
 ]
 
 [project.urls]

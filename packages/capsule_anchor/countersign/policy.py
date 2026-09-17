@@ -9,6 +9,12 @@ generic checks and statement assembly can be exercised without a real
 module, and so "no coverage" has one defined, testable behavior (every
 record kind reads ``not checked`` in ``checks.profile_conformance``, never
 silently passes).
+
+``profile`` is a plain profile id string, not a bundle field: the v2
+Evidence Bundle carries no ``profile`` object of its own (that was the ad-hoc
+bundle model's invention) -- a countersign request names its profile
+explicitly (``CountersignRequest.profile_id``), so that is what a policy
+module resolves against.
 """
 
 from __future__ import annotations
@@ -18,11 +24,11 @@ from typing import TYPE_CHECKING, Protocol
 from capsule_anchor.countersign.results import CheckResult
 
 if TYPE_CHECKING:
-    from capsule_anchor.countersign.bundle import Bundle, BundleProfile
+    from capsule_anchor.countersign.bundle import Bundle
 
 
 class PolicyModule(Protocol):
-    """``check(bundle, profile) -> [{name, result, detail}]``.
+    """``check(bundle, profile_id) -> [{name, result, detail}]``.
 
     An implementation owns its vocabulary entirely: what a record kind
     means, what its content must satisfy, what counts as
@@ -31,7 +37,7 @@ class PolicyModule(Protocol):
     reinterprets a module's verdicts.
     """
 
-    def check(self, bundle: "Bundle", profile: "BundleProfile") -> list[CheckResult]: ...
+    def check(self, bundle: "Bundle", profile_id: str) -> list[CheckResult]: ...
 
 
 class NullPolicyModule:
@@ -41,7 +47,7 @@ class NullPolicyModule:
     zero real policy modules; a concrete module is always a separate
     package, loaded by profile id through :class:`PolicyRegistry`."""
 
-    def check(self, bundle: "Bundle", profile: "BundleProfile") -> list[CheckResult]:
+    def check(self, bundle: "Bundle", profile_id: str) -> list[CheckResult]:
         return []
 
 
