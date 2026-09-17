@@ -24,6 +24,21 @@ from __future__ import annotations
 
 from capsule_anchor.countersign.bundle import Bundle
 
+# Best-outcome ranking across every entry in countersignatures[] -- matches
+# the Go verifier's all-entries semantics (countersign.go's `rank` map): a
+# real, independent, resolved countersignature always wins, even if a
+# self-countersigned or unresolved entry sits later in the list.
+_ENTRY_RANK = {"self-countersigned": 0, "unresolved signer": 1, "countersigned": 2}
+
+
+def _entry_state(entry: dict, directory: dict[str, dict]) -> str:
+    if entry.get("independent") is False:
+        return "self-countersigned"
+    signer_id = entry.get("signer", {}).get("id")
+    if signer_id not in directory:
+        return "unresolved signer"
+    return "countersigned"
+
 
 def resolve_entry_state(
     bundle: Bundle,
@@ -35,14 +50,13 @@ def resolve_entry_state(
     list (possibly empty -- an entry can be removed without touching the
     rest of the bundle). ``directory`` maps a resolvable signer id to its
     public countersigner-directory row; absent/None means nothing resolves.
+
+    Every entry is considered, never just the last one -- a genuine
+    independent countersignature must never be hidden behind a later
+    self-countersigned (or unresolved) entry.
     """
     directory = directory or {}
     if not countersignatures:
         return "witnessed" if bundle.receipts else "self-attested"
-    entry = countersignatures[-1]
-    if entry.get("independent") is False:
-        return "self-countersigned"
-    signer_id = entry.get("signer", {}).get("id")
-    if signer_id not in directory:
-        return "unresolved signer"
-    return "countersigned"
+    states = (_entry_state(entry, directory) for entry in countersignatures)
+    return max(states, key=lambda state: _ENTRY_RANK[state])

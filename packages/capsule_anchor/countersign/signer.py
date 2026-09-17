@@ -29,6 +29,8 @@ class Attestor(Protocol):
     @property
     def key_id(self) -> str: ...
 
+    def authority_pubkey(self) -> bytes: ...
+
 
 class Registrar(Protocol):
     """The subset of ``anchoring.AnchorerService`` this module needs."""
@@ -54,17 +56,35 @@ def sign_countersignature(
     ``did:web:<host>``, matching the identity already published at
     ``/.well-known/did.json``) -- passed in rather than constructed here so
     this module never reads deployment config directly.
+
+    Wire-shape note (per the countersign wire-shape reconciliation): the
+    entry's ``signer.key_id`` is the full 32-byte Ed25519 public key, hex
+    encoded (64 chars) -- self-contained and offline-verifiable by any
+    verifier that only has the entry, never a truncated hash. This is
+    deliberately NOT ``attestor.key_id`` (this repo's internal, truncated
+    ``sha256(pubkey)[:16]`` identifier used elsewhere -- e.g. the STH/receipt
+    signing root -- which stays untouched so the live witness/checkpoint
+    path never changes shape). ``independent`` still compares in the
+    truncated form, matching ``bundle.producer_key_id``'s own derivation
+    (see ``bundle.py::accept_bundle``), so self-countersignature detection
+    is unaffected by the wire key_id's format change.
     """
-    signer_key_id = attestor.key_id
-    independent = signer_key_id != bundle.producer_key_id
+    signer_pubkey = attestor.authority_pubkey()
+    signer_key_id = signer_pubkey.hex()
+    independent = _hex_sha256(signer_pubkey)[:16] != bundle.producer_key_id
 
+    # The signature is over the bundle digest -- the UTF-8 bytes of its
+    # 64-hex-character form (the ``over`` field), not the statement bytes.
+    # The statement accompanies the signature; it is never what is signed
+    # (the entry shape's own definition sentence).
+    sig = attestor.attest(bundle.digest.encode("ascii"))
+
+    # The receipt registers the STATEMENT's own digest (never the bundle
+    # digest, and never the statement bytes themselves) -- a fixed-size
+    # digest leaf, matching every other digest-registration path this
+    # service already exposes (POST /register). This is independent of what
+    # the countersignature itself signs.
     statement_bytes = statement.canonical_bytes()
-    sig = attestor.attest(statement_bytes)
-
-    # Registering the statement's own digest (not the statement bytes
-    # themselves) keeps the receipt's CT-log leaf a fixed-size digest,
-    # matching every other digest-registration path this service already
-    # exposes (POST /register).
     statement_digest = _hex_sha256(statement_bytes)
     reg = registrar.register_signed_statement_full(bytes.fromhex(statement_digest))
 
