@@ -58,6 +58,17 @@ def test_valid_bundle_round_trips_to_a_signed_entry(monkeypatch, producer_key, i
     assert entry["independent"] is True  # the countersign instance's ephemeral key != producer's
 
 
+def test_unconfigured_public_host_is_refused_not_did_web_none(monkeypatch, producer_key, issuer_allowlist):
+    """A missing CAPSULE_ANCHOR_PUBLIC_HOST must fail closed -- never publish
+    a broken ``did:web:None`` signer identity."""
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.delenv("CAPSULE_ANCHOR_PUBLIC_HOST", raising=False)
+    raw = finalize_bundle(base_bundle_raw(producer_key), producer_key)
+    resp = client.post("/countersign/register", json={"bundle": raw})
+    assert resp.status_code == 503
+    assert "CAPSULE_ANCHOR_PUBLIC_HOST" in resp.json()["detail"]
+
+
 def test_unenrolled_issuer_is_refused_over_http(monkeypatch, producer_key):
     """No issuer allowlist configured (the empty default) -> every
     registration is refused, never silently accepted."""

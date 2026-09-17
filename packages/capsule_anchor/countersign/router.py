@@ -85,6 +85,12 @@ def get_router() -> APIRouter:
             raise HTTPException(status_code=503, detail="countersign module not configured")
 
         public_host = os.environ.get("CAPSULE_ANCHOR_PUBLIC_HOST")
+        if not public_host:
+            raise HTTPException(
+                status_code=503,
+                detail="CAPSULE_ANCHOR_PUBLIC_HOST is not configured -- this instance cannot "
+                "publish a did:web signer identity without it",
+            )
         signer_id = f"did:web:{public_host}"
 
         statement = recompute_statement(bundle, policy_module=module)

@@ -4,6 +4,9 @@ already ships -- not a mock, so the receipt is a genuine registration)."""
 
 from __future__ import annotations
 
+import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
 from capsule_anchor.anchoring.service import AnchorerService
 from capsule_anchor.attestation.service import AttestorService
 from capsule_anchor.countersign.bundle import Bundle
@@ -32,8 +35,30 @@ def test_independent_countersignature_when_signer_differs_from_producer(producer
 
     assert entry["independent"] is True
     assert entry["signer"]["id"] == "did:web:countersign.example"
-    assert entry["signer"]["key_id"] == attestor.key_id
+    # The wire key_id is the full 64-hex Ed25519 public key -- self-contained
+    # and offline-verifiable -- never this repo's internal truncated key_id.
+    assert entry["signer"]["key_id"] == attestor.authority_pubkey().hex()
+    assert len(entry["signer"]["key_id"]) == 64
     assert entry["over"] == bundle.digest
+
+
+def test_signature_verifies_over_the_bundle_digest_not_the_statement(producer_key):
+    """Wire-shape ruling: the signature is over the UTF-8 bytes of the
+    bundle digest's 64-hex-character form (the ``over`` field) -- matching
+    the Go verifier -- never over the statement bytes."""
+    bundle, statement = _statement(producer_key)
+    attestor = AttestorService()
+    registrar = AnchorerService(attestor=attestor)
+
+    entry = sign_countersignature(
+        bundle, statement, attestor=attestor, registrar=registrar, signer_id="did:web:countersign.example"
+    )
+
+    pubkey = Ed25519PublicKey.from_public_bytes(attestor.authority_pubkey())
+    pubkey.verify(bytes.fromhex(entry["signature"]), bundle.digest.encode("ascii"))
+    # Also confirm it is NOT a signature over the statement bytes.
+    with pytest.raises(Exception):
+        pubkey.verify(bytes.fromhex(entry["signature"]), statement.canonical_bytes())
 
 
 def test_self_countersignature_is_well_formed_and_flagged_not_independent(producer_key):

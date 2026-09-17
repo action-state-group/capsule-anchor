@@ -162,23 +162,47 @@ receipt.
 
 ```
 {
-  signer: { id, key_id },        // id is this instance's own did:web identity
+  signer: { id, key_id },        // id is this instance's own did:web identity;
+                                  // key_id is the full 32-byte Ed25519 public
+                                  // key, hex-encoded (64 chars) -- never a
+                                  // hash -- so a verifier holding only this
+                                  // entry can check the signature offline
   over: <bundle digest>,
   statement: { ...the statement above... },
-  signature,
+  signature,                     // over the UTF-8 bytes of `over`'s
+                                  // 64-hex-character form, never over the
+                                  // statement (which accompanies the
+                                  // signature but is not what is signed)
   independent: <bool>,           // false iff the signer key equals the bundle's
                                   // own producer key -- a self-countersignature is
-                                  // well-formed and never refused, only flagged
+                                  // well-formed and never refused, only flagged.
+                                  // Self-reported for this instance's own
+                                  // bookkeeping; a verifier must never trust it
+                                  // without recomputing independence itself
+                                  // against the bundle's trusted producer keys.
   receipt: { receipt_b64, entry_hash, leaf_index, tree_size },
 }
 ```
+
+Per the wire-shape reconciliation with `capsule-cli`'s Go verifier
+(action-state-ops [countersign-engine-in-capsule-anchor]): `key_id` is
+deliberately NOT this repo's internal, truncated `sha256(pubkey)[:16]`
+identifier used for the STH/receipt signing root elsewhere in this codebase —
+that identifier never appears on this wire. The `type` field the spec's own
+base Evidence Bundle draft reserves for `countersignatures[]` entries is an
+open cross-lane question still with the spec desk; this module does not emit
+one.
 
 A verifier resolving this entry (see `countersign/verify.py`) reads one of four
 states: `self-attested` (no entry, no witness receipt), `witnessed` (no entry, but
 the bundle carries a witness receipt), `self-countersigned` (`independent: false`),
 `unresolved signer` (independent, but the signer id is absent from whatever
 countersigner directory the verifier consults), or `countersigned` (independent and
-resolved).
+resolved). When `countersignatures[]` carries more than one entry, every entry is
+considered and the best-resolved outcome wins (`countersigned` over
+`unresolved signer` over `self-countersigned`) — a real, independent
+countersignature is never hidden behind a later self-countersigned or unresolved
+one.
 
 ## 10. Directory row (for a countersigner directory, if one is consulted)
 

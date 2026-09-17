@@ -55,3 +55,31 @@ def test_self_countersigned_when_not_independent(producer_key):
     entry = {"signer": {"id": "did:web:same-operator.example", "key_id": "abc"}, "independent": False}
     state = resolve_entry_state(bundle, countersignatures=[entry], directory={})
     assert state == "self-countersigned"
+
+
+def test_real_countersign_not_hidden_behind_a_later_self_countersign(producer_key):
+    """A genuine, independent, resolved countersignature must never be
+    hidden by a self-countersigned entry that comes after it -- every entry
+    is considered, not just the last one."""
+    bundle = _bundle_with_receipts(producer_key, has_receipts=True)
+    real = {"signer": {"id": "did:web:known.example", "key_id": "abc"}, "independent": True}
+    self_entry = {"signer": {"id": "did:web:same-operator.example", "key_id": "def"}, "independent": False}
+    state = resolve_entry_state(
+        bundle,
+        countersignatures=[real, self_entry],
+        directory={"did:web:known.example": {"name": "Example"}},
+    )
+    assert state == "countersigned"
+
+
+def test_self_countersign_first_then_real_still_resolves_countersigned(producer_key):
+    """Order must not matter -- the best outcome wins regardless of position."""
+    bundle = _bundle_with_receipts(producer_key, has_receipts=True)
+    self_entry = {"signer": {"id": "did:web:same-operator.example", "key_id": "def"}, "independent": False}
+    real = {"signer": {"id": "did:web:known.example", "key_id": "abc"}, "independent": True}
+    state = resolve_entry_state(
+        bundle,
+        countersignatures=[self_entry, real],
+        directory={"did:web:known.example": {"name": "Example"}},
+    )
+    assert state == "countersigned"
