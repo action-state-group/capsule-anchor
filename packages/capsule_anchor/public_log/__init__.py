@@ -13,12 +13,17 @@ See module docstrings and ``docs/architecture/18-public-log-anchor.md``.
 """
 
 from .in_memory import InMemoryPublicLog
+from .receipt_augment import augment_receipt_with_public_log
 from .rekor import RekorBundle, RekorPublicLog
+from .scheduler import PublicLogPublisher, start_publisher_thread
 from .wrapper import attach_public_log
 
 __all__ = [
     "InMemoryPublicLog",
+    "PublicLogPublisher",
     "RekorBundle",
     "RekorPublicLog",
     "attach_public_log",
+    "augment_receipt_with_public_log",
+    "start_publisher_thread",
 ]

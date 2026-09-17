@@ -102,6 +102,10 @@ is missing — never silently degraded.
 | `CAPSULE_ANCHOR_PORT` | No | Bind port (default `8000`). |
 | `CAPSULE_ANCHOR_STH_REFRESH_INTERVAL` | No | Background STH refresh interval in seconds (default `60`). |
 | `CAPSULE_ANCHOR_CHECKPOINT_SUBMITTERS_FILE` | No | Path to a JSON array of enrolled submitter entries. If absent, the in-package default is used; if empty, all `log_id`s use the open self-asserted-key behavior. |
+| `CAPSULE_ANCHOR_PUBLIC_LOG` | No | `rekor` or `none` (default `none`). Publishes this witness's own STHs to an external public log — see §6 "Plurality" and `docs/architecture/18-public-log-anchor.md`. Refuses to start with `rekor` if the signing key is ephemeral. |
+| `CAPSULE_ANCHOR_REKOR_URL` | No | Rekor instance base URL (default `https://rekor.sigstore.dev`). Only read when `CAPSULE_ANCHOR_PUBLIC_LOG=rekor`. |
+| `CAPSULE_ANCHOR_PUBLIC_LOG_INTERVAL` | No | Seconds between scheduled publish attempts (default `300`). |
+| `CAPSULE_ANCHOR_PUBLIC_LOG_TIMEOUT` | No | HTTP timeout in seconds for the public-log backend (default `10`). |
 | `CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY` | Dev only | Set `1` to allow startup without a configured signing key. An ephemeral key changes on every restart and invalidates all prior receipts. Never set in production. |
 | `CAPSULE_ANCHOR_INSECURE_IN_MEMORY` | Dev only | Set `1` to allow startup without `CAPSULE_ANCHOR_DATABASE_URL`. All log state is lost on restart. Never set in production. |
 
@@ -541,6 +545,23 @@ domain, sign with their own key, and contribute an independent receipt. Nothing 
 the protocol requires a specific operator. `CAPSULE_ANCHOR_PUBLIC_HOST` derives the
 DID from whatever hostname you actually serve from, so the witness's identity is
 yours, not ours.
+
+**Rekor as the first external log.** Running more than one *witness* (above) is one
+axis of plurality; a witness can also publish its OWN Signed Tree Heads into a
+third-party-operated transparency log it does not control — set
+`CAPSULE_ANCHOR_PUBLIC_LOG=rekor` (off by default) to publish to Sigstore's public
+Rekor instance on a schedule. This is orthogonal to multi-witness plurality: it does
+not replace running a second witness, it gives ANY single witness (including one you
+run yourself) an externally-checkable claim that its own tree head history has never
+been rewritten. See `docs/architecture/18-public-log-anchor.md` for the full design
+and `GET /anchor/public-log/latest` for the current publication state.
+
+**Adding a second external log.** The `PublicLog` protocol
+(`capsule_anchor.contracts.protocols`) is the seam: a peer witness reachable via
+`POST /checkpoints` (the code already supports this — see "How to register with
+multiple witnesses" above) or a second transparency-log backend both satisfy it.
+Rekor plus one independently-operated peer witness is a strong plural story without
+requiring a second Rekor-shaped log to exist.
 
 ---
 

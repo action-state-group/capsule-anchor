@@ -8,6 +8,23 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Added
 
+- **Public-log rail: publish this witness's own STHs to Sigstore Rekor
+  (`public_log/`, off by default via `CAPSULE_ANCHOR_PUBLIC_LOG=rekor|none`)**: a
+  scheduled background publisher (default every 300s, never inline on
+  `/checkpoints`/`/register`/`/anchor/anchor`) submits the current Signed Tree Head
+  as a `hashedrekord` entry — only `tree_size`/`root_hash`/`timestamp` ever leave,
+  never capsule content. At most once per `tree_size`, persisted idempotently
+  (`public_log_receipts` table, SQLite + Postgres). Failures never raise into a
+  request path — logged, counted, persisted to `public_log_failures` for audit;
+  `/health` reports `"public_log": "degraded"` after 12 consecutive failures without
+  ever flipping the top-level `ok`. New surfacing: `GET /anchor/public-log/latest`,
+  `GET /anchor/public-log/entries?since=`. `CheckpointStampResponse` gains a
+  `public_log` field (`{backend, uuid, log_index, sth_tree_size}`, `null` until a
+  publication covers the checkpoint's tree_size); the COSE receipt carries the same
+  evidence in its **UNPROTECTED** header only (label 397) — every receipt's
+  PROTECTED content and signature are byte-for-byte unchanged whether or not the
+  rail is enabled. Startup refuses `CAPSULE_ANCHOR_PUBLIC_LOG=rekor` with an
+  ephemeral signing key. See `docs/architecture/18-public-log-anchor.md`.
 - **Enrolled external checkpoint submitters (`submitters.py`)**: `POST /checkpoints` gains a
   config-driven allowlist (`packages/capsule_anchor/config/checkpoint_submitters.json`,
   committed, never hand-edited on the box) pinning a specific `log_id` (CWT `iss`) to a

@@ -12,12 +12,33 @@
 | `CAPSULE_ANCHOR_HOST` / `CAPSULE_ANCHOR_PORT` | env | Bind address (default `0.0.0.0:8000`). |
 | `CAPSULE_ANCHOR_TSA_ENABLED` | env | Set to `1` to enable RFC 3161 TSA timestamps (opt-in). |
 | `CAPSULE_ANCHOR_TSA_URL` | env | Override TSA endpoint (default: FreeTSA). |
+| `CAPSULE_ANCHOR_PUBLIC_LOG` | env | `rekor` or `none` (default `none`). Publishes this instance's own STHs to Sigstore Rekor on a schedule — see `docs/architecture/18-public-log-anchor.md`. Refuses to start with `rekor` if the signing key is ephemeral. |
+| `CAPSULE_ANCHOR_REKOR_URL` | env | Rekor instance base URL (default `https://rekor.sigstore.dev`). |
+| `CAPSULE_ANCHOR_PUBLIC_LOG_INTERVAL` | env | Seconds between scheduled publish attempts (default `300`). |
+| `CAPSULE_ANCHOR_PUBLIC_LOG_TIMEOUT` | env | HTTP timeout in seconds for the public-log backend (default `10`). |
 | `CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY` | env | **Dev only.** Set `1` to allow startup without a configured signing key. Never set in production. |
 | `CAPSULE_ANCHOR_INSECURE_IN_MEMORY` | env | **Dev only.** Set `1` to allow startup without `CAPSULE_ANCHOR_DATABASE_URL`. Never set in production. |
 
 **Fail-closed defaults:** the service refuses to start without both `CAPSULE_ANCHOR_SIGNING_KEY` and
 `CAPSULE_ANCHOR_DATABASE_URL`. Silent in-memory storage would lose the CT log on restart (prior receipts
 become unverifiable); an ephemeral signing key would change the authority identity on every restart.
+
+### Public-log rail (optional, off by default)
+
+Set `CAPSULE_ANCHOR_PUBLIC_LOG=rekor` to publish this instance's own STHs to Sigstore
+Rekor on a schedule — see `docs/architecture/18-public-log-anchor.md`. Turn it on in
+staging first, let it run 24 hours (checking for duplicate publishes or rate-limit
+responses), then enable in production and publish the first entry's `uuid` on the
+Trust page. Smoke check after enabling:
+
+```bash
+curl -s https://witness.agentactioncapsule.org/anchor/public-log/latest | python3 -m json.tool
+# 404 with `{"detail": "no public-log entry published yet"}` is expected until the
+# first CAPSULE_ANCHOR_PUBLIC_LOG_INTERVAL tick elapses; a populated body confirms
+# the rail is live.
+curl -s https://witness.agentactioncapsule.org/health | python3 -m json.tool
+# "public_log": "ok" once at least one publish has succeeded.
+```
 
 ## Cloud SQL setup
 
