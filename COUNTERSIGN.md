@@ -183,15 +183,22 @@ resolved).
 ## 10. Directory row (for a countersigner directory, if one is consulted)
 
 A verifier resolving `signer.id` against a public directory reads one row per
-enrolled signer:
+enrolled signer, matching the field list the spec item
+`[bundle-countersignatures-entry-and-directory]` defines for `witnesses.json`'s
+`countersigners[]` extension — same discipline as the witness directory, alphabetical,
+one row per operator, a PR template for others:
 
 ```
-{ id, key_id, name, logo_url, website }
+{ operator, endpoint, key_ids, statement_types_issued, since, independent_of }
 ```
 
-`id` matches `countersignatures[].signer.id` exactly (a `did:web:` string). This
-module does not host or publish that directory — it only produces entries a
-directory (and the verifier that reads one) can resolve.
+`endpoint`'s host is what `countersignatures[].signer.id` (`did:web:<host>`) is
+derived from — the same derivation `router.py` uses from
+`CAPSULE_ANCHOR_PUBLIC_HOST` — so a verifier resolves an entry's `signer.id` against
+a directory row by that host, not by a separate `id` field. `key_ids` is a list (not
+a single value) so a directory row survives its operator's own key rotation without a
+stale entry. This module does not host or publish that directory — it only produces
+entries a directory (and the verifier that reads one) can resolve.
 
 ## 11. Delivery
 
