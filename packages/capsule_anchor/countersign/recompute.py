@@ -22,7 +22,7 @@ from capsule_anchor.countersign.checks import (
 )
 from capsule_anchor.countersign.policy import PolicyModule
 from capsule_anchor.countersign.results import CheckResult
-from capsule_anchor.countersign.statement import Scope, Statement, StatementProfile
+from capsule_anchor.countersign.statement import Scope, Statement
 
 #: Always present on a statement -- named every time, never implied by
 #: absence. Capture coverage and outcome correctness are exactly what this
@@ -40,28 +40,30 @@ EXCLUSIONS: tuple[str, ...] = (
 )
 
 
-def recompute_statement(bundle: Bundle, *, policy_module: PolicyModule) -> Statement:
+def recompute_statement(
+    bundle: Bundle, *, policy_module: PolicyModule, ledger_id: str, profile_id: str
+) -> Statement:
     """Recompute every check for ``bundle`` and assemble the resulting
     statement. Mirrors ``verify_package_blind``'s collect-everything shape:
     each check function below is called unconditionally, in order, and its
     result recorded regardless of what came before it.
+
+    ``ledger_id`` and ``profile_id`` come from the countersign request
+    itself (``requester.id`` and ``profile_id``), never from the bundle: the
+    v2 Evidence Bundle carries no issuer identity and no profile object of
+    its own.
     """
     checks: list[CheckResult] = []
     checks.append(chain_consistency(bundle))
     checks.append(range_membership(bundle))
     checks.append(cadence(bundle))
     checks.append(key_hygiene(bundle))
-    checks.append(profile_conformance(bundle, policy_module))
-    checks.extend(policy_module.check(bundle, bundle.profile))
+    checks.append(profile_conformance(bundle, profile_id, policy_module))
+    checks.extend(policy_module.check(bundle, profile_id))
 
     return Statement(
         checks=checks,
         exclusions=list(EXCLUSIONS),
-        scope=Scope(
-            ledger_id=bundle.ledger_id,
-            period=bundle.period,
-            closure_depth=bundle.closure_depth,
-        ),
-        profile=StatementProfile(id=bundle.profile.id, version=bundle.profile.version),
+        scope=Scope(ledger_id=ledger_id, closure_depth=bundle.closure_depth),
         recomputed_at=datetime.now(timezone.utc),
     )

@@ -1,27 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 """The withheld bundle this module accepts.
 
-An Evidence Bundle produced with ``payloads: none`` -- every record's
-header, digest, and sequence position, the checkpoints and witness
-receipts covering the window, and no payload content -- signed by the
-producer's own ledger key over the bundle's own digest. This module does
-not own that wire format; it is a separate, versioned spec (see the
-``bundle-countersignatures-entry-and-directory`` item). What is here is the
-minimal shape the five generic checks need, and it refuses
-(``BundleRefused``) anything that does not parse into it -- INCLUDING,
-always, a bundle that is not payload-free.
+The canonical AAC Evidence Bundle (``draft-mih-zhang-agent-action-capsule-
+evidence-bundle-00``, wire ``bundle_version: "2"`` / ``bundle_kind:
+"evidence-bundle/v2"``) -- the exact shape ``capsulectl bundle`` produces --
+carrying ``completeness.payloads_mode: "none"`` and no ``disclosures``
+overlay: every record's full content withheld to digests, checkpoints, and
+completeness proofs only. This module does not own that wire format -- it is
+the donated spec's own bundle shape, codec'd and verified by the neutral
+``agent_action_capsule.bundle`` reference library (never reimplemented here:
+a second JCS/MMR implementation in this repo is exactly the divergence that
+made the prior ad-hoc bundle model reject 100% of ``capsulectl``'s real
+output -- see [countersign-whole-bundle-shape]). This module refuses
+(``BundleRefused``) anything that does not parse into a well-formed v2
+bundle -- INCLUDING, always, a bundle that is not payload-free.
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
+from dataclasses import dataclass
+from functools import cached_property
+from typing import TYPE_CHECKING, Any
 
-from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from pydantic import BaseModel, Field, ValidationError
+from agent_action_capsule.bundle import BundleVerificationResult, bundle_digest, verify_bundle
 
-from capsule_anchor.countersign.issuers import IssuerAllowlist
+if TYPE_CHECKING:
+    from capsule_anchor.countersign.issuers import IssuerAllowlist
 
 
 class BundleRefused(ValueError):
@@ -30,163 +34,160 @@ class BundleRefused(ValueError):
     ever reach the recompute step -- a refused bundle is never scored."""
 
 
-class BundlePeriod(BaseModel):
-    from_: str = Field(alias="from")
-    to: str
+@dataclass(frozen=True)
+class Bundle:
+    """A parsed, payload-free v2 Evidence Bundle.
 
-    model_config = {"populate_by_name": True}
+    Wraps the bundle exactly as received (``raw``) -- the neutral library's
+    digest and verification functions operate on that dict directly, never
+    on a re-serialized copy, so nothing this module does can silently drift
+    from what ``capsulectl`` (or any other implementation) canonicalizes.
+    ``digest`` is computed once at parse time via
+    ``agent_action_capsule.bundle.bundle_digest`` and is this module's own
+    convenience cache -- it is not a bundle wire field (the v2 shape carries
+    no digest field of its own; a verifier always recomputes it).
+    """
 
+    raw: dict
+    digest: str
 
-class BundleProfile(BaseModel):
-    id: str
-    version: str
+    @cached_property
+    def root(self) -> str | None:
+        value = self.raw.get("root")
+        return value if isinstance(value, str) else None
 
+    @cached_property
+    def records(self) -> list[dict]:
+        value = self.raw.get("records")
+        return [r for r in value if isinstance(r, dict)] if isinstance(value, list) else []
 
-class BundleRecord(BaseModel):
-    """One CLL record's header as carried by a payload-free bundle --
-    digest and position only, never content."""
+    @cached_property
+    def completeness(self) -> dict:
+        value = self.raw.get("completeness")
+        return value if isinstance(value, dict) else {}
 
-    seq: int
-    kind: str
-    digest: str  # hex sha256 of the (withheld) payload
-    timestamp: str | None = None
-    signer_key_id: str | None = None
-    # e.g. the method_freeze digest a judgment record cites -- unused by the
-    # five generic checks today, carried through for a profile module.
-    cites: str | None = None
+    @cached_property
+    def completeness_certificate(self) -> dict | None:
+        value = self.raw.get("completeness_certificate")
+        return value if isinstance(value, dict) else None
 
+    @cached_property
+    def checkpoint(self) -> dict | None:
+        value = self.raw.get("checkpoint")
+        return value if isinstance(value, dict) else None
 
-class BundleRotationRecord(BaseModel):
-    seq: int
-    old_key_id: str | None = None
-    new_key_id: str
+    @cached_property
+    def countersignatures(self) -> list[Any]:
+        value = self.raw.get("countersignatures")
+        return value if isinstance(value, list) else []
 
+    @cached_property
+    def closure_depth(self) -> int:
+        depth = self.completeness.get("closure_depth", 2)
+        return depth if isinstance(depth, int) and not isinstance(depth, bool) else 2
 
-class BundleCheckpoint(BaseModel):
-    log_id: str
-    key_id: str
-    mmr_size: int
-    prev_size: int
-    mmr_root: str
-    timestamp: str
-
-
-class BundleReceipt(BaseModel):
-    """One witness's receipt over one of ``bundle.checkpoints``, by index."""
-
-    checkpoint_index: int
-    witness_id: str  # did:web:<host>
-    grade: str | None = None
-    receipt_b64: str
-
-
-class Bundle(BaseModel):
-    schema_: str = Field(alias="schema")
-    payloads: str
-    ledger_id: str
-    period: BundlePeriod
-    closure_depth: int
-    profile: BundleProfile
-    records: list[BundleRecord] = Field(default_factory=list)
-    rotations: list[BundleRotationRecord] = Field(default_factory=list)
-    checkpoints: list[BundleCheckpoint] = Field(default_factory=list)
-    receipts: list[BundleReceipt] = Field(default_factory=list)
-    digest: str  # hex sha256 over the canonical bundle bytes (excludes this field + the signature)
-    producer_key_id: str
-    producer_signature: str  # hex Ed25519 signature over bytes.fromhex(digest)
-
-    model_config = {"populate_by_name": True}
+    @cached_property
+    def verification(self) -> BundleVerificationResult:
+        """The neutral library's full structural + completeness verdict
+        (graph closure, CLL #13 range proof, per-record inclusion proof) --
+        computed once and cached, since both ``checks.range_membership`` and
+        ``verify.resolve_entry_state`` read it."""
+        return verify_bundle(self.raw)
 
 
 def parse_bundle(raw: dict) -> Bundle:
     """Parse ``raw`` into a :class:`Bundle`, refusing anything that isn't a
-    well-formed, payload-free bundle. Never verifies the producer signature
-    -- see :func:`accept_bundle` for the full acceptance path."""
-    try:
-        bundle = Bundle.model_validate(raw)
-    except ValidationError as exc:
-        raise BundleRefused(f"bundle does not parse: {exc}") from exc
-    if bundle.payloads != "none":
+    well-formed, payload-free v2 Evidence Bundle. Never verifies a
+    requester's signature -- see :func:`accept_bundle` for the full
+    acceptance path."""
+    if not isinstance(raw, dict):
+        raise BundleRefused("bundle must be a JSON object")
+    if raw.get("bundle_version") != "2" or raw.get("bundle_kind") != "evidence-bundle/v2":
         raise BundleRefused(
-            f"bundle carries payloads={bundle.payloads!r} -- this module accepts only a "
-            "withheld bundle (payloads: none); any bundle with payloads present is refused "
-            "by construction"
+            f"bundle_version={raw.get('bundle_version')!r} bundle_kind={raw.get('bundle_kind')!r} "
+            '-- this module accepts only a v2 Evidence Bundle (bundle_version: "2", '
+            'bundle_kind: "evidence-bundle/v2")'
         )
-    return bundle
+    if not isinstance(raw.get("root"), str):
+        raise BundleRefused("bundle does not parse: missing or non-string root")
+    completeness = raw.get("completeness")
+    if not isinstance(completeness, dict):
+        raise BundleRefused("bundle does not parse: missing completeness")
+    payloads_mode = completeness.get("payloads_mode")
+    if payloads_mode != "none":
+        raise BundleRefused(
+            f"bundle carries payloads present (completeness.payloads_mode={payloads_mode!r}) -- "
+            "this module accepts only a withheld bundle (payloads_mode: none); any bundle with "
+            "payloads present is refused by construction"
+        )
+    if "disclosures" in raw:
+        raise BundleRefused(
+            "bundle carries a disclosures overlay -- only a withheld (payloads_mode none) bundle "
+            "may be submitted for countersigning"
+        )
+    try:
+        digest = bundle_digest(raw)
+    except (TypeError, ValueError) as exc:
+        raise BundleRefused(f"bundle digest could not be computed: {exc}") from exc
+    return Bundle(raw=raw, digest=digest)
 
 
 def compute_bundle_digest(bundle: Bundle) -> str:
-    """Recompute the bundle digest independently from its own content --
-    every field except ``digest`` and ``producer_signature`` themselves,
-    canonical JSON (sorted keys, compact separators), sha256 hex.
-
-    ``by_alias=True`` is required: this bundle's wire form uses ``schema``
-    and ``from`` (see the ``Field(alias=...)`` declarations above), and a
-    dump keyed on the Python-safe attribute names (``schema_``, ``from_``)
-    would silently diverge from what any other implementation -- a
-    producer in another language, or a verifier reading the wire JSON
-    directly -- canonicalizes over.
-
-    Never trust ``bundle.digest`` as handed to us: a party under test could
-    sign a valid signature over an arbitrary string and call it the digest.
-    Recomputing it from the content the recompute step actually reads is
-    what binds the signature to what gets checked.
-    """
-    payload = bundle.model_dump(mode="json", by_alias=True, exclude={"digest", "producer_signature"})
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(canonical).hexdigest()
+    """Recompute the bundle digest independently from its own content,
+    delegating to the neutral library's JCS canonicalization -- the same
+    function ``capsulectl``'s Go verifier's ``BundleDigest`` agrees with (see
+    ``TestCountersignBundleAgreesWithPythonVerifier`` on the capsule-cli
+    side). Never trust a caller-supplied digest: this always recomputes from
+    ``bundle.raw`` itself."""
+    return bundle_digest(bundle.raw)
 
 
-def verify_producer_signature(bundle: Bundle, producer_pubkey: bytes) -> bool:
-    """Verify ``bundle.producer_signature`` over ``bundle.digest`` under the
-    raw 32-byte Ed25519 ``producer_pubkey``. Returns False on any malformed
-    input rather than raising -- callers decide how to report a refusal."""
-    try:
-        Ed25519PublicKey.from_public_bytes(producer_pubkey).verify(
-            bytes.fromhex(bundle.producer_signature), bytes.fromhex(bundle.digest)
-        )
-        return True
-    except (InvalidSignature, ValueError):
-        return False
-
-
-def accept_bundle(raw: dict, issuers: IssuerAllowlist) -> Bundle:
+def accept_bundle(
+    raw: dict,
+    issuers: "IssuerAllowlist",
+    *,
+    requester_id: str,
+    requester_key_hex: str,
+    requester_signature_hex: str,
+) -> Bundle:
     """The full acceptance path -- this instance's registration policy:
 
-    1. Parse, refusing anything that isn't a well-formed, payload-free bundle.
-    2. Recompute the digest independently; require it match the declared one.
-    3. Resolve the issuer: ``bundle.ledger_id`` must be enrolled in
-       ``issuers`` (see ``issuers.py``). The key checked against is the ONE
-       this instance's registration policy pins for that ledger -- never a
-       key the caller supplies alongside the bundle. An unenrolled ledger is
-       refused; there is no self-asserted-key fallback on this surface.
-    4. ``producer_key_id`` on the bundle must equal ``sha256(pinned pubkey)[:16]``
-       hex -- the same key-id derivation this repo already uses (see
-       ``signing_key.StaticKeyProvider``) -- so a bundle cannot claim an
+    1. Parse, refusing anything that isn't a well-formed, payload-free v2
+       Evidence Bundle.
+    2. Resolve the issuer: ``requester_id`` (the countersign request's own
+       ``requester.id``, never a bundle field -- the v2 bundle carries no
+       issuer identity of its own) must be enrolled in ``issuers`` (see
+       ``issuers.py``). The key checked against is the ONE this instance's
+       registration policy pins for that issuer -- never a key the caller
+       supplies alongside the bundle.
+    3. ``requester_key_hex`` must equal the pinned key, hex-for-hex (the full
+       32-byte Ed25519 public key -- the same full-hex convention the
+       ``countersignatures[]`` entry's own ``signer.key_id`` already uses,
+       per the entry-shape reconciliation) -- so a request cannot claim an
        identity the pinned key doesn't match.
-    5. Verify the producer's signature over the (confirmed) digest under the
-       pinned key.
+    4. Verify ``requester_signature_hex`` over the (confirmed) digest under
+       the pinned key.
     """
     bundle = parse_bundle(raw)
-    recomputed = compute_bundle_digest(bundle)
-    if recomputed != bundle.digest:
-        raise BundleRefused(
-            f"declared digest {bundle.digest!r} does not match the digest recomputed from "
-            f"the bundle's own content ({recomputed!r})"
-        )
-    entry = issuers.get(bundle.ledger_id)
+    entry = issuers.get(requester_id)
     if entry is None:
         raise BundleRefused(
-            f"issuer {bundle.ledger_id!r} is not enrolled with this instance's registration "
-            "policy -- registration is refused for any ledger this instance has not been "
+            f"issuer {requester_id!r} is not enrolled with this instance's registration "
+            "policy -- registration is refused for any issuer this instance has not been "
             "configured to trust"
         )
-    expected_key_id = hashlib.sha256(entry.pubkey).hexdigest()[:16]
-    if expected_key_id != bundle.producer_key_id:
+    if entry.pubkey.hex() != requester_key_hex.lower():
         raise BundleRefused(
-            f"bundle producer_key_id={bundle.producer_key_id!r} does not match the key "
-            f"this instance's registration policy pins for issuer {bundle.ledger_id!r}"
+            f"requester key_id={requester_key_hex!r} does not match the key this instance's "
+            f"registration policy pins for issuer {requester_id!r}"
         )
-    if not verify_producer_signature(bundle, entry.pubkey):
-        raise BundleRefused("producer_signature does not verify under the issuer's pinned key")
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+    try:
+        Ed25519PublicKey.from_public_bytes(entry.pubkey).verify(
+            bytes.fromhex(requester_signature_hex), bundle.digest.encode("ascii")
+        )
+    except (InvalidSignature, ValueError) as exc:
+        raise BundleRefused("requester_signature does not verify under the issuer's pinned key") from exc
     return bundle

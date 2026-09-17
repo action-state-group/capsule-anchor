@@ -5,10 +5,10 @@ existing digest-registration path -- the same one ``POST /register``
 already uses, ``AnchorerService.register_signed_statement_full``) to attach
 a receipt, and assembles the ``countersignatures[]`` entry.
 
-Self-countersignature -- the signer key equals the bundle's own producer
-key -- is well-formed and is never refused, but is flagged
-``independent: false`` so a verifier never mistakes an operator vouching for
-its own bundle as a second party's check.
+Self-countersignature -- the signer key equals the requester's own key -- is
+well-formed and is never refused, but is flagged ``independent: false`` so a
+verifier never mistakes an operator vouching for its own bundle as a second
+party's check.
 """
 
 from __future__ import annotations
@@ -49,13 +49,18 @@ def sign_countersignature(
     attestor: Attestor,
     registrar: Registrar,
     signer_id: str,
+    requester_key_id: str,
 ) -> dict:
     """Sign ``statement`` and return the ``countersignatures[]`` entry.
 
     ``signer_id`` is this instance's own identity string (its
     ``did:web:<host>``, matching the identity already published at
     ``/.well-known/did.json``) -- passed in rather than constructed here so
-    this module never reads deployment config directly.
+    this module never reads deployment config directly. ``requester_key_id``
+    is the countersign request's own ``requester.key_id`` (full 64-hex
+    Ed25519 public key) -- never a bundle field: the v2 Evidence Bundle
+    carries no producer identity of its own, so independence is judged
+    against who asked, not against anything the bundle content declares.
 
     Wire-shape note (per the countersign wire-shape reconciliation): the
     entry's ``signer.key_id`` is the full 32-byte Ed25519 public key, hex
@@ -64,14 +69,11 @@ def sign_countersignature(
     deliberately NOT ``attestor.key_id`` (this repo's internal, truncated
     ``sha256(pubkey)[:16]`` identifier used elsewhere -- e.g. the STH/receipt
     signing root -- which stays untouched so the live witness/checkpoint
-    path never changes shape). ``independent`` still compares in the
-    truncated form, matching ``bundle.producer_key_id``'s own derivation
-    (see ``bundle.py::accept_bundle``), so self-countersignature detection
-    is unaffected by the wire key_id's format change.
+    path never changes shape).
     """
     signer_pubkey = attestor.authority_pubkey()
     signer_key_id = signer_pubkey.hex()
-    independent = _hex_sha256(signer_pubkey)[:16] != bundle.producer_key_id
+    independent = signer_key_id.lower() != requester_key_id.lower()
 
     # The signature is over the bundle digest -- the UTF-8 bytes of its
     # 64-hex-character form (the ``over`` field), not the statement bytes.
@@ -91,7 +93,7 @@ def sign_countersignature(
     return {
         "signer": {"id": signer_id, "key_id": signer_key_id},
         "over": bundle.digest,
-        "statement": statement.model_dump(mode="json", by_alias=True),
+        "statement": statement.wire_dict(),
         "signature": sig.signature,
         "independent": independent,
         "receipt": {
