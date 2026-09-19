@@ -50,7 +50,7 @@ dependencies = [
     # ([countersign-whole-bundle-shape]): a second JCS/MMR implementation in
     # this repo is exactly the kind of divergence that made the ad-hoc
     # bundle model this replaces reject 100% of capsulectl's real output.
-    "agent-action-capsule>=0.3.0",
+    "agent-action-capsule>=0.4.0",
 ]
 
 [project.urls]
