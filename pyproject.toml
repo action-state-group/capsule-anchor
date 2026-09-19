@@ -41,7 +41,7 @@ dependencies = [
     # Distinct from the capsule-emit boundary rule above: cll is the shared
     # neutral spec core both capsule-anchor and capsule-emit depend on
     # independently, not a co-deployed product library.
-    "checkpointed-local-log>=0.3.0",
+    "checkpointed-local-log>=0.4.0",
     # The countersign module ingests the canonical AAC Evidence Bundle
     # (-00 / v2, the same shape capsule-cli's `capsulectl bundle` produces)
     # -- its digest (JCS-canonical) and structural/completeness verification
