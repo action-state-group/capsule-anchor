@@ -177,3 +177,87 @@ def test_allowlist_never_overrides_the_blocked_address_check(monkeypatch):
             "https://trusted.example/hook",
             env={ENV_WEBHOOK_ALLOWED_HOSTS: "trusted.example"},
         )
+
+
+# --- _default_http_post: delivery-time SSRF (redirect + DNS-rebinding) ---
+# ([countersign-fixsoon-security] item 1, HARD GATE -- bounced twice for
+# validating only at admission and trusting the transport at delivery).
+
+
+def test_delivery_time_dns_rebinding_is_refused_and_never_connects(monkeypatch):
+    """A hostname that resolves to a public address at admission time
+    (``validate_webhook_url``, called once at registration) but a blocked
+    address at delivery time (DNS rebinding -- a short-TTL record flipping
+    during the retry schedule's up-to-~21s span) is refused AT DELIVERY,
+    and no connection is ever attempted."""
+    answers = iter(["93.184.216.34", "169.254.169.254"])
+    monkeypatch.setattr(webhooks_module, "_RESOLVE_HOST", lambda host: [next(answers)])
+
+    connect_calls = []
+
+    def spy_factory(host, ip, port, timeout):
+        connect_calls.append((host, ip, port))
+        raise AssertionError("must never connect once the delivery-time re-check refuses")
+
+    monkeypatch.setattr(webhooks_module, "_CONNECTION_FACTORY", spy_factory)
+
+    validate_webhook_url("https://rebinding.example/hook")  # admission: public, passes
+
+    status = webhooks_module._default_http_post("https://rebinding.example/hook", b"{}", {}, 5.0)
+
+    assert status == 0  # refused -- treated as a failed/retryable attempt, never raises
+    assert connect_calls == []
+
+
+class _FakeRedirectResponse:
+    def __init__(self, status: int, location: str) -> None:
+        self.status = status
+        self._location = location
+
+    def read(self) -> bytes:
+        return b""
+
+    def getheader(self, name: str, default=None):
+        return self._location if name.lower() == "location" else default
+
+
+class _FakeRedirectConnection:
+    def __init__(self, host: str, ip: str, port: int, timeout: float) -> None:
+        self.host = host
+        self.ip = ip
+        self.port = port
+
+    def request(self, method, path, body=None, headers=None) -> None:
+        pass
+
+    def getresponse(self) -> _FakeRedirectResponse:
+        return _FakeRedirectResponse(302, location="http://169.254.169.254/steal")
+
+    def close(self) -> None:
+        pass
+
+
+def test_delivery_never_follows_a_redirect_to_a_blocked_address(monkeypatch):
+    """The upstream endpoint responds 302 with a ``Location`` naming the
+    cloud metadata address. ``_default_http_post`` must hand that status
+    straight back to the retry loop -- never parse ``Location``, never
+    dial a second connection. Exactly one connection (to the vetted, pinned
+    address) proves no redirect-follow occurred."""
+    monkeypatch.setattr(webhooks_module, "_RESOLVE_HOST", lambda host: ["93.184.216.34"])
+
+    connections = []
+
+    def factory(host, ip, port, timeout):
+        conn = _FakeRedirectConnection(host, ip, port, timeout)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(webhooks_module, "_CONNECTION_FACTORY", factory)
+
+    status = webhooks_module._default_http_post(
+        "https://redirecting.example/hook", b"{}", {}, 5.0
+    )
+
+    assert status == 302  # returned as-is -- deliver_webhook's loop treats it as a failed attempt
+    assert len(connections) == 1  # exactly one dial: the Location is never followed
+    assert connections[0].ip == "93.184.216.34"
