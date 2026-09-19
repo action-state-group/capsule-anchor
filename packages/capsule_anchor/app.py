@@ -263,7 +263,11 @@ def create_app() -> FastAPI:
         tree_size = svc._store.size()
         result: dict = {
             "ok": True,
-            "signing_key_source": loaded.source,
+            # Scheme only ("env" | "file" | "generated") -- never the
+            # key-file PATH. `loaded.source` for the file case is
+            # `f"file:{key_file}"`; a public /health must never leak where
+            # on disk (or which mounted secret) the signing key lives.
+            "signing_key_source": loaded.source.split(":", 1)[0],
             "signing_key_ephemeral": loaded.ephemeral,
             "key_id": svc.attestor.key_id,
             "tree_size": tree_size,

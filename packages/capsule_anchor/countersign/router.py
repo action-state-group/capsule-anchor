@@ -17,20 +17,34 @@ from __future__ import annotations
 
 import os
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from pydantic import BaseModel, ValidationError
 
+from capsule_anchor.anchoring.router import _SlidingWindowLimiter
+from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES
 from capsule_anchor.countersign.bundle import BundleRefused, accept_bundle
 from capsule_anchor.countersign.issuers import IssuerAllowlist
 from capsule_anchor.countersign.policy import NullPolicyModule, PolicyRegistry, default_registry
 from capsule_anchor.countersign.recompute import recompute_statement
 from capsule_anchor.countersign.signer import Attestor, Registrar, sign_countersignature
-from capsule_anchor.countersign.webhooks import WebhookSubscription, deliver_webhook
+from capsule_anchor.countersign.webhooks import (
+    WebhookSubscription,
+    WebhookURLRefused,
+    deliver_webhook,
+    validate_webhook_url,
+)
 
 _attestor: Attestor | None = None
 _registrar: Registrar | None = None
 _registry: PolicyRegistry = default_registry()
 _issuers: IssuerAllowlist = IssuerAllowlist()
+
+# Dedicated rate limiter for /countersign/register -- the same 300/min
+# convention as the anchoring surface's shared ``_POST_LIMITER``, but a
+# SEPARATE instance/budget: this endpoint does a sig-verify + sign +
+# log-append per call (heavier than a digest registration) and must never
+# share a budget with, or be starved by, the witness surface's own traffic.
+_COUNTERSIGN_POST_LIMITER = _SlidingWindowLimiter(max_calls=300, window_s=60.0)
 
 
 def configure_service(attestor: Attestor, registrar: Registrar) -> None:
@@ -97,7 +111,23 @@ def get_router() -> APIRouter:
     router = APIRouter(prefix="/countersign", tags=["countersign"])
 
     @router.post("/register")
-    def register(req: CountersignRequest, background_tasks: BackgroundTasks) -> dict:
+    async def register(request: Request, background_tasks: BackgroundTasks) -> dict:
+        if not _COUNTERSIGN_POST_LIMITER.is_allowed():
+            raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
+
+        body = await request.body()
+        if len(body) > MAX_STATEMENT_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=f"request body too large ({len(body)} bytes; max {MAX_STATEMENT_BYTES})",
+            )
+        try:
+            req = CountersignRequest.model_validate_json(body)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"request body is not a valid countersign submission: {exc}"
+            ) from exc
+
         try:
             bundle = accept_bundle(
                 req.bundle,
@@ -147,6 +177,10 @@ def get_router() -> APIRouter:
         )
 
         if req.webhook_url and req.webhook_secret:
+            try:
+                validate_webhook_url(req.webhook_url)
+            except WebhookURLRefused as exc:
+                raise HTTPException(status_code=422, detail=f"webhook_url refused: {exc}") from exc
             background_tasks.add_task(
                 deliver_webhook,
                 WebhookSubscription(url=req.webhook_url, secret=req.webhook_secret),
