@@ -13,7 +13,7 @@ A witness is a SCITT Transparency Service (RFC 9943) that issues
 Certificate-Transparency Merkle tree. When a log submitter sends it a checkpoint or
 a signed statement, the witness:
 
-1. Verifies the submission's Ed25519 signature (it never countersigns something it
+1. Verifies the submission's Ed25519 signature (it never signs something it
    could not verify).
 2. Appends a content-addressed entry to its own append-only CT log.
 3. Returns a COSE Receipt — a `COSE_Sign1` carrying an RFC 9162 inclusion proof,
@@ -41,7 +41,7 @@ The canonical witness surface exposes two routes at the top level (no prefix):
 
 | Method | Path | What it does |
 |--------|------|-------------|
-| `POST` | `/checkpoints` | Register a CLL checkpoint (`draft-mih-scitt-checkpointed-local-log`). The default path for any `capsule-emit` client. Returns a `CheckpointStampResponse` with `receipt_b64`, `entry_hash`, and `continuity_grade` (`first-seen` / `registered` / `continuity-witnessed`). Verifies the submitter's Ed25519 signature before countersigning; refuses non-checkpoint bodies with a named 400, and refuses a `consistency_proof`-bearing checkpoint that fails either continuity check with a named 409. |
+| `POST` | `/checkpoints` | Register a CLL checkpoint (`draft-mih-scitt-checkpointed-local-log`). The default path for any `capsule-emit` client. Returns a `CheckpointStampResponse` with `receipt_b64`, `entry_hash`, and `continuity_grade` (`first-seen` / `registered` / `continuity-witnessed`). Verifies the submitter's Ed25519 signature before signing; refuses non-checkpoint bodies with a named 400, and refuses a `consistency_proof`-bearing checkpoint that fails either continuity check with a named 409. |
 | `GET`  | `/checkpoints/{log_id}` | Read back the last checkpoint witnessed for `log_id`, including any equivocations detected. 200 if witnessed at least once, 404 if never. |
 | `POST` | `/register` | Explicit opt-in, plain-SCITT-interop digest registration. Accepts `{"capsule_id": "<64-hex SHA-256>"}`. Returns a full COSE Receipt. A default `capsule-emit` client never calls this. |
 
@@ -515,7 +515,7 @@ verify each receipt independently against each witness's own public key (resolve
 each witness's `/.well-known/did.json`).
 
 **What witnesses check.** Each witness independently verifies the checkpoint's
-Ed25519 signature before countersigning, records the entry in its own CT log, and
+Ed25519 signature before signing, records the entry in its own CT log, and
 issues a COSE Receipt. It also remembers, per `log_id`, the last checkpoint it
 accepted: a checkpoint that omits the optional `consistency_proof` claim is
 registered only (graded `registered`, exactly the original inclusion-only behavior —

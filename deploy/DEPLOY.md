@@ -105,7 +105,7 @@ is the service vocabulary.** This repo's code deploys as the Cloud Run service
 #30). Both hostnames point at that one service:
 
 - **`witness.agentactioncapsule.org`** — primary. The CLL/checkpoint surface: `POST /checkpoints`
-  (default; COSE checkpoint wire; verify-before-countersign; a non-checkpoint body gets one named
+  (default; COSE checkpoint wire; verify-before-signing; a non-checkpoint body gets one named
   400) + `POST /register` (opt-in per-record receipt) + `/health`.
 - **`anchor.agentactioncapsule.org`** — legacy alias of the *same* service, still answering its
   legacy routes (`/v1/digest`, `/transparency/register-statement`, `/anchor/*`) for existing

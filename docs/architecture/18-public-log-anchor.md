@@ -75,7 +75,7 @@ non-2xx, malformed response):
   later auditor sees the gap honestly instead of inferring it from silence.
 - After `degraded_after` consecutive failures (default 12 — one hour at the 5-minute
   default interval), `/health` reports `"public_log": "degraded"`. The top-level
-  `"ok"` flag is **never** affected — the witness's core function (countersigning,
+  `"ok"` flag is **never** affected — the witness's core function (signing receipts,
   the CT log) does not depend on an external log being reachable.
 - A success resets the counter to zero.
 

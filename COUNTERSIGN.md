@@ -42,6 +42,17 @@ a named profile's own checks?* It is:
 - **Never a score.** Every check returns one of exactly five words (§2) — never
   pass/fail, never rolled into one aggregate number or grade.
 
+**A pre-existing, unrelated use of the same word.** The witness's own checkpoint
+path (`POST /checkpoints`, see `README.md`'s "Witness host" section and
+`OPERATOR_GUIDE.md` §"What witnesses check") uses "counter-signed"/"countersigns"
+as plain English for the ordinary act of signing and receipting whatever checkpoint
+it accepts — including the `countersigned-observed` grade a foreign-accumulator
+checkpoint earns when this witness observes and timestamps it without independently
+verifying its accumulator math. That is witness behavior: permissive by design, no
+registration policy, no issuer allowlist, no distinct signer identity from the
+submitter. It predates this module and is not this module — this document is the
+only place in this codebase where **Countersign** (capitalized) names a service.
+
 ## 2. The five results
 
 Every check — the five generic ones and anything a profile's own policy module adds
