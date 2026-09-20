@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
+import capsule_anchor.countersign.router as router_module
+from capsule_anchor.anchoring.router import _SlidingWindowLimiter
 from capsule_anchor.app import create_app
 from capsule_anchor.countersign.issuers import IssuerAllowlist
 from capsule_anchor.countersign.router import configure_issuers
@@ -109,8 +111,10 @@ def test_webhook_delivery_runs_as_a_background_task(monkeypatch, requester_key, 
     """A webhook subscription must never block the response -- it is
     scheduled via FastAPI's BackgroundTasks, not called inline before the
     response is built. Patch deliver_webhook to record the call rather than
-    hitting the network."""
+    hitting the network, and the DNS resolver so the SSRF guard's host
+    check resolves to a public address without real network access."""
     import capsule_anchor.countersign.router as router_module
+    import capsule_anchor.countersign.webhooks as webhooks_module
 
     calls = []
 
@@ -118,6 +122,7 @@ def test_webhook_delivery_runs_as_a_background_task(monkeypatch, requester_key, 
         calls.append((subscription.url, entry_hash))
 
     monkeypatch.setattr(router_module, "deliver_webhook", fake_deliver)
+    monkeypatch.setattr(webhooks_module, "_RESOLVE_HOST", lambda host: ["93.184.216.34"])
 
     client = _strict_client(monkeypatch, issuer_allowlist)
     raw = base_bundle_raw()
@@ -129,6 +134,51 @@ def test_webhook_delivery_runs_as_a_background_task(monkeypatch, requester_key, 
     assert resp.status_code == 200, resp.text
     entry = resp.json()["countersignatures"][0]
     assert calls == [("https://producer.example/hook", entry["receipt"]["entry_hash"])]
+
+
+def test_webhook_url_targeting_metadata_ip_is_refused_before_scheduling(
+    monkeypatch, requester_key, issuer_allowlist
+):
+    """SSRF guard, HARD GATE: a webhook_url whose host resolves to the cloud
+    metadata address is refused with 422 BEFORE deliver_webhook is ever
+    scheduled -- an enrolled issuer cannot use this endpoint to make the
+    service fetch 169.254.169.254 on their behalf."""
+    import capsule_anchor.countersign.router as router_module
+    import capsule_anchor.countersign.webhooks as webhooks_module
+
+    calls = []
+    monkeypatch.setattr(
+        router_module, "deliver_webhook", lambda *a, **kw: calls.append((a, kw))
+    )
+    monkeypatch.setattr(webhooks_module, "_RESOLVE_HOST", lambda host: ["169.254.169.254"])
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    raw = base_bundle_raw()
+
+    resp = client.post(
+        "/countersign/register",
+        json=_submission(
+            raw, requester_key, webhook_url="https://attacker.example/hook", webhook_secret="s3cr3t"
+        ),
+    )
+    assert resp.status_code == 422, resp.text
+    assert "webhook_url refused" in resp.json()["detail"]
+    assert calls == []
+
+
+def test_webhook_url_over_plain_http_is_refused(monkeypatch, requester_key, issuer_allowlist):
+    """SSRF guard: scheme MUST be https."""
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    raw = base_bundle_raw()
+
+    resp = client.post(
+        "/countersign/register",
+        json=_submission(
+            raw, requester_key, webhook_url="http://producer.example/hook", webhook_secret="s3cr3t"
+        ),
+    )
+    assert resp.status_code == 422, resp.text
+    assert "webhook_url refused" in resp.json()["detail"]
 
 
 def test_unknown_profile_is_refused(monkeypatch, requester_key, issuer_allowlist):
@@ -165,3 +215,58 @@ def test_requester_key_mismatch_is_refused(monkeypatch, requester_key, issuer_al
     resp = client.post("/countersign/register", json=body)
     assert resp.status_code == 422
     assert "does not match the key" in resp.json()["detail"]
+
+
+# --- item 2: unbounded body on /countersign/register ---
+
+
+def test_oversized_body_is_refused_with_413_before_parse(monkeypatch, issuer_allowlist):
+    """A body over MAX_STATEMENT_BYTES is refused with 413 BEFORE
+    JSON-decode -- proven here by sending bytes that aren't even valid JSON;
+    a 413 (not a 422 JSON-decode error) shows the size check ran first."""
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    oversized = b"x" * (router_module.MAX_STATEMENT_BYTES + 1)
+    resp = client.post(
+        "/countersign/register", content=oversized, headers={"Content-Type": "application/json"}
+    )
+    assert resp.status_code == 413, resp.text
+    assert "too large" in resp.json()["detail"]
+
+
+def test_body_at_the_cap_is_not_refused_for_size(monkeypatch, issuer_allowlist):
+    """A body exactly AT the cap must not be refused for size -- only
+    STRICTLY over. It still fails JSON-decode here (not a real submission),
+    proving the size gate itself is exact rather than off-by-one strict."""
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    at_cap = b"x" * router_module.MAX_STATEMENT_BYTES
+    resp = client.post(
+        "/countersign/register", content=at_cap, headers={"Content-Type": "application/json"}
+    )
+    assert resp.status_code != 413, resp.text
+
+
+# --- item 3: no rate limit on /countersign/register ---
+
+
+def test_rate_limit_exceeded_returns_429(monkeypatch, issuer_allowlist):
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setattr(
+        router_module, "_COUNTERSIGN_POST_LIMITER", _SlidingWindowLimiter(max_calls=1, window_s=60.0)
+    )
+    first = client.post("/countersign/register", json={})
+    assert first.status_code != 429, first.text
+
+    second = client.post("/countersign/register", json={})
+    assert second.status_code == 429, second.text
+    assert "rate limit" in second.json()["detail"]
+
+
+def test_rate_limit_is_a_separate_budget_per_instance(monkeypatch, issuer_allowlist):
+    """A fresh limiter always starts open -- confirms the gate is a
+    per-instance sliding window, not a global flag stuck from a prior test."""
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setattr(
+        router_module, "_COUNTERSIGN_POST_LIMITER", _SlidingWindowLimiter(max_calls=300, window_s=60.0)
+    )
+    resp = client.post("/countersign/register", json={})
+    assert resp.status_code != 429, resp.text
