@@ -12,7 +12,7 @@ repo installed (`pip install -e .` from the repo root; needs `httpx`,
 
 `submit_checkpoint.py` builds a CLL checkpoint from scratch, signs it,
 submits it, and — independently of the submission itself — fetches it back
-and verifies the witness's countersignature offline. Five steps, each printed
+and verifies the witness's receipt offline. Five steps, each printed
 so a run's stdout is a readable transcript:
 
 1. Generate an Ed25519 test key + a checkpoint claims map.

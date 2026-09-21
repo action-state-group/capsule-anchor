@@ -59,7 +59,7 @@ below for the full picture, and `deploy/DEPLOY.md` for the DNS mapping.
 ### Enrolled external checkpoint submitters (`/checkpoints`)
 
 `POST /checkpoints` (above) is open by default: any COSE_Sign1 checkpoint verifying under its
-own self-asserted `kid` is counter-signed, for any `log_id`. A NAMED external log can
+own self-asserted `kid` is signed and receipted, for any `log_id`. A NAMED external log can
 additionally be **enrolled** — a config-driven allowlist (`packages/capsule_anchor/config/
 checkpoint_submitters.json`, committed, never hand-edited on the deployed box) pins a specific
 `log_id` (the CWT `iss`) to a specific Ed25519 key. For an enrolled `log_id`, verification uses
@@ -199,7 +199,7 @@ Accepts a CLL (Checkpointed Local Log, `draft-mih-scitt-checkpointed-local-log`)
 `CheckpointRecord` verbatim — nothing else. Any other shape is refused with a **named
 400** (`NotACheckpointError`) before any signature check or log write; a checkpoint whose
 `signature` doesn't verify against `key_id` is refused with **401** and never
-counter-signed. This is what makes the route's rejection policy — not a host-level gate —
+signed. This is what makes the route's rejection policy — not a host-level gate —
 the thing that keeps a default `capsule-emit` process's egress checkpoint-only.
 
 Returns:
@@ -226,7 +226,7 @@ checkpoint it accepted, and returns exactly one of three continuity grades — n
 | `continuity-witnessed` | A known `log_id`, a `consistency_proof` was submitted, and this witness independently verified BOTH that the submitted `prev_size`/`prev_root` equal its own last-accepted checkpoint for `log_id` (fork detection) AND that the proof itself (checked with the neutral CLL core's `verify_consistency` — this witness never builds trees) bridges its last-accepted state to the new one. Only this grade signs a continuity assertion into the receipt's protected header. |
 
 A checkpoint carrying a `consistency_proof` that fails either check is refused with
-**409** — never counter-signed, no log append, treated as evidence of log mutation, never
+**409** — never signed, no log append, treated as evidence of log mutation, never
 retried. The response body carries this witness's own last-accepted `(mmr_size, root)` so
 an honest client that skipped a cadence can re-prove from the witness's view:
 
