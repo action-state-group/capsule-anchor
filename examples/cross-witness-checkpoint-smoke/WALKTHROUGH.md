@@ -60,8 +60,14 @@ This directory captures **leg 1**: a full run against the live witness using
 our own synthetic test identity (`asg-smoke-test/v1`), proving the wire
 format and the round-trip work end-to-end today, without waiting on any
 external party's state. See `leg1-transcript.txt` for the captured run and
-`leg1-artifacts/` for the raw bytes (test private key, COSE checkpoint,
-receipt) it produced.
+`leg1-artifacts/` for the raw bytes (COSE checkpoint, receipt) it produced.
+
+> **The test private key is NOT committed.** `submit_checkpoint.py` generates a
+> fresh throwaway Ed25519 key on every run (step 1) and only writes it to
+> `leg1-artifacts/test_key.pem` when you pass `--out .../leg1-artifacts`. That
+> path is git-ignored (see the repo `.gitignore`), so committing a private key
+> to this public repo can't happen by accident. Re-run the script with `--out`
+> to regenerate the key and the COSE artifacts from a clean checkout.
 
 **Leg 2** — re-running the fetch-back + offline-verify steps against a real
 trace-registry checkpoint once one is actually published — is intentionally
@@ -102,7 +108,9 @@ point the watcher at that surface instead of this heuristic.
 - `watch_witness.py` — the tree-size-growth watcher.
 - `leg1-transcript.txt` — captured stdout of an actual leg-1 run against the
   live witness (2026-09-01).
-- `leg1-artifacts/` — the raw bytes from that run: `test_key.pem` (the
-  synthetic test private key — throwaway, generated for this run only),
-  `checkpoint.cose` (the submitted COSE_Sign1 statement), `receipt.cose` (the
-  COSE Receipt the witness returned).
+- `leg1-artifacts/` — the raw bytes from that run: `checkpoint.cose` (the
+  submitted COSE_Sign1 statement) and `receipt.cose` (the COSE Receipt the
+  witness returned). The synthetic test private key (`test_key.pem`) is
+  **generated at runtime and git-ignored, never committed** — pass
+  `--out examples/cross-witness-checkpoint-smoke/leg1-artifacts` to
+  `submit_checkpoint.py` to (re)generate it locally.

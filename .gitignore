@@ -15,3 +15,8 @@ venv/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Runtime-generated smoke-test private key -- submit_checkpoint.py --out writes a
+# throwaway Ed25519 test key here; it must never be committed to a public repo.
+examples/cross-witness-checkpoint-smoke/leg1-artifacts/test_key.pem
+examples/cross-witness-checkpoint-smoke/leg1-artifacts/*.pem
