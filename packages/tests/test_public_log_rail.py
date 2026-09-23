@@ -395,6 +395,9 @@ class TestByteStability:
             audit_path=[hashlib.sha256(b"x").digest()],
             root=hashlib.sha256(b"root").digest(),
             sign=sk.sign,
+            iss="did:web:witness.example.test",
+            sub="entry-hash-placeholder",
+            kid=b"\x01" * 8,
             iat=1000,
             grade="countersigned-observed",
         )

@@ -56,10 +56,11 @@ import cbor2
 import pytest
 from capsule_anchor.anchoring.service import _COSE_GRADE_LABEL, _CWT_IAT
 from capsule_anchor.app import create_app
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
 from fastapi.testclient import TestClient
-from scitt_cose.statement import HDR_CWT_CLAIMS, build_signed_statement
+from scitt_cose.receipt import verify_receipt
+from scitt_cose.statement import CWT_ISS, CWT_SUB, HDR_CWT_CLAIMS, HDR_KID, build_signed_statement
 
 #: Must match capsule_anchor.anchoring.checkpoint_cose.CLL_CHECKPOINT_CONTENT_TYPE
 #: (== capsule_emit.checkpoint.cose_wire.CLL_CHECKPOINT_CONTENT_TYPE) exactly.
@@ -300,36 +301,104 @@ def test_enrolled_checkpoint_receipt_signs_grade(client, agentrust_key):
     assert HDR_CWT_CLAIMS in protected  # iat still signed too
 
 
-def test_receipt_protected_header_never_carries_a_kid(client, key, agentrust_key):
-    """A COSE Receipt does NOT identify the key that signed it.
+def _authority_pubkey_pem(client: TestClient) -> bytes:
+    pubkey_hex = client.get("/anchor/authority-pubkey").json()["pubkey_hex"]
+    return Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex)).public_bytes(
+        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
+    )
 
-    ``build_cose_receipt`` writes only ``alg`` (1), ``vds`` (395) and the
-    optional ``iat``/grade/continuity labels -- never a COSE ``kid`` (4).
-    Pinned because OPERATOR_GUIDE's key-rotation section asserted the
-    opposite ("Every receipt carries a `key_id`") for weeks: a verifier
-    resolves the witness key from ``/anchor/authority-pubkey`` or the DID
-    document and tries the published keys, so retiring a key WITHOUT
-    publishing it silently breaks every historical receipt. Both the
-    enrolled (grade-bearing) and non-enrolled shapes are checked -- adding a
-    protected field must never smuggle a ``kid`` in with it.
+
+def test_checkpoint_receipt_signs_iss_sub_kid(client, key, agentrust_key):
+    """RFC 9943 SS6 makes a Receipt's ``iss``/``sub`` (CWT claims 1/2, inside
+    the claims map label 15) and ``kid`` (COSE label 4) MUST -- this witness
+    carries neither x5t nor x5chain, so ``kid`` is unconditional. Supersedes
+    the Phase-1 ``test_receipt_protected_header_never_carries_a_kid``: once
+    this wire change lands, EVERY new receipt carries a ``kid``, not none.
+
+    ``sub`` for a checkpoint receipt is the checkpoint's own AUTHENTICATED
+    CWT subject, ``<log_id>#<mmr_size>`` (RFC 9943 Figure 10 + SS3, RULED
+    2026-09-16) -- mirrored byte-for-byte so a relying party can assert
+    ``receipt.sub == checkpoint.sub``. Both the non-enrolled and enrolled
+    (grade-bearing) shapes are checked.
     """
-    cose_label_kid = 4
+    key_id_hex = client.get("/anchor/authority-pubkey").json()["key_id"]
 
     status, body = _post_checkpoint(
-        client, _checkpoint_cose(key, log_id="log-nokid", mmr_size=1,
-                                 new_peaks=_peaks_for("log-nokid-1")))
+        client, _checkpoint_cose(key, log_id="log-rfc9943", mmr_size=7,
+                                 new_peaks=_peaks_for("log-rfc9943-7")))
     assert status == 200, body
-    assert cose_label_kid not in _receipt_protected_header(body["receipt_b64"])
+    protected = _receipt_protected_header(body["receipt_b64"])
+    assert protected[HDR_KID] == bytes.fromhex(key_id_hex)
+    claims = protected[HDR_CWT_CLAIMS]
+    assert claims[CWT_ISS] == "did:web:witness.agentactioncapsule.org"
+    assert claims[CWT_SUB] == "log-rfc9943#7"
 
     _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID,
             pubkey=agentrust_key.public_key().public_bytes_raw())
     status, body = _post_checkpoint(
         client, _checkpoint_cose(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID,
-                                 mmr_size=1, new_peaks=_peaks_for("log-nokid-2")))
+                                 mmr_size=3, new_peaks=_peaks_for("log-rfc9943-enrolled-3")))
     assert status == 200, body
     enrolled = _receipt_protected_header(body["receipt_b64"])
-    assert enrolled[_COSE_GRADE_LABEL] == body["grade"]  # grade IS there
-    assert cose_label_kid not in enrolled                # kid is NOT
+    assert enrolled[HDR_KID] == bytes.fromhex(key_id_hex)  # same witness key regardless of submitter
+    enrolled_claims = enrolled[HDR_CWT_CLAIMS]
+    assert enrolled_claims[CWT_ISS] == "did:web:witness.agentactioncapsule.org"
+    assert enrolled_claims[CWT_SUB] == f"{_TRACE_REGISTRY_LOG_ID}#3"
+    assert enrolled[_COSE_GRADE_LABEL] == body["grade"]  # grade still rides alongside
+
+
+def test_register_receipt_sub_falls_back_to_entry_hash(client):
+    """``/register``'s bare digest has no Signed Statement to inherit a
+    subject from (RFC 9943 Figure 10 + SS3's fallback) -- its receipt's
+    ``sub`` is the entry digest itself, documented, never a stand-in for
+    issuer identity. See ``test_json_enrolled_checkpoint_receipt_sub_falls_
+    back_to_entry_hash`` below for the json-ed25519 checkpoint-wire twin of
+    this same fallback."""
+    cid = "f" * 64
+    resp = client.post("/register", json={"capsule_id": cid})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    protected = _receipt_protected_header(body["receipt_b64"])
+    assert protected[HDR_CWT_CLAIMS][CWT_SUB] == body["entry_hash"]
+
+
+def test_receipt_iss_sub_kid_are_signature_covered(client):
+    """Mutant check: tampering iss/sub/kid on an already-issued receipt (same
+    signature bytes, mutated protected header) must fail COSE verification --
+    otherwise a holder could rewrite the witness's identity claim or the
+    receipt's subject without invalidating the signature. Checks BOTH halves
+    (QUEUE_PROTOCOL SS7): the genuine receipt verifies (positive control),
+    and each of iss/sub/kid independently flips verification to failure when
+    mutated (the negative side)."""
+    cid = "9" * 64
+    resp = client.post("/register", json={"capsule_id": cid})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    receipt_bytes = base64.b64decode(body["receipt_b64"])
+    pubkey_pem = _authority_pubkey_pem(client)
+
+    genuine = verify_receipt(
+        receipt_bytes, leaf_entry_hex=body["entry_hash"], log_public_key_pem=pubkey_pem
+    )
+    assert genuine.ok, genuine.errors
+
+    outer = cbor2.loads(receipt_bytes)
+    protected_bstr, unprotected, payload, signature = outer.value
+    protected = dict(cbor2.loads(protected_bstr))
+
+    def _reencode(mutated_protected: dict) -> bytes:
+        tampered_bstr = cbor2.dumps(mutated_protected)
+        return cbor2.dumps(cbor2.CBORTag(outer.tag, [tampered_bstr, unprotected, payload, signature]))
+
+    for claim_label, tampered_value in ((CWT_SUB, "sub/tampered"), (CWT_ISS, "did:web:impostor.example")):
+        mutated_claims = {**protected[HDR_CWT_CLAIMS], claim_label: tampered_value}
+        tampered = _reencode({**protected, HDR_CWT_CLAIMS: mutated_claims})
+        result = verify_receipt(tampered, leaf_entry_hex=body["entry_hash"], log_public_key_pem=pubkey_pem)
+        assert not result.ok, f"tampering CWT claim {claim_label} must invalidate the signature"
+
+    tampered_kid = _reencode({**protected, HDR_KID: b"\xff" * 8})
+    result = verify_receipt(tampered_kid, leaf_entry_hex=body["entry_hash"], log_public_key_pem=pubkey_pem)
+    assert not result.ok, "tampering kid must invalidate the signature"
 
 
 def test_resubmitting_the_same_checkpoint_is_idempotent(client, key):
@@ -1020,6 +1089,25 @@ def test_json_enrolled_submission_accepted_with_grade(client, agentrust_key):
     assert status == 200, body
     assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
     assert body["receipt_b64"]
+
+
+def test_json_enrolled_checkpoint_receipt_sub_falls_back_to_entry_hash(client, agentrust_key):
+    """A ``json-ed25519`` checkpoint (``checkpoint_json.py``) carries no CWT
+    claims map, so ``checkpoint_cose``-style ``sub`` mirroring is impossible
+    for this wire form -- ``checkpoint_json.parse_and_verify_checkpoint_json``
+    documents this by simply never setting a ``sub`` key, so the receipt
+    falls back to the entry digest, the SAME documented fallback ``/register``
+    uses (see ``test_register_receipt_sub_falls_back_to_entry_hash``), never a
+    synthesized ``<log_id>#<mmr_size>`` this wire form cannot authenticate."""
+    _enroll(
+        client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw(),
+        wire_form=WIRE_FORM_JSON_ED25519,
+    )
+    cp = _json_checkpoint(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=2)
+    status, body = _post_json_checkpoint(client, cp)
+    assert status == 200, body
+    protected = _receipt_protected_header(body["receipt_b64"])
+    assert protected[HDR_CWT_CLAIMS][CWT_SUB] == body["entry_hash"]
 
 
 def test_json_real_live_checkpoint_1_accepted_end_to_end(client):
