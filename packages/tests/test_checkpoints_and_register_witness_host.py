@@ -300,6 +300,38 @@ def test_enrolled_checkpoint_receipt_signs_grade(client, agentrust_key):
     assert HDR_CWT_CLAIMS in protected  # iat still signed too
 
 
+def test_receipt_protected_header_never_carries_a_kid(client, key, agentrust_key):
+    """A COSE Receipt does NOT identify the key that signed it.
+
+    ``build_cose_receipt`` writes only ``alg`` (1), ``vds`` (395) and the
+    optional ``iat``/grade/continuity labels -- never a COSE ``kid`` (4).
+    Pinned because OPERATOR_GUIDE's key-rotation section asserted the
+    opposite ("Every receipt carries a `key_id`") for weeks: a verifier
+    resolves the witness key from ``/anchor/authority-pubkey`` or the DID
+    document and tries the published keys, so retiring a key WITHOUT
+    publishing it silently breaks every historical receipt. Both the
+    enrolled (grade-bearing) and non-enrolled shapes are checked -- adding a
+    protected field must never smuggle a ``kid`` in with it.
+    """
+    cose_label_kid = 4
+
+    status, body = _post_checkpoint(
+        client, _checkpoint_cose(key, log_id="log-nokid", mmr_size=1,
+                                 new_peaks=_peaks_for("log-nokid-1")))
+    assert status == 200, body
+    assert cose_label_kid not in _receipt_protected_header(body["receipt_b64"])
+
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID,
+            pubkey=agentrust_key.public_key().public_bytes_raw())
+    status, body = _post_checkpoint(
+        client, _checkpoint_cose(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID,
+                                 mmr_size=1, new_peaks=_peaks_for("log-nokid-2")))
+    assert status == 200, body
+    enrolled = _receipt_protected_header(body["receipt_b64"])
+    assert enrolled[_COSE_GRADE_LABEL] == body["grade"]  # grade IS there
+    assert cose_label_kid not in enrolled                # kid is NOT
+
+
 def test_resubmitting_the_same_checkpoint_is_idempotent(client, key):
     cose = _checkpoint_cose(key, log_id="log-B", mmr_size=50, new_peaks=_peaks_for("log-B-50"))
     s1, b1 = _post_checkpoint(client, cose)

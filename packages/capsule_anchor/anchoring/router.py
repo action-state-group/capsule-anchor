@@ -619,8 +619,18 @@ def get_router() -> APIRouter:
 
         Returns ``pubkey_hex`` (raw 32-byte Ed25519 key as lowercase hex) and
         ``key_id`` (first 16 hex chars of ``sha256(pubkey)`` -- the SAME
-        derivation used for ``Signature.key_id`` on every STH/receipt, so this
-        value always matches the key_id a relying party sees on a signature).
+        derivation used for ``Signature.key_id``, so this value always matches
+        the key_id a relying party sees on a JSON ``Signature`` object: an STH,
+        an ``/anchor/anchor`` receipt, a transparency-log entry).
+
+        A COSE Receipt is NOT one of those: ``build_cose_receipt`` writes only
+        ``alg`` (1), ``vds`` (395) and the optional ``iat``/grade/continuity
+        labels into the protected header -- never a COSE ``kid`` (4). A relying
+        party verifying a COSE Receipt resolves the key from HERE (or from
+        ``/.well-known/did.json``), never from the receipt itself, and across a
+        rotation boundary tries each published key. Do not describe this
+        endpoint as returning "the key_id on every receipt".
+
         The monitor provisions this out-of-band and uses it to independently
         verify every STH signature -- this is what decouples the monitor from
         trusting the authority's own claims.
