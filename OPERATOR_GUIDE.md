@@ -8,15 +8,25 @@ tells you how to stand up and run your own.
 
 ## 1. What a witness is
 
-A witness is a SCITT Transparency Service (RFC 9943) that issues
-[RFC 9162](https://www.rfc-editor.org/rfc/rfc9162) COSE Receipts over a
-Certificate-Transparency Merkle tree. When a log submitter sends it a checkpoint or
-a signed statement, the witness:
+A witness implements the SCITT Transparency Service (RFC 9943) message shapes
+and issues [RFC 9162](https://www.rfc-editor.org/rfc/rfc9162) COSE Receipts
+over a Certificate-Transparency Merkle tree. **It is an open deployment, not
+a Registration-Policy-enforcing TS in the RFC 9943 §5.1.1.1 sense** — see
+[COUNTERSIGN.md](COUNTERSIGN.md) §5 for the one deployment mode of this same
+codebase that is. Concretely, per surface:
 
-1. Verifies the submission's Ed25519 signature (it never signs something it
-   could not verify).
-2. Appends a content-addressed entry to its own append-only CT log.
-3. Returns a COSE Receipt — a `COSE_Sign1` carrying an RFC 9162 inclusion proof,
+1. `POST /checkpoints` verifies the submission's Ed25519 signature before
+   signing — it never signs a checkpoint it could not verify.
+2. `POST /register` has no signature to verify (a bare digest) — it appends
+   and signs unconditionally, by design (free, no signup, no key).
+3. `POST /transparency/register-statement` treats a submitted Signed
+   Statement as opaque bytes for anchoring purposes — no issuer check, no
+   trust anchors.
+
+Every surface then:
+
+1. Appends a content-addressed entry to its own append-only CT log.
+2. Returns a COSE Receipt — a `COSE_Sign1` carrying an RFC 9162 inclusion proof,
    signed by the witness's stable Ed25519 authority key.
 
 A receipt proves that a given entry was in the witness's log at a specific tree size.
