@@ -172,7 +172,7 @@ def main() -> int:
     ap.add_argument("--host", default=DEFAULT_HOST, help=f"witness base URL (default: {DEFAULT_HOST})")
     ap.add_argument("--log-id", default=DEFAULT_LOG_ID, help=f"CWT iss / log_id (default: {DEFAULT_LOG_ID!r} -- a synthetic test identity, not a real submitter)")
     ap.add_argument("--mmr-size", type=int, default=1, help="log_size claim for this checkpoint (default: 1)")
-    ap.add_argument("--out", type=Path, default=None, help="directory to write artifacts (key, COSE bytes, receipt) -- optional")
+    ap.add_argument("--out", type=Path, default=None, help="directory to write artifacts (throwaway generated key, COSE bytes, receipt) -- optional. The key is generated fresh each run and its committed path (leg1-artifacts/*.pem) is git-ignored: never commit it to this public repo.")
     args = ap.parse_args()
 
     if args.out:
