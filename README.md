@@ -13,8 +13,22 @@ COSE Receipt back.
 
 `capsule-anchor` implements the
 [SCITT Transparency Service (RFC 9943)](https://www.rfc-editor.org/rfc/rfc9943)
-(TS) interface, backed by an RFC 9162 (RFC 6962) Certificate-Transparency
-Merkle tree:
+(TS) message shapes, backed by an RFC 9162 (RFC 6962) Certificate-Transparency
+Merkle tree.
+
+**The free public instance above is an open WITNESS, not a
+Registration-Policy-enforcing TS in the RFC 9943 §5.1.1.1 sense**: `POST
+/checkpoints` verifies the submitter's Ed25519 signature before signing,
+`POST /register` has no signature to verify (a bare digest), and `POST
+/transparency/register-statement` treats a submitted Signed Statement as
+opaque bytes for anchoring purposes — no issuer check, no trust anchors. That
+openness is deliberate (free, no signup, no key) and is what makes the free
+instance possible. See [COUNTERSIGN.md](COUNTERSIGN.md) §5 for the ONLY
+deployment mode of this same codebase (`CAPSULE_ANCHOR_REGISTRATION_POLICY=
+strict`) that authenticates an issuer under a published Registration Policy
+and is a Transparency Service in the full RFC 9943 sense.
+
+The flow, on either deployment:
 
 1. **Register** a SHA-256 digest (or a full COSE_Sign1 Signed Statement) into
    the append-only CT log.
@@ -275,6 +289,17 @@ default `capsule-emit` client never calls it; see
 [Witness host: checkpoints vs. registration](#witness-host-checkpoints-vs-registration).
 
 ### SCITT Signed Statement registration
+
+**This route registers, it does not authenticate.** Despite the SCITT-shaped
+name, `register-statement` on the open witness above does not verify the
+Signed Statement's signature, does not check its issuer, and has no trust
+anchors — it decodes the COSE_Sign1 only far enough to compute the
+malleability-immune `Sig_structure` entry hash, and falls back to a
+full-envelope digest when the bytes don't parse as one. Of the three
+registration surfaces, only `POST /checkpoints` verifies anything before
+signing (the submitter's Ed25519 signature). This is not a defect — it is
+what a free, no-signup, no-key digest-witness endpoint is — but do not read
+the route name as an issuer-authentication guarantee.
 
 ```bash
 curl -s -X POST https://anchor.agentactioncapsule.org/transparency/register-statement \
