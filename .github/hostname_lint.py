@@ -2,14 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """hostname-lint — fail the build if a stale verify.*/witness.*actionstate.* reference appears.
 
-Canonical hosts (2026-09-23, corrected same day by Steven): verify and witness are NEUTRAL and
-live on agentactioncapsule.org; countersign is OPERATED and stays on actionstate -- see
-_work/countersign-service-deploy-plan-2026-09-17.md, section "Money-path / boundary", in the
-action-state-ops workspace. This repo has drifted back to the old verify.actionstate.ai host
-twice already (see PR #38); this check exists so a third recurrence fails CI instead of shipping.
+Canonical hosts (2026-09-23): verify and witness live on agentactioncapsule.org; countersign.*
+is a different service and is intentionally exempt. This repo has drifted back to the old
+verify.actionstate.ai host twice already (see PR #38); this check exists so a third recurrence
+fails CI instead of shipping.
 
 Disallowed: verify.actionstate.<tld>, witness.actionstate.<tld> (case-insensitive, any TLD).
-Exempt: countersign.actionstate.<tld> (correct -- the operated layer), and any
+Exempt: countersign.actionstate.<tld> (a different service, correct as-is), and any
 @actionstate.<tld> mailto address (spec@, steven@, conduct@, security@, opensource@ -- all
 correct, unrelated to which host serves which service).
 
@@ -82,7 +81,7 @@ def main() -> int:
             "hostname-lint: stale verify.actionstate.*/witness.actionstate.* reference(s) found."
         )
         print("Canonical: verify.agentactioncapsule.org / witness.agentactioncapsule.org.")
-        print("(countersign.actionstate.* is correct and exempt -- it is the operated layer.)")
+        print("(countersign.* is a different service and is intentionally exempt.)")
         print(
             "If a hit is a genuine historical record (not live drift), add its exact stripped "
             "line text to .github/hostname_lint_allowlist.txt."

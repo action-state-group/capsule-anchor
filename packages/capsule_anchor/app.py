@@ -192,8 +192,8 @@ def create_app() -> FastAPI:
     _sth_interval = float(os.environ.get("CAPSULE_ANCHOR_STH_REFRESH_INTERVAL", "60"))
     _start_sth_refresh_thread(_svc, _sth_interval)
 
-    # Entry retention [anchor-retention-posture-and-policy] — ages out the
-    # submitted_statements receipt cache per CAPSULE_ANCHOR_ENTRY_RETENTION.
+    # Entry retention — ages out the submitted_statements receipt cache per
+    # CAPSULE_ANCHOR_ENTRY_RETENTION.
     # Default unlimited: entry_retention_seconds() raises on a malformed
     # value (fail-closed, like every other knob in this file) and returns
     # None when unset, in which case no thread starts -- upgrade is a no-op.
@@ -316,8 +316,8 @@ def create_app() -> FastAPI:
             "key_id": svc.attestor.key_id,
             "tree_size": tree_size,
             "storage": "postgres" if database_url else "memory",
-            # [anchor-retention-posture-and-policy]: the DECLARED entry-
-            # retention posture -- "unlimited" or "<seconds>s". Read this
+            # The DECLARED entry-retention posture -- "unlimited" or
+            # "<seconds>s". Read this
             # BEFORE depending on the service: root history (consistency +
             # equivocation detection) is retained forever regardless of this
             # value; only the receipt re-issue cache ages out. A policy

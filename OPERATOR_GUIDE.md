@@ -409,9 +409,12 @@ touches.
 by `entry_hash`. Historically this witness kept every entry forever and
 persisted only a SINGLE latest Signed Tree Head — the expensive thing was
 kept forever and the cheap thing was not retained at all. This inverts that:
-`signed_tree_head_history` retains every signed root forever (small); entry
+`signed_tree_head_history` retains every signed root indefinitely (small); entry
 retention — meaning the `submitted_statements` re-issue cache — is now
-configurable via `CAPSULE_ANCHOR_ENTRY_RETENTION`.
+configurable via `CAPSULE_ANCHOR_ENTRY_RETENTION`. Indefinite root retention
+means a receipt can always be checked against the root it was issued under —
+it does not mean the receipt verifies forever: that also depends on the
+signing key staying published (see **Key rotation** below).
 
 **What pruning does and does not touch.** Setting `CAPSULE_ANCHOR_ENTRY_RETENTION`
 to a number of seconds deletes `submitted_statements` rows older than that
@@ -422,8 +425,11 @@ tree for every future proof, not just old ones), `signed_tree_head_history`,
 or `checkpoint_equivocations`. **What you give up:** `GET /v1/inclusion/{capsule_id}`
 and any other re-issue lookup for a pruned entry returns 404 instead of the
 cached receipt — the ORIGINAL receipt, already handed to the holder at
-registration time, is completely unaffected and remains independently
-verifiable forever, per §5. A resubmission of the exact same statement after
+registration time, is completely unaffected by pruning. It remains
+independently verifiable exactly as described under **Key rotation** below:
+against the retained root, for as long as the signing key that issued it
+remains published — pruning the re-issue cache changes none of that. A
+resubmission of the exact same statement after
 its cache row was pruned is treated as new (a fresh log entry, a fresh
 receipt) rather than an idempotent cache hit — a policy tradeoff, not
 corruption; both entries verify.
@@ -451,9 +457,16 @@ A COSE Receipt's protected header carries `alg` (1) and `vds` (395), plus, when
 present, the CWT claims map (15, holding `iat`), the witness grade (-65537) and the
 continuity assertion (-65538). It carries **no COSE `kid` (4)**. A verifier
 therefore resolves the witness key out of band — `GET /.well-known/did.json` or
-`GET /anchor/authority-pubkey` — and, across a rotation boundary, simply tries the
-published keys until one verifies. Receipts issued before a rotation stay
-verifiable only for as long as the retired public key remains published.
+`GET /anchor/authority-pubkey`.
+
+**Both of those endpoints return only the current signing key — the service serves
+no key history.** Across a rotation boundary, a verifier that resolves the key live
+gets *only the new key*: a receipt signed by a retired key will **not** verify
+against it, and there is no endpoint from which to fetch the old one. Historical-receipt
+verifiability across a rotation is therefore **not automatic** — it depends on the
+operator having published the retired key out of band (procedure step 3 below) and
+the verifier knowing to consult that record. Do not rely on the live endpoints to
+verify a pre-rotation receipt.
 
 The JSON `Signature` object is a different surface and does the opposite: STHs,
 `/anchor/anchor` receipts and transparency-log entries each carry `key_id` (the
@@ -481,18 +494,24 @@ generalise from those to COSE Receipts.
    which key signed one is determined only by which published key verifies it.
 
 3. Publish the old public key alongside the new one. After rotation,
-   `GET /.well-known/did.json` returns only the new key. Verifiers that resolve the
-   DID document at verify-time pick up the new key automatically. Verifiers that
-   pinned the old key out-of-band must update their pin. Two approaches for
-   historical-receipt verifiability:
+   `GET /.well-known/did.json` and `GET /anchor/authority-pubkey` return **only the
+   new key** — neither serves prior keys. Verifiers that resolve the key at
+   verify-time pick up the new key automatically; verifiers that pinned the old key
+   out-of-band must update their pin. **Because the endpoints serve no key history,
+   the operator must publish retired keys out of band — this is the only path that
+   works today:**
 
-   - **DID document history (recommended):** include the retired key as an additional
-     `verificationMethod` entry in `/.well-known/did.json`. A verifier holding a
-     `key_id` (from an STH or other `Signature` object) can then look the old key up
-     directly; a verifier holding only a COSE Receipt gets both keys to try, which is
-     all it needs and all it can use.
-   - **Out-of-band publication:** publish retired public keys (with `key_id`, raw hex,
-     and rotation date) in your `CHANGELOG.md` or a `keys/` directory in this repo.
+   - **Out-of-band publication (the actionable path today):** publish retired public
+     keys (with `key_id`, raw hex, and rotation date) in your `CHANGELOG.md` or a
+     `keys/` directory in this repo, and point verifiers at it. A verifier holding a
+     pre-rotation COSE Receipt must fetch the retired key from this record — it
+     cannot obtain it from the live endpoints.
+   - **DID document history (recommended target — NOT yet built):** the intended
+     future design is to include each retired key as an additional
+     `verificationMethod` entry in `/.well-known/did.json`, so a verifier could fetch
+     the full key set from the endpoint and try each. **The service does not do this
+     yet** — `did.json` emits only the current key. Until it is built, do not rely on
+     the endpoint for historical keys; use out-of-band publication above.
 
 ### Recovery after a failed checkpoint
 
