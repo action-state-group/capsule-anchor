@@ -18,7 +18,7 @@ an arbitrary key and claiming that ``iss`` (see
 allowlist to decide whose key to trust for a given ``iss``).
 
 NOT a signup system and NOT open enrollment -- entries are added by a
-committed config change + deploy (`_ops/QUEUE_PROTOCOL.md`), one per external
+committed config change + deploy, one per external
 partner, never hand-edited on the box.
 """
 from __future__ import annotations
