@@ -190,7 +190,7 @@ With Postgres as the backing store, multiple Cloud Run instances are safe:
   is written through an atomic `(tree_size, timestamp)` compare-and-swap
   (`LogStore.put_sth`), so a slower writer can never move the persisted STH backwards relative to
   what a client already observed — verified under real multi-process concurrency in
-  `packages/tests/test_sth_refresh_race.py` ([anchor-instance-count-and-sth-refresh-race]).
+  `packages/tests/test_sth_refresh_race.py`.
 - **Rate limiter**: `_SlidingWindowLimiter` is per-process. For cluster-wide rate limiting, add
   Cloud Armor (`--security-policy`) in front of the Cloud Run service.
 - **Recommended minimum HA config**:

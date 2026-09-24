@@ -24,7 +24,7 @@ This surface:
   * independently verifies the checkpoint's own COSE_Sign1 signature
     server-side before ever counter-signing -- 401 on failure, never
     appended/counter-signed;
-  * is CHECKPOINT-AWARE (stage 2, [capsule-anchor-checkpoint-aware-witness]):
+  * is CHECKPOINT-AWARE (stage 2):
     inclusion verified under the accepted witness key, the receipt signs the
     log root plus a signed `iat` + `grade`
     ([witness-receipt-signed-time-and-grade]). A checkpoint WITHOUT a

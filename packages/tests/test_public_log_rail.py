@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Wiring-level tests for [capsule-anchor-rekor-rail] step 1-5: app.py
+"""Wiring-level tests for the public-log rail: app.py
 config/startup, the scheduled publisher's dedup + failure isolation +
 degraded-health, the ``/checkpoints`` stamp's ``public_log`` field, the
 COSE receipt's UNPROTECTED-header-only augmentation, and the surfacing
@@ -248,7 +248,7 @@ class TestHealthDegraded:
 
 
 class TestCheckpointStampAugmentation:
-    """The [capsule-anchor-rekor-rail] step 5 wiring: a checkpoint stamp
+    """The checkpoint-stamp augmentation wiring: a checkpoint stamp
     carries ``public_log`` only once a Rekor publication covers its
     tree_size, and the COSE receipt's UNPROTECTED header (label 397) carries
     the same evidence -- never the protected header."""

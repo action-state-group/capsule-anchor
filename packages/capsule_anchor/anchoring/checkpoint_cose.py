@@ -113,8 +113,7 @@ def _decode_consistency_proof(raw: object) -> ConsistencyProof:
     boundary discipline: decode structurally from what a stranger's bytes
     actually contain, never trust a co-deployed library's parse of them.
     Only the pure verification MATH (``cll.checkpoint.core.verify_consistency``)
-    is imported -- the witness never builds trees, per the ruling
-    [capsule-anchor-checkpoint-aware-witness].
+    is imported -- the witness never builds trees.
 
     Raises ``NotACheckpointError`` for anything structurally invalid.
     """
