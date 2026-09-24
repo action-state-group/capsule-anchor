@@ -1,6 +1,6 @@
 # Real end-to-end countersign round trip — 2026-09-17
 
-[countersign-whole-bundle-shape]'s acceptance proof: a REAL Evidence Bundle, built
+Acceptance proof: a REAL Evidence Bundle, built
 by `capsulectl`'s own `AssembleBundle` code path, submitted over a real HTTP request
 (`buildCountersignSubmission` + `requestCountersignatures`, the exact functions
 `capsulectl countersign request` uses) to a LIVE, running instance of this

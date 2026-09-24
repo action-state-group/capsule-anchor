@@ -2,7 +2,7 @@
 independently authenticated -> bundle renders witnessed; unknown signer ->
 unresolved signer -- plus the other three states. Directory resolution is by
 ``signer.key_id`` (full 64-hex), matching ``capsule-cli``'s Go verifier --
-reconciled here per [countersign-whole-bundle-shape] (this module previously
+reconciled here (this module previously
 resolved by ``signer.id``, a real cross-implementation divergence)."""
 
 from __future__ import annotations

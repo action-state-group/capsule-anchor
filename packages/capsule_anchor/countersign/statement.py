@@ -29,7 +29,7 @@ class Scope(BaseModel):
 
 
 class Statement(BaseModel):
-    """No ``profile`` field ([countersign-whole-bundle-shape], found via the
+    """No ``profile`` field (found via the
     live request-path round trip): a prior revision carried one, but
     ``capsulectl``'s Go ``CountersignStatement`` struct does not declare it,
     and the CLI's real request path decodes with

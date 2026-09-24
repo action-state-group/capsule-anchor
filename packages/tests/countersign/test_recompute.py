@@ -64,7 +64,7 @@ def test_statement_scope_mirrors_request_not_bundle(valid_bundle_raw):
 
 
 def test_statement_carries_no_profile_field_on_the_wire(valid_bundle_raw):
-    """[countersign-whole-bundle-shape]: capsulectl's Go CountersignStatement
+    """capsulectl's Go CountersignStatement
     struct has no profile field, and the real request path decodes with
     DisallowUnknownFields() -- an extra field here is a hard decode failure
     for a genuine capsulectl client. Never re-add one."""
@@ -76,7 +76,7 @@ def test_statement_carries_no_profile_field_on_the_wire(valid_bundle_raw):
 
 
 def test_wire_dict_strips_fields_capsule_cli_has_no_struct_field_for(valid_bundle_raw):
-    """[countersign-whole-bundle-shape], found by the live request-path round
+    """Found by the live request-path round
     trip: capsulectl's Go CountersignStatement/CountersignCheck structs are
     {checks:[{name,result}], recomputed_at, scope} only -- no exclusions, no
     per-check detail, no profile. The real request path's strict decode
