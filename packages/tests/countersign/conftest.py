@@ -9,7 +9,7 @@ primitives ``checkpointed-local-log`` ships and
 ``agent_action_capsule.bundle.verify_bundle`` verifies against) -- not the
 retired ad-hoc bundle model's hand-typed stand-ins. This is deliberate: a
 fixture that only looks like a bundle can hide exactly the kind of shape
-divergence [countersign-whole-bundle-shape] exists to fix.
+divergence this suite exists to fix.
 """
 
 from __future__ import annotations

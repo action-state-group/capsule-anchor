@@ -1,5 +1,5 @@
 """The five generic checks, recomputed over the canonical v2 Evidence
-Bundle. Three of the five ([countersign-whole-bundle-shape]) always read
+Bundle. Three of the five always read
 ``not present`` for a v2 bundle -- the wire simply carries no checkpoint
 history, no attestation window, and no per-record signer-key field for them
 to operate on. ``range_membership`` delegates to the neutral library's real

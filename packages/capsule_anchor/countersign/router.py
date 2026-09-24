@@ -78,7 +78,7 @@ class CountersignRequest(BaseModel):
     ``profile_id`` is optional and, as of the current ``capsulectl``
     ``countersignSubmission`` wire shape, never actually sent -- that struct
     has no ``profile_id`` field at all (verified against a real
-    ``capsulectl``-built submission, [countersign-whole-bundle-shape]). A
+    ``capsulectl``-built submission). A
     submission that never names one gets the five generic checks only
     (``NullPolicyModule`` -- no profile-specific coverage, never a refusal);
     a submission that DOES name one must have it registered, or the

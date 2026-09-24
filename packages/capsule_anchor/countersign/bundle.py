@@ -11,7 +11,7 @@ the donated spec's own bundle shape, codec'd and verified by the neutral
 ``agent_action_capsule.bundle`` reference library (never reimplemented here:
 a second JCS/MMR implementation in this repo is exactly the divergence that
 made the prior ad-hoc bundle model reject 100% of ``capsulectl``'s real
-output -- see [countersign-whole-bundle-shape]). This module refuses
+output). This module refuses
 (``BundleRefused``) anything that does not parse into a well-formed v2
 bundle -- INCLUDING, always, a bundle that is not payload-free.
 """

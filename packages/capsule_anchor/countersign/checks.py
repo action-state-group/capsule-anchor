@@ -5,7 +5,7 @@ policy module contributes additional, kind-specific checks alongside them
 ``CheckResult`` out, never a side effect.
 
 Recomputed over the canonical v2 Evidence Bundle
-([countersign-whole-bundle-shape]): three of the five generic checks were
+— three of the five generic checks were
 designed around fields the ad-hoc bundle model invented
 (``checkpoints[]`` history, a declared ``period``, per-record
 ``signer_key_id``) that the donated wire shape simply does not carry -- a v2
