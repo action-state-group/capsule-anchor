@@ -8,6 +8,20 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Added
 
+- **PyPI publish workflow (`.github/workflows/release.yml`)**: OIDC trusted-publisher
+  publish on `release: published` — no PyPI token stored in the repo. `build`
+  (sdist+wheel, `twine check`) runs as a dry run on every push/PR touching packaging
+  and on manual `workflow_dispatch`; the `publish` job that actually uploads is gated
+  to a real GitHub release only. `capsule-anchor` was declaring a console script in
+  `pyproject.toml` with no path to PyPI, so `pip install capsule-anchor` 404'd
+  (FDE finding, multi-anchor-receipt-demo). The one-time PyPI trusted-publisher
+  config and the first release remain Steven's.
+- **`clean-room-install` CI workflow**: builds the wheel, installs it into a fresh
+  venv (no source checkout, no editable install), and runs the `capsule-anchor`
+  console script against `/health` — guards against a built wheel that is missing
+  the entry point or a transitive dependency, which an editable-install test run
+  (`python.yml`) cannot catch.
+
 - **Public-log rail: publish this witness's own STHs to Sigstore Rekor
   (`public_log/`, off by default via `CAPSULE_ANCHOR_PUBLIC_LOG=rekor|none`)**: a
   scheduled background publisher (default every 300s, never inline on
