@@ -25,7 +25,7 @@ All backends implement the same interface:
   get_public_log_receipts_since / get_public_log_receipt_covering / put_public_log_failure
   close
 
-Retention (see [anchor-retention-posture-and-policy]): ``put_sth`` persists every
+Retention: ``put_sth`` persists every
 signed root into an indefinitely-retained HISTORY (``get_sth_at``), independent of
 ``CAPSULE_ANCHOR_ENTRY_RETENTION``. That knob governs only
 ``prune_statements_older_than`` -- the ``submitted_statements`` receipt CACHE (the
@@ -420,8 +420,8 @@ class SqliteLogStore:
                 self._conn.execute(
                     "ALTER TABLE signed_tree_heads ADD COLUMN ts_epoch_us INTEGER"
                 )
-            # [anchor-retention-posture-and-policy]: indefinitely-retained root
-            # HISTORY, independent of the singleton "latest" row above and of
+            # Indefinitely-retained root HISTORY, independent of the singleton
+            # "latest" row above and of
             # CAPSULE_ANCHOR_ENTRY_RETENTION. One row per tree_size an STH was
             # ever signed at; only ever INSERTed, never UPDATEd or DELETEd --
             # this is the small, forever-kept half of the asymmetric trade
@@ -1135,8 +1135,8 @@ class PostgresLogStore:
             self._conn.execute(
                 "ALTER TABLE signed_tree_heads ADD COLUMN IF NOT EXISTS ts_epoch_us BIGINT"
             )
-            # [anchor-retention-posture-and-policy]: indefinitely-retained root
-            # HISTORY -- see the matching comment on SqliteLogStore._init_schema.
+            # Indefinitely-retained root HISTORY -- see the matching comment
+            # on SqliteLogStore._init_schema.
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS signed_tree_head_history (
                     tree_size   BIGINT PRIMARY KEY,

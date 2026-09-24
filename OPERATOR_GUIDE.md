@@ -409,9 +409,12 @@ touches.
 by `entry_hash`. Historically this witness kept every entry forever and
 persisted only a SINGLE latest Signed Tree Head — the expensive thing was
 kept forever and the cheap thing was not retained at all. This inverts that:
-`signed_tree_head_history` retains every signed root forever (small); entry
+`signed_tree_head_history` retains every signed root indefinitely (small); entry
 retention — meaning the `submitted_statements` re-issue cache — is now
-configurable via `CAPSULE_ANCHOR_ENTRY_RETENTION`.
+configurable via `CAPSULE_ANCHOR_ENTRY_RETENTION`. Indefinite root retention
+means a receipt can always be checked against the root it was issued under —
+it does not mean the receipt verifies forever: that also depends on the
+signing key staying published (see **Key rotation** below).
 
 **What pruning does and does not touch.** Setting `CAPSULE_ANCHOR_ENTRY_RETENTION`
 to a number of seconds deletes `submitted_statements` rows older than that
@@ -422,8 +425,11 @@ tree for every future proof, not just old ones), `signed_tree_head_history`,
 or `checkpoint_equivocations`. **What you give up:** `GET /v1/inclusion/{capsule_id}`
 and any other re-issue lookup for a pruned entry returns 404 instead of the
 cached receipt — the ORIGINAL receipt, already handed to the holder at
-registration time, is completely unaffected and remains independently
-verifiable forever, per §5. A resubmission of the exact same statement after
+registration time, is completely unaffected by pruning. It remains
+independently verifiable exactly as described under **Key rotation** below:
+against the retained root, for as long as the signing key that issued it
+remains published — pruning the re-issue cache changes none of that. A
+resubmission of the exact same statement after
 its cache row was pruned is treated as new (a fresh log entry, a fresh
 receipt) rather than an idempotent cache hit — a policy tradeoff, not
 corruption; both entries verify.

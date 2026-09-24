@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Entry-retention tests [anchor-retention-posture-and-policy].
+"""Entry-retention tests.
 
 Covers:
 1. Config parsing (``CAPSULE_ANCHOR_ENTRY_RETENTION``) -- unlimited default,
    fail-closed on a malformed value.
 2. Default is a no-op -- upgrading to this code changes nothing until an
    operator opts in.
-3. THE negative the task requires: entries aged out -> an old receipt still
+3. THE key negative case: entries aged out -> an old receipt still
    verifies against a RETAINED root. Both halves shown (pruning actually
    happened; the receipt survives it anyway), each with its mutant
-   demonstrated failing per QUEUE_PROTOCOL §7.
+   demonstrated failing.
 4. Root history (``get_sth_at``) survives a simulated restart, same as the
    rest of the durable state.
 5. ``/health`` reports the declared posture.

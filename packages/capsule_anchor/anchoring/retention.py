@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Entry-retention policy — the configurable half of the asymmetric retention trade.
 
-[anchor-retention-posture-and-policy]: roots (``signed_tree_heads`` /
+Roots (``signed_tree_heads`` /
 ``signed_tree_head_history``) are retained indefinitely no matter what this
 module says — see ``store.py``'s module docstring. This module governs only
 the receipt CACHE (``submitted_statements``, the "re-issue a lost proof"
