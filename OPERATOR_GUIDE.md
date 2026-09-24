@@ -137,8 +137,11 @@ repo, and not in a shell history file.
 **Key identity.** `key_id` is the first 16 hex characters of `sha256(pubkey_bytes)`
 — derived the same way wherever it appears (`/health`, `/anchor/authority-pubkey`,
 `/.well-known/did.json`, and every JSON `Signature` object). Note where it does
-*not* appear: a COSE Receipt carries no `kid`, so a verifier resolves the key from
-one of those surfaces rather than from the receipt. See **Key rotation** below.
+*not* appear as a COSE header: a COSE Receipt carries no `kid` (4), so a verifier
+generally resolves the key from one of those surfaces rather than from the receipt
+— except a continuity-witnessed receipt (grade `continuity-witnessed`), whose
+`-65538` continuity assertion embeds `witness_key_id` directly. See **Key
+rotation** below.
 
 **`did:web` identity.** The DID document at `/.well-known/did.json` is derived from
 `CAPSULE_ANCHOR_PUBLIC_HOST` at request time — never hard-coded. When you host an
@@ -444,8 +447,8 @@ indefinitely and only (1), the convenience cache, is ever configurable.
 
 ### Key rotation
 
-Rotation does not invalidate historical receipts — but **a COSE Receipt does not
-identify the key that signed it**, so publishing retired keys is not optional.
+Rotation does not invalidate historical receipts — but **a COSE Receipt carries no
+`kid`**, so publishing retired keys is not optional.
 
 A COSE Receipt's protected header carries `alg` (1) and `vds` (395), plus, when
 present, the CWT claims map (15, holding `iat`), the witness grade (-65537) and the
@@ -454,6 +457,12 @@ therefore resolves the witness key out of band — `GET /.well-known/did.json` o
 `GET /anchor/authority-pubkey` — and, across a rotation boundary, simply tries the
 published keys until one verifies. Receipts issued before a rotation stay
 verifiable only for as long as the retired public key remains published.
+The one exception: a continuity-witnessed receipt's `-65538` continuity assertion
+carries `witness_key_id` (see `service.py`'s `build_cose_receipt` caller), so a
+verifier holding one of those does not need to try multiple published keys — but
+that field is a value inside the continuity assertion's own map, not the COSE
+`kid` (4) label, and it is absent from every receipt that isn't graded
+`continuity-witnessed`.
 
 The JSON `Signature` object is a different surface and does the opposite: STHs,
 `/anchor/anchor` receipts and transparency-log entries each carry `key_id` (the
@@ -477,8 +486,12 @@ generalise from those to COSE Receipts.
      --project=YOUR_PROJECT_ID
    ```
    STHs and `Signature` objects produced after this redeploy carry the new
-   `key_id`. COSE Receipts carry no key identifier either side of the rotation —
-   which key signed one is determined only by which published key verifies it.
+   `key_id`. COSE Receipts carry no COSE `kid` either side of the rotation —
+   which key signed one is determined only by which published key verifies it
+   (continuity-witnessed receipts are the exception: their `-65538` assertion
+   names `witness_key_id` directly, so which key signed one is known without
+   trying candidates — but a verifier still needs that key published to
+   verify the signature itself).
 
 3. Publish the old public key alongside the new one. After rotation,
    `GET /.well-known/did.json` returns only the new key. Verifiers that resolve the

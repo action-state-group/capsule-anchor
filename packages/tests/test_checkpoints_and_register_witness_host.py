@@ -54,8 +54,15 @@ import time
 
 import cbor2
 import pytest
-from capsule_anchor.anchoring.service import _COSE_GRADE_LABEL, _CWT_IAT
+from capsule_anchor.anchoring.service import (
+    CONTINUITY_GRADE_WITNESSED,
+    _COSE_CONTINUITY_LABEL,
+    _COSE_GRADE_LABEL,
+    _CWT_IAT,
+)
 from capsule_anchor.app import create_app
+from cll.checkpoint import core
+from cll.checkpoint.store import MemoryNodeStore
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat
 from fastapi.testclient import TestClient
@@ -301,7 +308,7 @@ def test_enrolled_checkpoint_receipt_signs_grade(client, agentrust_key):
 
 
 def test_receipt_protected_header_never_carries_a_kid(client, key, agentrust_key):
-    """A COSE Receipt does NOT identify the key that signed it.
+    """A COSE Receipt never carries a COSE ``kid`` (4).
 
     ``build_cose_receipt`` writes only ``alg`` (1), ``vds`` (395) and the
     optional ``iat``/grade/continuity labels -- never a COSE ``kid`` (4).
@@ -312,6 +319,13 @@ def test_receipt_protected_header_never_carries_a_kid(client, key, agentrust_key
     publishing it silently breaks every historical receipt. Both the
     enrolled (grade-bearing) and non-enrolled shapes are checked -- adding a
     protected field must never smuggle a ``kid`` in with it.
+
+    This does NOT mean a receipt never identifies its signer at all: a
+    continuity-witnessed receipt (grade ``continuity-witnessed``) carries
+    ``witness_key_id`` inside its ``-65538`` continuity assertion -- a value
+    in that map, not a COSE ``kid`` (4) header label. OPERATOR_GUIDE's
+    follow-up correction (over-generalizing "no `kid`" into "never
+    identifies the key that signed it") is pinned by the third case below.
     """
     cose_label_kid = 4
 
@@ -330,6 +344,45 @@ def test_receipt_protected_header_never_carries_a_kid(client, key, agentrust_key
     enrolled = _receipt_protected_header(body["receipt_b64"])
     assert enrolled[_COSE_GRADE_LABEL] == body["grade"]  # grade IS there
     assert cose_label_kid not in enrolled                # kid is NOT
+
+    # -65538 (continuity-witnessed): the one shape whose receipt DOES name
+    # its signing key -- via `witness_key_id` inside the continuity
+    # assertion, never via a COSE `kid`. Needs a REAL, independently
+    # checkable consistency proof (same discipline as
+    # test_checkpoint_continuity.py) -- a witnessed grade requires one.
+    store = MemoryNodeStore()
+    core.add_leaf(store, core.leaf_hash(hashlib.sha256(b"continuity-kid-leaf-1").digest()))
+    size1 = store.size()
+    peaks1 = [store.node(p) for p in core.peaks(size1)]
+    status, body = _post_checkpoint(
+        client, _checkpoint_cose(key, log_id="log-continuity-kid", mmr_size=size1,
+                                 new_peaks=peaks1))
+    assert status == 200, body
+
+    core.add_leaf(store, core.leaf_hash(hashlib.sha256(b"continuity-kid-leaf-2").digest()))
+    size2 = store.size()
+    peaks2 = [store.node(p) for p in core.peaks(size2)]
+    proof = core.consistency_proof(store, size1, size2)
+    claims = _checkpoint_claims(
+        mmr_size=size2, new_peaks=peaks2, prev_size=size1, prev_peaks=peaks1,
+        issued_at="2026-08-26T00:05:00Z",
+    )
+    claims["consistency_proof"] = {
+        "size_a": proof.size_a,
+        "size_b": proof.size_b,
+        "old_peaks": [bytes.fromhex(h) for h in proof.old_peaks],
+        "witness": [[bytes.fromhex(h) for h in w] for w in proof.witness],
+        "new_peaks": [bytes.fromhex(h) for h in proof.new_peaks],
+    }
+    status, body = _post_checkpoint(
+        client, _checkpoint_cose(key, log_id="log-continuity-kid", mmr_size=size2, claims=claims))
+    assert status == 200, body
+    assert body["continuity_grade"] == CONTINUITY_GRADE_WITNESSED
+    continuity = _receipt_protected_header(body["receipt_b64"])
+    assert cose_label_kid not in continuity  # still no COSE kid (4)
+    assertion = continuity[_COSE_CONTINUITY_LABEL]
+    expected_key_id = client.get("/anchor/authority-pubkey").json()["key_id"]
+    assert assertion["witness_key_id"] == expected_key_id  # but the witness key IS named
 
 
 def test_resubmitting_the_same_checkpoint_is_idempotent(client, key):
