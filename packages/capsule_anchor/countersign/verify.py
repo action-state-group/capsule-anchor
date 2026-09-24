@@ -26,7 +26,7 @@ Five states:
 Directory resolution is BY ``signer.key_id`` (a full 64-hex Ed25519 public
 key), never by ``signer.id`` -- matching ``capsule-cli``'s Go verifier
 (``resolveSigner`` matches a directory row's ``key_ids[]``), reconciled here
-per [countersign-whole-bundle-shape]: this module previously resolved by
+— this module previously resolved by
 ``signer.id``, a divergence from the Go side that a real cross-implementation
 directory lookup would have silently mismatched.
 """

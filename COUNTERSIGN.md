@@ -15,7 +15,7 @@ module never invents its own bundle model: the digest (JCS-canonical,
 verification (graph closure, CLL #13 range proof, per-record inclusion proof) are
 computed by the neutral `agent_action_capsule.bundle` reference library, the same one
 `capsulectl`'s Go verifier agrees with — never reimplemented here
-([countersign-whole-bundle-shape]; a prior ad-hoc bundle model, built ahead of this
+(a prior ad-hoc bundle model, built ahead of this
 reconciliation, rejected 100% of `capsulectl`'s real output).
 
 ---
@@ -71,7 +71,7 @@ A statement never rolls these into an aggregate. Each check's result stands alon
 next to its own name and a `detail` string naming the thing that makes it true --
 always populated internally (every check function, every test). **The wire
 projection in `countersignatures[].statement.checks[]` currently carries only
-`{name, result}`, no `detail`** ([countersign-whole-bundle-shape], found via the live
+`{name, result}`, no `detail`** (found via the live
 request-path round trip): `capsulectl`'s Go `CountersignCheck` struct declares only
 `Name`/`Result`, and the CLI's real request path decodes with
 `DisallowUnknownFields()` -- an extra `detail` key there is a hard decode failure,
@@ -90,7 +90,7 @@ the full `CheckResult.detail` on every check.
 | Key hygiene | — | always `not present`: an AAC Capsule record carries no per-record signer-key field for this check to recompute rotation against |
 | Profile conformance | `action_type` present across records vs. the profile's policy-module coverage | every `action_type` has a policy-module check, or reads `not checked` |
 
-**Scope, stated plainly ([countersign-whole-bundle-shape]):** three of the five
+**Scope, stated plainly:** three of the five
 generic checks were originally designed around fields an ad-hoc, pre-reconciliation
 bundle model invented (a `checkpoints[]` history, a declared `period`, a per-record
 `signer_key_id`) that the donated wire shape simply does not carry. Each reads
@@ -212,7 +212,7 @@ There is no `period` field: the v2 bundle declares no attestation window (the Go
 wire's own `CountersignScope.Period` is already optional/`omitempty` for exactly this
 reason — this instance simply never emits one).
 
-**No `profile` field, ever ([countersign-whole-bundle-shape], found via the live
+**No `profile` field, ever (found via the live
 request-path round trip).** A prior revision carried one; `capsulectl`'s Go
 `CountersignStatement` struct does not declare it, and the CLI's real request path
 (`countersign request`, not `countersign verify`) decodes with
@@ -284,7 +284,7 @@ one.
 ## 10. Directory row (for a countersigner directory, if one is consulted)
 
 **Resolution is by `signer.key_id`, never `signer.id`** — reconciled here per
-[countersign-whole-bundle-shape]: this module previously resolved a directory by the
+This module previously resolved a directory by the
 signer's `did:web` identity, a divergence from `capsule-cli`'s Go verifier
 (`resolveSigner` matches a directory row's `key_ids[]`) that a real
 cross-implementation lookup would have silently mismatched. A verifier resolving
