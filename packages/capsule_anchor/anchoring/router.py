@@ -627,9 +627,12 @@ def get_router() -> APIRouter:
         ``alg`` (1), ``vds`` (395) and the optional ``iat``/grade/continuity
         labels into the protected header -- never a COSE ``kid`` (4). A relying
         party verifying a COSE Receipt resolves the key from HERE (or from
-        ``/.well-known/did.json``), never from the receipt itself, and across a
-        rotation boundary tries each published key. Do not describe this
-        endpoint as returning "the key_id on every receipt".
+        ``/.well-known/did.json``) and, across a rotation boundary, tries each
+        published key -- EXCEPT a continuity-witnessed receipt (grade
+        ``continuity-witnessed``), whose ``-65538`` continuity assertion embeds
+        ``witness_key_id`` naming the signing key directly (see ``service.py``'s
+        continuity-assertion construction). Do not describe this endpoint as
+        returning "the key_id on every receipt".
 
         The monitor provisions this out-of-band and uses it to independently
         verify every STH signature -- this is what decouples the monitor from
