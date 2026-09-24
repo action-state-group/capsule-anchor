@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Four-case refusal/acceptance transcript against the trace-registry/v1 witness
-surface, for [witness-refusal-session-trace-registry-53].
+surface.
 
 Independently reimplements the JSON and COSE checkpoint wire shapes rather than
 importing capsule-emit or the test suite's helpers directly, so this script
@@ -9,15 +9,22 @@ stranger's bytes -- matching packages/tests/test_checkpoints_and_register_witnes
 own stated rationale for doing the same.
 
 Two modes:
-  --target local   Run against an in-process FastAPI TestClient with a
-                    locally-enrolled trace-registry/v1 key (the "staging" dry
-                    run gate -- never touches the network).
+  --target local (default)   Run against an in-process FastAPI TestClient with
+                    a locally-enrolled trace-registry/v1 key (the "staging"
+                    dry run gate -- never touches the network).
   --target live     Run against https://anchor.agentactioncapsule.org (no local
                     enrollment possible or needed -- we are an outside caller).
+                    Requires --i-understand-this-writes-to-production: cases 2
+                    and 4 below are real POSTs that permanently add two
+                    entries to the production public log. log_entries is
+                    never pruned -- there is no delete/undo, so every live run
+                    grows the real tree forever. A fresh, randomized test
+                    log_id is generated per run (see make_test_log_id) so a
+                    rerun can never collide with a prior run's entries.
 
-Only case 2 and case 4 write anything (both against an obviously-scoped test
-log_id, never trace-registry/v1). Cases 1 and 3 are refusals; nothing is
-mutated by a refused submission.
+Only case 2 and case 4 write anything (both against an obviously-scoped,
+freshly-generated test log_id, never trace-registry/v1). Cases 1 and 3 are
+refusals; nothing is mutated by a refused submission.
 """
 from __future__ import annotations
 
@@ -25,6 +32,7 @@ import argparse
 import base64
 import hashlib
 import json
+import secrets
 from datetime import datetime, timezone
 
 import cbor2
@@ -34,7 +42,6 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 
 LIVE_BASE = "https://anchor.agentactioncapsule.org"
 TRACE_REGISTRY_LOG_ID = "trace-registry/v1"
-TEST_LOG_ID = "asg-refusal-check-2026-09-23/v1"
 
 JSON_CONTENT_TYPE = "application/cll-checkpoint+json"
 COSE_CONTENT_TYPE = "application/cll-checkpoint+cbor"
@@ -42,6 +49,20 @@ COSE_CONTENT_TYPE = "application/cll-checkpoint+cbor"
 _CWT_IAT_LABEL = 6
 _CWT_CLAIMS_HDR = 15
 _GRADE_LABEL = -65537
+
+
+def make_test_log_id() -> str:
+    """Fresh, unique test log_id for this run only.
+
+    A fixed date-stamped id collides across same-day reruns against the
+    production public log, which is never pruned -- a collision there is
+    permanent, not a retry-and-move-on situation. Second-resolution timestamp
+    plus a random nonce means every invocation gets its own id, so a rerun
+    can never land on a prior run's entries.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    nonce = secrets.token_hex(4)
+    return f"asg-refusal-check-{ts}-{nonce}/v1"
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +161,10 @@ class LiveTransport:
     def get(self, path: str) -> dict:
         return requests.get(self.base + path, timeout=15).json()
 
+    def exists(self, log_id: str) -> bool:
+        resp = requests.get(self.base + f"/checkpoints/{log_id.replace('/', '%2F')}", timeout=15)
+        return resp.status_code == 200
+
 
 class LocalTransport:
     """Wraps a FastAPI TestClient against this worktree's own app, with
@@ -174,12 +199,16 @@ class LocalTransport:
     def get(self, path: str) -> dict:
         return self.client.get(path).json()
 
+    def exists(self, log_id: str) -> bool:
+        resp = self.client.get(f"/checkpoints/{log_id.replace('/', '%2F')}")
+        return resp.status_code == 200
+
 
 # ---------------------------------------------------------------------------
 # The four cases
 # ---------------------------------------------------------------------------
 
-def run_session(transport, *, label: str) -> dict:
+def run_session(transport, *, label: str, test_log_id: str) -> dict:
     results = {}
     print(f"\n{'=' * 70}\nSESSION: {label}\n{'=' * 70}")
 
@@ -208,8 +237,8 @@ def run_session(transport, *, label: str) -> dict:
     # this case was refused 400, not accepted). So case 2 MUST use COSE, self-signed,
     # self-asserted kid -- exactly test_non_enrolled_log_id_stays_open_even_with_allowlist_configured's shape.
     fresh_key = Ed25519PrivateKey.generate()
-    cose_bytes2 = build_cose_checkpoint(fresh_key, log_id=TEST_LOG_ID, mmr_size=1)
-    print(f"\n--- CASE 2: contrast (unenrolled log_id={TEST_LOG_ID}, COSE self-asserted kid) ---")
+    cose_bytes2 = build_cose_checkpoint(fresh_key, log_id=test_log_id, mmr_size=1)
+    print(f"\n--- CASE 2: contrast (unenrolled log_id={test_log_id}, COSE self-asserted kid) ---")
     print(f"REQUEST POST /checkpoints Content-Type: {COSE_CONTENT_TYPE}\nBODY: <{len(cose_bytes2)} raw COSE bytes, kid={fresh_key.public_key().public_bytes_raw().hex()}>")
     status2, body2, _ = transport.post("/checkpoints", content=cose_bytes2, content_type=COSE_CONTENT_TYPE)
     print(f"RESPONSE status={status2} body={json.dumps(body2, indent=2)}")
@@ -240,8 +269,8 @@ def run_session(transport, *, label: str) -> dict:
     # Case 4: fresh receipt -- another accepted checkpoint under the test log_id
     # (COSE, same reasoning as case 2), decode protected header (iat + grade).
     fresh_key2 = Ed25519PrivateKey.generate()
-    cose_bytes4 = build_cose_checkpoint(fresh_key2, log_id=TEST_LOG_ID, mmr_size=2)
-    print(f"\n--- CASE 4: fresh receipt (log_id={TEST_LOG_ID}, mmr_size=2, COSE) ---")
+    cose_bytes4 = build_cose_checkpoint(fresh_key2, log_id=test_log_id, mmr_size=2)
+    print(f"\n--- CASE 4: fresh receipt (log_id={test_log_id}, mmr_size=2, COSE) ---")
     print(f"REQUEST POST /checkpoints Content-Type: {COSE_CONTENT_TYPE}\nBODY: <{len(cose_bytes4)} raw COSE bytes, kid={fresh_key2.public_key().public_bytes_raw().hex()}>")
     status4, body4, _ = transport.post("/checkpoints", content=cose_bytes4, content_type=COSE_CONTENT_TYPE)
     print(f"RESPONSE status={status4} body={json.dumps(body4, indent=2)}")
@@ -297,18 +326,56 @@ def run_session(transport, *, label: str) -> dict:
     return results
 
 
+def guard_log_id_unused(transport, log_id: str) -> None:
+    """Refuse to proceed if this run's generated test log_id already has a
+    witnessed checkpoint. Belt-and-suspenders on top of make_test_log_id's
+    timestamp+nonce uniqueness -- a live run must never silently land on a
+    prior run's tree position in a log that is never pruned."""
+    if transport.exists(log_id):
+        raise SystemExit(
+            f"refusing to run: log_id {log_id!r} already has a witnessed checkpoint. "
+            "This should not happen with a freshly generated id -- aborting rather than "
+            "risk colliding with a prior run's entry in a log that is never pruned."
+        )
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--target", choices=["local", "live"], required=True)
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--target",
+        choices=["local", "live"],
+        default="local",
+        help="'local' (default): staging dry run against an in-worktree TestClient, "
+        "never touches the network. 'live': real writes against production -- "
+        "requires --i-understand-this-writes-to-production.",
+    )
+    ap.add_argument(
+        "--i-understand-this-writes-to-production",
+        dest="confirm_production",
+        action="store_true",
+        help="Required with --target live. Every live run POSTs two real, permanent "
+        "entries to the production public log -- log_entries is never pruned, so this "
+        "grows the real tree forever with no delete/undo.",
+    )
     args = ap.parse_args()
+
+    if args.target == "live" and not args.confirm_production:
+        ap.error(
+            "--target live writes two permanent entries to the production public log "
+            "(log_entries is never pruned -- there is no delete/undo). Re-run with "
+            "--i-understand-this-writes-to-production to confirm you intend this."
+        )
+
+    test_log_id = make_test_log_id()
 
     if args.target == "local":
         enrolled_key = Ed25519PrivateKey.generate()
         transport = LocalTransport(enrolled_key)
-        run_session(transport, label="LOCAL DRY RUN (staging gate)")
+        run_session(transport, label="LOCAL DRY RUN (staging gate)", test_log_id=test_log_id)
     else:
         transport = LiveTransport()
-        run_session(transport, label="LIVE anchor.agentactioncapsule.org")
+        guard_log_id_unused(transport, test_log_id)
+        run_session(transport, label="LIVE anchor.agentactioncapsule.org", test_log_id=test_log_id)
 
 
 if __name__ == "__main__":
