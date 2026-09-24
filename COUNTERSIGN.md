@@ -259,8 +259,8 @@ registered in this instance's own log to attach a receipt.
 }
 ```
 
-Per the wire-shape reconciliation with `capsule-cli`'s Go verifier
-(action-state-ops [countersign-engine-in-capsule-anchor]): `key_id` is
+Per the wire-shape reconciliation with `capsule-cli`'s Go verifier,
+`key_id` is
 deliberately NOT this repo's internal, truncated `sha256(pubkey)[:16]`
 identifier used for the STH/receipt signing root elsewhere in this codebase —
 that identifier never appears on this wire. The `type` field the spec's own
