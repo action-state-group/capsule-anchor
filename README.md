@@ -179,8 +179,7 @@ pattern as equivalent to verification under another.
 SPIFFE SVID is the third issuer-binding type alongside did:web and x5chain. The mechanism
 sketch — including how the X.509-SVID chain is carried in `x5chain`, why the SPIFFE ID
 persists across SPIRE-managed short-lived cert rotations, and the representation discipline
-for content-addressing the DER cert bytes — is in the internal design note
-`_work/spiffe-who-binding-note.md` and is expected to land in a dedicated profile spec.
+for content-addressing the DER cert bytes — is deferred to a dedicated profile spec.
 
 ---
 

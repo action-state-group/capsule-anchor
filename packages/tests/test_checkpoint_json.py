@@ -8,7 +8,7 @@ Includes the REAL live checkpoint published by AgenTrust's trace-registry
 (``trace-registry/v1``, mmr_size=1) -- read directly from
 ``agentrust-io/trace-registry`` upstream commit ``55e1270``
 (``registry/2026/09/01.ndjson``'s ``.mmr_checkpoint``), not retyped from
-memory (see ``_ops/QUEUE_PROTOCOL.md`` §7b) -- so this suite proves the
+memory -- so this suite proves the
 parser accepts the bytes their pipeline actually produced, not just a
 synthetic stand-in shaped like them.
 """

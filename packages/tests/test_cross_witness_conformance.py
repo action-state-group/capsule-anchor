@@ -418,8 +418,8 @@ def test_json_bad_signature_fails_named():
 #
 # trace-registry/v1's checkpoint 1 -- LIVE as of 2026-09-01. Read verbatim
 # from agentrust-io/trace-registry upstream commit 55e1270
-# (registry/2026/09/01.ndjson .mmr_checkpoint), never retyped/guessed (see
-# _ops/QUEUE_PROTOCOL.md §7b). This runs the ACTUAL conformance pass against
+# (registry/2026/09/01.ndjson .mmr_checkpoint), never retyped/guessed.
+# This runs the ACTUAL conformance pass against
 # what their pipeline actually published, through the REAL committed
 # allowlist config (not a synthetic one).
 
