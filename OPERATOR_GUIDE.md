@@ -54,7 +54,7 @@ Additional routes available for monitors and legacy callers:
 | `GET`  | `/anchor/consistency-proof` | RFC 6962 consistency proof between two tree sizes |
 | `GET`  | `/anchor/authority-pubkey` | Authority Ed25519 public key (`pubkey_hex` + `key_id`) |
 | `GET`  | `/.well-known/did.json` | Authority key as a DID document (JWK OKP, `did:web:<host>`) |
-| `GET`  | `/health` (or `/healthz`, `/livez`) | Health check — `ok`, `tree_size`, `storage`, `signing_key_source`, `key_id` |
+| `GET`  | `/health` (or `/healthz`, `/livez`) | Health check — `ok`, `tree_size`, `storage`, `signing_key_source`, `key_id`, `entry_retention` |
 | `POST` | `/v1/digest` | Legacy alias of `/register`, kept for existing callers |
 | `POST` | `/transparency/register-statement` | Register a COSE_Sign1 Signed Statement (base64 in JSON envelope) |
 
@@ -69,8 +69,8 @@ tables are:
 
 | Table | Purpose |
 |-------|---------|
-| `log_entries` | Append-only CT log. PK: `log_index BIGINT`. Hash-chained via `prev_log_hash`; per-entry Ed25519 `log_signature` over the tree head. |
-| `submitted_statements` | Idempotent dedup: `entry_hash TEXT PRIMARY KEY` → `receipt BYTEA`, `leaf_index`, `tree_size`. |
+| `log_entries` | Append-only CT log. PK: `log_index BIGINT`. Hash-chained via `prev_log_hash`; per-entry Ed25519 `log_signature` over the tree head. Never pruned by any retention setting — its row count IS `tree_size`. |
+| `submitted_statements` | Idempotent dedup + re-issue cache: `entry_hash TEXT PRIMARY KEY` → `receipt BYTEA`, `leaf_index`, `tree_size`. The ONLY table `CAPSULE_ANCHOR_ENTRY_RETENTION` prunes — see "Retention" below. |
 | `checkpoint_records` | One row per `(log_id, mmr_size)` position ever witnessed. First-seen root wins; a conflicting later root triggers an equivocation record instead. Carries the `continuity_grade` this witness assigned when it was accepted. |
 | `checkpoint_witnesses` | Chain-tip only: the last-ACCEPTED checkpoint per `log_id`. Backs both the legacy `mmr-checkpoint` monotonicity check and stage 2's continuity gate (`POST /checkpoints`, [capsule-anchor-checkpoint-aware-witness]) -- only advanced on `first-seen` or a verified `continuity-witnessed` acceptance, never on a bare `registered` one. |
 | `checkpoint_equivocations` | Fork evidence: appended whenever a different root arrives for an already-witnessed `(log_id, mmr_size)`. Never deleted. |
@@ -78,9 +78,17 @@ tables are:
 | `log_capsule_bindings` | Sidecar: `log_index → capsule_id` binding for the legacy `GET /v1/inclusion/{capsule_id}` resolve. |
 | `subject_index` | Discovery: `(subject, entry_hash)` → `capsule_id_digest`, for `GET /transparency/statements`. |
 | `signed_tree_heads` | Single-row singleton: the latest persisted Signed Tree Head (refreshed every 60 s by a background thread even when no new entries arrive). |
+| `signed_tree_head_history` | One row per `tree_size` an STH was ever signed at. Indefinitely retained, independent of `CAPSULE_ANCHOR_ENTRY_RETENTION` — see "Retention" below. |
 
 Schema version bumps add columns or tables with `ALTER TABLE … ADD COLUMN IF NOT
-EXISTS`; rows are never deleted or updated (append-only log invariant).
+EXISTS`. The append-only invariant is that a row, once written, is never MUTATED —
+`log_entries`, `signed_tree_head_history`, and `checkpoint_equivocations` are also
+never deleted, full stop. `submitted_statements` is the one table this does NOT
+apply to: rows there age out under `CAPSULE_ANCHOR_ENTRY_RETENTION` (still never
+updated in place — a stale row is deleted outright, not mutated). Prior wording
+here said "rows are never deleted or updated" without distinguishing which
+invariant covered which table; that read as an unqualified forever-promise this
+service was not actually keeping any code to back up. See "Retention" below.
 
 Note: there is also a `SqliteLogStore` (single-file, for local durability testing)
 and an `InMemoryLogStore` (volatile, for development only). Use Postgres in
@@ -101,6 +109,8 @@ is missing — never silently degraded.
 | `CAPSULE_ANCHOR_HOST` | No | Bind address (default `0.0.0.0`). |
 | `CAPSULE_ANCHOR_PORT` | No | Bind port (default `8000`). |
 | `CAPSULE_ANCHOR_STH_REFRESH_INTERVAL` | No | Background STH refresh interval in seconds (default `60`). |
+| `CAPSULE_ANCHOR_ENTRY_RETENTION` | No | Entry-retention window: `unlimited` (default) or a positive integer number of seconds. See "Retention" in §4 "Operate". Defaults to today's behavior — unset changes nothing on upgrade. |
+| `CAPSULE_ANCHOR_ENTRY_RETENTION_SWEEP_INTERVAL` | No | Seconds between background retention sweeps (default `3600`). Only read — and only starts a thread — when `CAPSULE_ANCHOR_ENTRY_RETENTION` is set. |
 | `CAPSULE_ANCHOR_CHECKPOINT_SUBMITTERS_FILE` | No | Path to a JSON array of enrolled submitter entries. If absent, the in-package default is used; if empty, all `log_id`s use the open self-asserted-key behavior. |
 | `CAPSULE_ANCHOR_PUBLIC_LOG` | No | `rekor` or `none` (default `none`). Publishes this witness's own STHs to an external public log — see §6 "Plurality" and `docs/architecture/18-public-log-anchor.md`. Refuses to start with `rekor` if the signing key is ephemeral. |
 | `CAPSULE_ANCHOR_REKOR_URL` | No | Rekor instance base URL (default `https://rekor.sigstore.dev`). Only read when `CAPSULE_ANCHOR_PUBLIC_LOG=rekor`. |
@@ -290,6 +300,9 @@ The `/health` endpoint (aliases: `/healthz`, `/livez`) returns a JSON object wit
 - `key_id` — first 16 hex chars of `sha256(pubkey_bytes)`.
 - `tree_size` — current number of entries in the CT log.
 - `latest_sth_timestamp` and `latest_root_hash` — present when `tree_size > 0`.
+- `entry_retention` — the declared retention posture: `"unlimited"` or `"<seconds>s"`.
+  See "Retention" below. Always present — check it before depending on this witness
+  for re-issuing a lost receipt.
 
 A witness that stops advancing `latest_sth_timestamp` for longer than your Maximum
 Merge Delay (MMD) threshold looks identical to a dead witness to any monitor that
@@ -370,6 +383,64 @@ before cutting over:
 Once verification passes, cut over by updating `CAPSULE_ANCHOR_DATABASE_URL` in
 your secrets manager to point at the new instance, then redeploy (source redeploy
 picks up the new secret automatically if you use `--set-secrets … :latest`).
+
+### Retention
+
+**Three retentions, not one.** A receipt is self-contained bytes the HOLDER
+keeps — verifying it needs the receipt, the entry hash, the audit path, and
+this witness's public key, never this witness itself online or holding
+anything (see §5 "Verify — offline"). What this witness's OWN retention
+actually governs is narrower than "how long is my data safe":
+
+1. **Re-issuing a receipt someone lost** — convenience only. Backed by the
+   `submitted_statements` cache, keyed by `entry_hash`.
+2. **Consistency from an old entry to the present** — the load-bearing
+   property. Backed by `signed_tree_head_history`, retained indefinitely,
+   independent of (1).
+3. **Equivocation/fork detection over time** — backed by
+   `checkpoint_equivocations`, retained indefinitely, independent of (1).
+
+Only (2) and (3) are load-bearing. (1) is the only one `CAPSULE_ANCHOR_ENTRY_RETENTION`
+touches.
+
+**The asymmetric trade.** Roots are `O(checkpoints)` — small. Entries are
+`O(entries)` — the thing that actually grows without bound, and specifically
+`submitted_statements`, which stores every issued receipt as `BYTEA` keyed
+by `entry_hash`. Historically this witness kept every entry forever and
+persisted only a SINGLE latest Signed Tree Head — the expensive thing was
+kept forever and the cheap thing was not retained at all. This inverts that:
+`signed_tree_head_history` retains every signed root forever (small); entry
+retention — meaning the `submitted_statements` re-issue cache — is now
+configurable via `CAPSULE_ANCHOR_ENTRY_RETENTION`.
+
+**What pruning does and does not touch.** Setting `CAPSULE_ANCHOR_ENTRY_RETENTION`
+to a number of seconds deletes `submitted_statements` rows older than that
+window (a background thread sweeps every `CAPSULE_ANCHOR_ENTRY_RETENTION_SWEEP_INTERVAL`
+seconds, default 3600). It NEVER touches `log_entries` (the append-only log
+whose row count IS `tree_size` — partial deletion there would corrupt the CT
+tree for every future proof, not just old ones), `signed_tree_head_history`,
+or `checkpoint_equivocations`. **What you give up:** `GET /v1/inclusion/{capsule_id}`
+and any other re-issue lookup for a pruned entry returns 404 instead of the
+cached receipt — the ORIGINAL receipt, already handed to the holder at
+registration time, is completely unaffected and remains independently
+verifiable forever, per §5. A resubmission of the exact same statement after
+its cache row was pruned is treated as new (a fresh log entry, a fresh
+receipt) rather than an idempotent cache hit — a policy tradeoff, not
+corruption; both entries verify.
+
+**Default is unlimited.** Unset — or explicitly `CAPSULE_ANCHOR_ENTRY_RETENTION=unlimited`
+— means nothing is ever pruned, byte-identical to every prior release.
+Upgrading to this code changes nothing until you opt in.
+
+**Do not copy CCF's retention-relaxation conclusion.** Microsoft's CCF-based
+transparency services can relax retention because hardware attestation plus
+reproducible, auditable code measurements give a verifier a substitute for
+re-deriving the log's own history — the hardware vouches for what the code
+did even after the data is gone. This witness has no confidential-computing
+attestation. Taking CCF's retention-relaxation conclusion without that
+substitute would leave a relying party with NEITHER property: no attestation
+AND no re-derivable history. That is why (2) and (3) above are retained
+indefinitely and only (1), the convenience cache, is ever configurable.
 
 ### Key rotation
 
