@@ -125,9 +125,10 @@ Store it in a secrets manager, not in the image, not in a config file committed 
 repo, and not in a shell history file.
 
 **Key identity.** `key_id` is the first 16 hex characters of `sha256(pubkey_bytes)`
-— derived the same way at every surface (`/health`, `/anchor/authority-pubkey`,
-`/.well-known/did.json`, and every issued signature). This is what a verifier uses
-to look up the correct key when verifying a receipt.
+— derived the same way wherever it appears (`/health`, `/anchor/authority-pubkey`,
+`/.well-known/did.json`, and every JSON `Signature` object). Note where it does
+*not* appear: a COSE Receipt carries no `kid`, so a verifier resolves the key from
+one of those surfaces rather than from the receipt. See **Key rotation** below.
 
 **`did:web` identity.** The DID document at `/.well-known/did.json` is derived from
 `CAPSULE_ANCHOR_PUBLIC_HOST` at request time — never hard-coded. When you host an
@@ -372,9 +373,21 @@ picks up the new secret automatically if you use `--set-secrets … :latest`).
 
 ### Key rotation
 
-Rotation does not invalidate historical receipts. Every receipt carries a `key_id`
-that a verifier uses to look up the correct key. Receipts issued before a rotation
-remain verifiable as long as the old public key is known.
+Rotation does not invalidate historical receipts — but **a COSE Receipt does not
+identify the key that signed it**, so publishing retired keys is not optional.
+
+A COSE Receipt's protected header carries `alg` (1) and `vds` (395), plus, when
+present, the CWT claims map (15, holding `iat`), the witness grade (-65537) and the
+continuity assertion (-65538). It carries **no COSE `kid` (4)**. A verifier
+therefore resolves the witness key out of band — `GET /.well-known/did.json` or
+`GET /anchor/authority-pubkey` — and, across a rotation boundary, simply tries the
+published keys until one verifies. Receipts issued before a rotation stay
+verifiable only for as long as the retired public key remains published.
+
+The JSON `Signature` object is a different surface and does the opposite: STHs,
+`/anchor/anchor` receipts and transparency-log entries each carry `key_id` (the
+first 16 hex chars of `sha256(pubkey)`), naming their key directly. Do not
+generalise from those to COSE Receipts.
 
 **Rotation procedure:**
 
@@ -392,7 +405,9 @@ remain verifiable as long as the old public key is known.
      --update-secrets=CAPSULE_ANCHOR_SIGNING_KEY=YOUR_SIGNING_KEY_SECRET_NAME:latest \
      --project=YOUR_PROJECT_ID
    ```
-   Receipts issued after this redeploy carry the new `key_id`.
+   STHs and `Signature` objects produced after this redeploy carry the new
+   `key_id`. COSE Receipts carry no key identifier either side of the rotation —
+   which key signed one is determined only by which published key verifies it.
 
 3. Publish the old public key alongside the new one. After rotation,
    `GET /.well-known/did.json` returns only the new key. Verifiers that resolve the
@@ -401,8 +416,10 @@ remain verifiable as long as the old public key is known.
    historical-receipt verifiability:
 
    - **DID document history (recommended):** include the retired key as an additional
-     `verificationMethod` entry in `/.well-known/did.json`, so a verifier can find
-     the old key by `key_id` from the document itself.
+     `verificationMethod` entry in `/.well-known/did.json`. A verifier holding a
+     `key_id` (from an STH or other `Signature` object) can then look the old key up
+     directly; a verifier holding only a COSE Receipt gets both keys to try, which is
+     all it needs and all it can use.
    - **Out-of-band publication:** publish retired public keys (with `key_id`, raw hex,
      and rotation date) in your `CHANGELOG.md` or a `keys/` directory in this repo.
 
