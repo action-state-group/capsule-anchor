@@ -178,13 +178,47 @@ def _classify(line: str) -> list[str]:
     return hits
 
 
-def scan(root: Path) -> list[str]:
+def _added_lines(root: Path, base: str) -> dict[str, set[int]]:
+    """Map each changed file to the set of new-file line numbers this branch ADDED
+    relative to ``base`` (merge-base). Used for diff-scoped "no new violations" mode:
+    a legacy baseline of hits is tolerated, but any hit on a line this branch touches
+    fails. Parses ``git diff --unified=0 base...HEAD`` hunk headers (``@@ -a,b +c,d @@``)
+    and counts only ``+`` lines, so a pure deletion or context line never counts."""
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "-C", str(root), "diff", "--unified=0", "--no-color", f"{base}...HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout
+    added: dict[str, set[int]] = {}
+    cur: str | None = None
+    newno = 0
+    for line in out.splitlines():
+        if line.startswith("+++ "):
+            p = line[4:]
+            cur = p[2:] if p.startswith("b/") else (None if p == "/dev/null" else p)
+        elif line.startswith("@@"):
+            # @@ -a,b +c,d @@  -- c is the first new-file line of this hunk
+            plus = line.split("+", 1)[1].split(" ", 1)[0]
+            newno = int(plus.split(",", 1)[0])
+        elif cur is not None and line.startswith("+") and not line.startswith("+++"):
+            added.setdefault(cur, set()).add(newno)
+            newno += 1
+        elif cur is not None and not line.startswith("-"):
+            newno += 1
+    return added
+
+
+def scan(root: Path, changed: dict[str, set[int]] | None = None) -> list[str]:
     allow = _load_allowlist(root)
     hits: list[str] = []
     for f in _tracked_files(root):
         if f.name in SELF_NAMES:
             continue
         if f.suffix not in SCAN_SUFFIXES:
+            continue
+        rel = str(f.relative_to(root))
+        if changed is not None and rel not in changed:
             continue
         try:
             text = f.read_text(errors="ignore")
@@ -194,6 +228,8 @@ def scan(root: Path) -> list[str]:
             # scan on an unrelated repo-hygiene issue this lint isn't responsible for catching.
             continue
         for i, line in enumerate(text.splitlines(), start=1):
+            if changed is not None and i not in changed[rel]:
+                continue
             stripped = line.strip()
             if stripped in allow:
                 continue
@@ -204,10 +240,22 @@ def scan(root: Path) -> list[str]:
 
 
 def main() -> int:
-    root = Path(sys.argv[1] if len(sys.argv) > 1 else ".")
-    hits = scan(root)
+    # Optional: --diff-base <ref> restricts the scan to lines this branch ADDED relative to
+    # <ref> ("no new violations" mode -- how a fail-closed lint lands on a repo with a legacy
+    # baseline without either blocking on a full cleanup or degrading to advisory warn-mode).
+    # Whole-tree remains the default and the goal: flip back to it once the baseline hits zero.
+    args = sys.argv[1:]
+    diff_base = None
+    if "--diff-base" in args:
+        i = args.index("--diff-base")
+        diff_base = args[i + 1]
+        del args[i : i + 2]
+    root = Path(args[0] if args else ".")
+    changed = _added_lines(root, diff_base) if diff_base else None
+    hits = scan(root, changed)
+    scope = f"lines added since {diff_base}" if diff_base else "the committed tree"
     if hits:
-        print(f"leak-lint: {len(hits)} internal-leak hit(s) found in the committed tree.")
+        print(f"leak-lint: {len(hits)} internal-leak hit(s) found in {scope}.")
         print(
             "If a hit is a genuine historical record (not live drift), add its exact stripped "
             "line text to .github/leak_lint_allowlist.txt. Otherwise, fix it -- an allowlist "
@@ -216,7 +264,7 @@ def main() -> int:
         for h in hits:
             print(" ", h)
         return 1
-    print("leak-lint: clean.")
+    print(f"leak-lint: clean ({scope}).")
     return 0
 
 

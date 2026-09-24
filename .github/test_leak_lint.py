@@ -289,3 +289,46 @@ def test_generated_artifact_suffixes_are_scanned(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# ---- diff-scoped mode (--diff-base): "no new violations" over a legacy baseline -------------
+
+def _run_diff(repo: Path, base: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(LINT), "--diff-base", base, str(repo)],
+        capture_output=True, text=True, cwd=repo,
+    )
+
+
+def _rev(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
+
+
+def test_diff_scoped_tolerates_baseline_but_fails_new_leak(tmp_path):
+    repo = _init_repo(tmp_path)
+    # Baseline: a pre-existing leak committed before the lint lands.
+    doc = _write(repo, "NOTES.md", "Legacy line [totally-fake-internal-task-id] kept.\n")
+    _commit_all(repo)
+    base = _rev(repo)
+
+    # Whole-tree still sees the baseline and fails (unchanged behavior).
+    assert _run(repo).returncode == 1
+
+    # A PR that ADDS a clean line while the baseline persists: diff-scoped passes.
+    doc.write_text("Legacy line [totally-fake-internal-task-id] kept.\nA clean new line.\n")
+    _commit_all(repo)
+    clean = _run_diff(repo, base)
+    assert clean.returncode == 0, clean.stdout
+
+    # A PR that ADDS a new leak: diff-scoped fails, and only on the added line.
+    doc.write_text(
+        "Legacy line [totally-fake-internal-task-id] kept.\nA clean new line.\n"
+        "New leak [another-fake-internal-task-id] here.\n"
+    )
+    _commit_all(repo)
+    dirty = _run_diff(repo, base)
+    assert dirty.returncode == 1
+    assert "another-fake-internal-task-id" in dirty.stdout
+    assert "totally-fake-internal-task-id" not in dirty.stdout  # baseline not re-flagged

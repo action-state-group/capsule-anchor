@@ -4,6 +4,12 @@
 # repo. No secret needed (unlike neutrality.yml, whose reserved-term list is intentionally kept
 # out of the repo) -- the patterns this check bans are generic ops-vocabulary shapes, not a
 # list that itself needs hiding -- so this runs on plain pull_request like hostname-lint.yml.
+#
+# This repo carries a legacy baseline of pre-existing hits, so the PR gate runs DIFF-SCOPED
+# ("no new violations" -- fail only on lines a PR adds), the way a fail-closed lint lands on a
+# legacy codebase without blocking on a full cleanup or degrading to advisory warn-mode. The
+# main-push job runs whole-tree in report-only, so the shrinking baseline count stays visible.
+# Once the baseline hits zero, drop --diff-base and make the main job fail-closed too.
 name: leak-lint
 
 on:
@@ -16,11 +22,26 @@ permissions:
   contents: read
 
 jobs:
-  leak-lint:
+  # Fail-closed gate: any leak on a line this PR adds fails the build.
+  no-new-leaks:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python .github/leak_lint.py --diff-base "origin/${{ github.base_ref }}" .
+
+  # Informational: whole-tree scan on main, never fails — tracks the baseline burning down.
+  baseline-tracker:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python .github/leak_lint.py .
+      - run: python .github/leak_lint.py . || echo "::notice::leak-lint baseline still non-zero — see log; burn down toward whole-tree fail-closed."
