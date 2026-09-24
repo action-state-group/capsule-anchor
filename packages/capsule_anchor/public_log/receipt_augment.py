@@ -1,7 +1,7 @@
 """Attach public-log evidence to an ALREADY-SIGNED COSE Receipt's UNPROTECTED
 header only.
 
-[capsule-anchor-rekor-rail] step 5: a checkpoint's COSE Receipt is signed once,
+A checkpoint's COSE Receipt is signed once,
 at registration time (``AnchorerService.build_cose_receipt`` /
 ``witness_checkpoint``), and its bytes are cached verbatim for idempotent
 resubmission (``store.put_statement`` / ``put_checkpoint_record``). A Rekor

@@ -91,7 +91,7 @@ class InMemoryLogStore:
         # a second signer racing to the same tree_size produces an
         # equally-valid but redundant STH, so there is nothing to compare).
         self._sth_history: dict[int, str] = {}
-        # [capsule-anchor-rekor-rail]: (backend, sth_tree_size, sth_root_hash) ->
+        # External public-log rail: (backend, sth_tree_size, sth_root_hash) ->
         # receipt dict, one row per external-public-log publication.
         self._public_log_receipts: dict[tuple[str, int, str], dict] = {}
         # Append-only publish-failure audit trail: (backend, occurred_at, error).
@@ -236,7 +236,7 @@ class InMemoryLogStore:
         stores below enforce this atomically in the UPSERT's WHERE clause,
         which is what actually closes the race (a Python-level read-compare-
         write here would not, since another writer could commit between the
-        read and the write). See [anchor-instance-count-and-sth-refresh-race].
+        read and the write).
         """
         key = (tree_size, timestamp)
         self._sth_history.setdefault(tree_size, sth_json)
@@ -403,7 +403,7 @@ class SqliteLogStore:
                 )
                 """
             )
-            # Migration for a table created before [anchor-instance-count-and-sth-refresh-race]:
+            # Migration for a table created before the STH compare-and-swap fix:
             # the CREATE TABLE above is a no-op against an already-existing
             # 2-column table, so backfill the CAS columns explicitly. SQLite's
             # ALTER TABLE ADD COLUMN has no IF NOT EXISTS modifier (unlike
@@ -475,8 +475,8 @@ class SqliteLogStore:
                 )
                 """
             )
-            # Migration for a table created before
-            # [capsule-anchor-checkpoint-aware-witness] (stage 2): backfill
+            # Migration for a table created before the checkpoint-aware
+            # witness stage 2 upgrade: backfill
             # the continuity-grade column the same way the STH table's CAS
             # columns were backfilled above -- SQLite's ALTER TABLE ADD
             # COLUMN has no IF NOT EXISTS, so check PRAGMA table_info first.
@@ -511,7 +511,7 @@ class SqliteLogStore:
                 "CREATE INDEX IF NOT EXISTS idx_checkpoint_equivocations_log_id "
                 "ON checkpoint_equivocations(log_id)"
             )
-            # [capsule-anchor-rekor-rail]: one row per STH published to an
+            # External public-log rail: one row per STH published to an
             # external public log (Sigstore Rekor by default). Idempotent on
             # (backend, sth_tree_size, sth_root_hash) -- at most one
             # publication per tree_size per backend.
@@ -1127,7 +1127,7 @@ class PostgresLogStore:
                     ts_epoch_us BIGINT NOT NULL
                 )
             """)
-            # Migration for a table created before [anchor-instance-count-and-sth-refresh-race]:
+            # Migration for a table created before the STH compare-and-swap fix:
             # see the matching comment on SqliteLogStore._init_schema.
             self._conn.execute(
                 "ALTER TABLE signed_tree_heads ADD COLUMN IF NOT EXISTS tree_size BIGINT"
@@ -1177,8 +1177,8 @@ class PostgresLogStore:
                     PRIMARY KEY (log_id, mmr_size)
                 )
             """)
-            # Migration for a table created before
-            # [capsule-anchor-checkpoint-aware-witness] (stage 2): backfill
+            # Migration for a table created before the checkpoint-aware
+            # witness stage 2 upgrade: backfill
             # the continuity-grade column -- NULL on a legacy/registered-only
             # row is the correct value (see put_checkpoint_record).
             self._conn.execute(
@@ -1204,7 +1204,7 @@ class PostgresLogStore:
                 "CREATE INDEX IF NOT EXISTS idx_checkpoint_equivocations_log_id "
                 "ON checkpoint_equivocations(log_id)"
             )
-            # [capsule-anchor-rekor-rail]: see SqliteLogStore._init_schema for
+            # External public-log rail: see SqliteLogStore._init_schema for
             # the matching comment -- idempotent on (backend, sth_tree_size,
             # sth_root_hash).
             self._conn.execute("""
