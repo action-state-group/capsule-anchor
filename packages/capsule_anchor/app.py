@@ -45,6 +45,36 @@ def _start_sth_refresh_thread(svc: object, interval_s: float) -> threading.Threa
     return t
 
 
+def _start_retention_prune_thread(svc: object, interval_s: float) -> threading.Thread:
+    """Start a daemon thread that periodically ages out expired receipt-cache
+    entries per ``CAPSULE_ANCHOR_ENTRY_RETENTION``.
+
+    Only started when a retention window is actually configured (see
+    ``create_app``) -- there is nothing to prune when the knob is unlimited,
+    so an idle thread would just be dead weight. Prunes the
+    ``submitted_statements`` cache ONLY; the append-only log and the
+    indefinitely-retained root history are structurally untouched by this
+    call — see ``AnchorerService.prune_expired_statements``.
+    """
+    def _run() -> None:
+        while True:
+            time.sleep(interval_s)
+            try:
+                svc.prune_expired_statements()  # type: ignore[attr-defined]
+            except Exception:  # noqa: BLE001
+                # A daemon thread's uncaught exception kills the thread
+                # silently either way (Python does not propagate it); catching
+                # keeps the NEXT sweep alive instead of leaving pruning dead
+                # for the rest of the process's life. Losing one sweep is
+                # safe -- the default is unlimited retention, so a missed
+                # sweep only delays a convenience cache eviction, never data.
+                pass
+
+    t = threading.Thread(target=_run, daemon=True, name="entry-retention-prune")
+    t.start()
+    return t
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Capsule Anchor",
@@ -162,6 +192,19 @@ def create_app() -> FastAPI:
     _sth_interval = float(os.environ.get("CAPSULE_ANCHOR_STH_REFRESH_INTERVAL", "60"))
     _start_sth_refresh_thread(_svc, _sth_interval)
 
+    # Entry retention [anchor-retention-posture-and-policy] — ages out the
+    # submitted_statements receipt cache per CAPSULE_ANCHOR_ENTRY_RETENTION.
+    # Default unlimited: entry_retention_seconds() raises on a malformed
+    # value (fail-closed, like every other knob in this file) and returns
+    # None when unset, in which case no thread starts -- upgrade is a no-op.
+    from capsule_anchor.anchoring.retention import entry_retention_seconds
+
+    if entry_retention_seconds() is not None:
+        _retention_interval = float(
+            os.environ.get("CAPSULE_ANCHOR_ENTRY_RETENTION_SWEEP_INTERVAL", "3600")
+        )
+        _start_retention_prune_thread(_svc, _retention_interval)
+
     # External public-log rail (Rekor by default) [capsule-anchor-rekor-rail].
     # Off by default (CAPSULE_ANCHOR_PUBLIC_LOG=none); additive to everything
     # above -- existing /checkpoints, /register, and /anchor/anchor receipts
@@ -258,6 +301,7 @@ def create_app() -> FastAPI:
     @app.get("/healthz", tags=["meta"])
     @app.get("/livez", tags=["meta"])
     def health() -> dict:
+        from capsule_anchor.anchoring.retention import declared_posture
         from capsule_anchor.anchoring.router import get_service
         svc = get_service()
         tree_size = svc._store.size()
@@ -272,6 +316,13 @@ def create_app() -> FastAPI:
             "key_id": svc.attestor.key_id,
             "tree_size": tree_size,
             "storage": "postgres" if database_url else "memory",
+            # [anchor-retention-posture-and-policy]: the DECLARED entry-
+            # retention posture -- "unlimited" or "<seconds>s". Read this
+            # BEFORE depending on the service: root history (consistency +
+            # equivocation detection) is retained forever regardless of this
+            # value; only the receipt re-issue cache ages out. A policy
+            # nobody can read is not a promise.
+            "entry_retention": declared_posture(),
         }
         if tree_size > 0:
             try:

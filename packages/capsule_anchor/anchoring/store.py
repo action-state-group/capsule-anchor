@@ -19,10 +19,20 @@ All backends implement the same interface:
   put_checkpoint_witness / get_checkpoint_witness
   put_checkpoint_record / get_checkpoint_record / get_last_checkpoint_record
   get_checkpoint_equivocations
-  put_sth / get_latest_sth
+  put_sth / get_latest_sth / get_sth_at
+  prune_statements_older_than
   put_public_log_receipt / get_public_log_receipt / get_latest_public_log_receipt /
   get_public_log_receipts_since / get_public_log_receipt_covering / put_public_log_failure
   close
+
+Retention (see [anchor-retention-posture-and-policy]): ``put_sth`` persists every
+signed root into an indefinitely-retained HISTORY (``get_sth_at``), independent of
+``CAPSULE_ANCHOR_ENTRY_RETENTION``. That knob governs only
+``prune_statements_older_than`` -- the ``submitted_statements`` receipt CACHE (the
+"re-issue a lost proof" convenience). ``log_entries`` is never pruned by either
+knob: its row count IS ``tree_size``, so partial deletion would corrupt the CT
+tree math for every future proof, not just old ones. Default (unset / unlimited)
+is a no-op -- upgrading to this code changes nothing until an operator opts in.
 
 Only the storage of records lives here; all crypto / chain / CT semantics stay
 in service.py and ct.py.
@@ -75,6 +85,12 @@ class InMemoryLogStore:
         # (tree_size, timestamp) of the persisted STH -- the CAS ordering key
         # put_sth compares against (see put_sth docstring).
         self._latest_sth_key: tuple[int, datetime] | None = None
+        # Indefinitely-retained root HISTORY, keyed by tree_size -- never
+        # pruned, independent of entry retention (see module docstring).
+        # First-seen wins (root_hash at a fixed tree_size is deterministic;
+        # a second signer racing to the same tree_size produces an
+        # equally-valid but redundant STH, so there is nothing to compare).
+        self._sth_history: dict[int, str] = {}
         # [capsule-anchor-rekor-rail]: (backend, sth_tree_size, sth_root_hash) ->
         # receipt dict, one row per external-public-log publication.
         self._public_log_receipts: dict[tuple[str, int, str], dict] = {}
@@ -120,6 +136,26 @@ class InMemoryLogStore:
 
     def get_statement(self, entry_hash: str) -> tuple[bytes, int, int] | None:
         return self._statements.get(entry_hash)
+
+    def prune_statements_older_than(self, cutoff: datetime) -> int:
+        """Delete cached receipts (the ``submitted_statements`` re-issue
+        convenience) for entries logged before ``cutoff``.
+
+        Never touches ``log_entries``, ``signed_tree_heads`` /
+        ``_sth_history``, or ``checkpoint_equivocations`` -- those are the
+        indefinitely-retained half of the asymmetric trade. An already-issued
+        receipt for a pruned entry_hash remains independently verifiable
+        (it is self-contained bytes the holder keeps); only THIS witness's
+        ability to re-issue it on request is lost.
+        """
+        stale = [
+            entry_hash
+            for entry_hash, (_receipt, leaf_index, _tree_size) in self._statements.items()
+            if self._log[leaf_index].logged_at < cutoff
+        ]
+        for entry_hash in stale:
+            del self._statements[entry_hash]
+        return len(stale)
 
     # --- subject index (discovery mechanism 2) ---
     def put_subject_index(
@@ -203,6 +239,7 @@ class InMemoryLogStore:
         read and the write). See [anchor-instance-count-and-sth-refresh-race].
         """
         key = (tree_size, timestamp)
+        self._sth_history.setdefault(tree_size, sth_json)
         if self._latest_sth_key is not None and key <= self._latest_sth_key:
             return
         self._latest_sth = sth_json
@@ -210,6 +247,13 @@ class InMemoryLogStore:
 
     def get_latest_sth(self) -> str | None:
         return self._latest_sth
+
+    def get_sth_at(self, tree_size: int) -> str | None:
+        """The indefinitely-retained historical STH signed at exactly
+        ``tree_size``, or ``None`` if no STH was ever signed at that size
+        (STHs are signed on registration + periodic refresh, not every
+        tree_size)."""
+        return self._sth_history.get(tree_size)
 
     # --- external public-log receipts (Rekor rail) ---
     def put_public_log_receipt(self, receipt: dict) -> bool:
@@ -376,6 +420,21 @@ class SqliteLogStore:
                 self._conn.execute(
                     "ALTER TABLE signed_tree_heads ADD COLUMN ts_epoch_us INTEGER"
                 )
+            # [anchor-retention-posture-and-policy]: indefinitely-retained root
+            # HISTORY, independent of the singleton "latest" row above and of
+            # CAPSULE_ANCHOR_ENTRY_RETENTION. One row per tree_size an STH was
+            # ever signed at; only ever INSERTed, never UPDATEd or DELETEd --
+            # this is the small, forever-kept half of the asymmetric trade
+            # (see the module docstring).
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS signed_tree_head_history (
+                    tree_size   INTEGER PRIMARY KEY,
+                    sth_json    TEXT NOT NULL,
+                    ts_epoch_us INTEGER NOT NULL
+                )
+                """
+            )
             # Checkpoint witness state: one row per log_id, the last-witnessed
             # checkpoint. Only ever INSERT OR REPLACE -- prior witness history
             # isn't retained, only the current chain-tip needed for the next
@@ -633,6 +692,19 @@ class SqliteLogStore:
             return None
         return (bytes(row[0]), int(row[1]), int(row[2]))
 
+    def prune_statements_older_than(self, cutoff: datetime) -> int:
+        """Delete cached receipts (see InMemoryLogStore.prune_statements_older_than
+        for the full contract) whose log entry's ``logged_at`` precedes
+        ``cutoff``. Joins through ``leaf_index`` -- ``log_entries`` itself is
+        never touched."""
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "DELETE FROM submitted_statements WHERE leaf_index IN "
+                "(SELECT log_index FROM log_entries WHERE logged_at < ?)",
+                (cutoff.isoformat(),),
+            )
+            return cur.rowcount
+
     # --- subject index (discovery mechanism 2) ---
     def put_subject_index(
         self, subject: str, entry_hash: str, capsule_id_digest: str | None
@@ -796,11 +868,29 @@ class SqliteLogStore:
                 "AND excluded.ts_epoch_us > COALESCE(signed_tree_heads.ts_epoch_us, -1))",
                 (sth_json, tree_size, ts_us),
             )
+            # Indefinitely-retained history, additive to the CAS singleton
+            # above -- INSERT OR IGNORE because the root at a fixed tree_size
+            # is deterministic (see InMemoryLogStore.put_sth's comment); the
+            # first signer to reach this tree_size wins the row, harmlessly.
+            self._conn.execute(
+                "INSERT OR IGNORE INTO signed_tree_head_history "
+                "(tree_size, sth_json, ts_epoch_us) VALUES (?, ?, ?)",
+                (tree_size, sth_json, ts_us),
+            )
 
     def get_latest_sth(self) -> str | None:
         with self._lock:
             cur = self._conn.execute(
                 "SELECT sth_json FROM signed_tree_heads WHERE id = 1"
+            )
+            row = cur.fetchone()
+        return None if row is None else str(row[0])
+
+    def get_sth_at(self, tree_size: int) -> str | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT sth_json FROM signed_tree_head_history WHERE tree_size = ?",
+                (tree_size,),
             )
             row = cur.fetchone()
         return None if row is None else str(row[0])
@@ -1045,6 +1135,15 @@ class PostgresLogStore:
             self._conn.execute(
                 "ALTER TABLE signed_tree_heads ADD COLUMN IF NOT EXISTS ts_epoch_us BIGINT"
             )
+            # [anchor-retention-posture-and-policy]: indefinitely-retained root
+            # HISTORY -- see the matching comment on SqliteLogStore._init_schema.
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS signed_tree_head_history (
+                    tree_size   BIGINT PRIMARY KEY,
+                    sth_json    TEXT NOT NULL,
+                    ts_epoch_us BIGINT NOT NULL
+                )
+            """)
             # Checkpoint witness state: one row per log_id, the last-witnessed
             # checkpoint (chain-tip only, no history retained).
             self._conn.execute("""
@@ -1294,6 +1393,22 @@ class PostgresLogStore:
             return None
         return (bytes(row[0]), int(row[1]), int(row[2]))
 
+    def prune_statements_older_than(self, cutoff: datetime) -> int:
+        """See InMemoryLogStore.prune_statements_older_than for the contract."""
+        outcome = {"deleted": 0}
+
+        def _run() -> None:
+            cur = self._conn.execute(
+                "DELETE FROM submitted_statements WHERE leaf_index IN "
+                "(SELECT log_index FROM log_entries WHERE logged_at < %s)",
+                (cutoff,),
+            )
+            outcome["deleted"] = cur.rowcount
+
+        with self._lock:
+            self._transact(_run)
+        return outcome["deleted"]
+
     # --- subject index (discovery mechanism 2) ---
     def put_subject_index(
         self, subject: str, entry_hash: str, capsule_id_digest: str | None
@@ -1459,25 +1574,43 @@ class PostgresLogStore:
         """
         ts_us = int(timestamp.timestamp() * 1_000_000)
         params = (sth_json, tree_size, ts_us)
-        with self._lock:
-            self._transact(
-                lambda: self._conn.execute(
-                    "INSERT INTO signed_tree_heads (id, sth_json, tree_size, ts_epoch_us) "
-                    "VALUES (1, %s, %s, %s) "
-                    "ON CONFLICT (id) DO UPDATE SET "
-                    "sth_json = EXCLUDED.sth_json, tree_size = EXCLUDED.tree_size, "
-                    "ts_epoch_us = EXCLUDED.ts_epoch_us "
-                    "WHERE EXCLUDED.tree_size > COALESCE(signed_tree_heads.tree_size, -1) "
-                    "OR (EXCLUDED.tree_size = COALESCE(signed_tree_heads.tree_size, -1) "
-                    "AND EXCLUDED.ts_epoch_us > COALESCE(signed_tree_heads.ts_epoch_us, -1))",
-                    params,
-                )
+
+        def _run() -> None:
+            self._conn.execute(
+                "INSERT INTO signed_tree_heads (id, sth_json, tree_size, ts_epoch_us) "
+                "VALUES (1, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET "
+                "sth_json = EXCLUDED.sth_json, tree_size = EXCLUDED.tree_size, "
+                "ts_epoch_us = EXCLUDED.ts_epoch_us "
+                "WHERE EXCLUDED.tree_size > COALESCE(signed_tree_heads.tree_size, -1) "
+                "OR (EXCLUDED.tree_size = COALESCE(signed_tree_heads.tree_size, -1) "
+                "AND EXCLUDED.ts_epoch_us > COALESCE(signed_tree_heads.ts_epoch_us, -1))",
+                params,
             )
+            # Indefinitely-retained history -- see the matching comment on
+            # SqliteLogStore.put_sth.
+            self._conn.execute(
+                "INSERT INTO signed_tree_head_history (tree_size, sth_json, ts_epoch_us) "
+                "VALUES (%s, %s, %s) ON CONFLICT (tree_size) DO NOTHING",
+                (tree_size, sth_json, ts_us),
+            )
+
+        with self._lock:
+            self._transact(_run)
 
     def get_latest_sth(self) -> str | None:
         with self._lock:
             cur = self._read(
                 "SELECT sth_json FROM signed_tree_heads WHERE id = 1"
+            )
+            row = cur.fetchone()
+        return None if row is None else str(row[0])
+
+    def get_sth_at(self, tree_size: int) -> str | None:
+        with self._lock:
+            cur = self._read(
+                "SELECT sth_json FROM signed_tree_head_history WHERE tree_size = %s",
+                (tree_size,),
             )
             row = cur.fetchone()
         return None if row is None else str(row[0])

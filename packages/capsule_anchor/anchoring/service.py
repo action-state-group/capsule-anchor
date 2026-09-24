@@ -41,7 +41,7 @@ import hashlib
 import json
 import threading
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import cbor2
 from cll.checkpoint.core import verify_consistency
@@ -912,6 +912,23 @@ class AnchorerService:
                     return stored
             return self._sign_and_persist_sth()
 
+    def get_sth_at(self, tree_size: int) -> SignedTreeHead | None:
+        """Return the indefinitely-retained historical STH signed at exactly
+        ``tree_size``, or ``None`` if this witness never signed one there.
+
+        Unlike ``get_sth()``, this never recomputes from the current log --
+        it is a pure lookup into the root history (see ``store.py``'s module
+        docstring), which survives ``CAPSULE_ANCHOR_ENTRY_RETENTION`` aging
+        out the underlying entries. A relying party who already holds a
+        receipt for an entry at this tree_size uses this to confirm the
+        receipt's embedded root was one this witness actually signed and
+        published -- not merely internally self-consistent (see
+        ``verify_inclusion``, which checks self-consistency alone).
+        """
+        with self._lock:
+            stored_json = self._store.get_sth_at(tree_size)
+        return None if stored_json is None else SignedTreeHead.model_validate_json(stored_json)
+
     def refresh_sth(self) -> SignedTreeHead:
         """Force-sign a fresh STH and persist it.
 
@@ -1538,6 +1555,25 @@ class AnchorerService:
         if last is None:
             return None
         return {**last, "equivocations": self._store.get_checkpoint_equivocations(log_id)}
+
+    def prune_expired_statements(self, now: datetime | None = None) -> int:
+        """Age out cached receipts older than ``CAPSULE_ANCHOR_ENTRY_RETENTION``.
+
+        Returns the number pruned; ``0`` (and no store call) when the knob is
+        unset/unlimited -- the default, so upgrading to this code is a no-op
+        until an operator opts in. ``now`` is injectable for deterministic
+        testing; defaults to the real clock. See ``anchoring.retention`` for
+        the policy and why this only touches the receipt cache, never the
+        append-only log or the root history.
+        """
+        from capsule_anchor.anchoring.retention import entry_retention_seconds
+
+        seconds = entry_retention_seconds()
+        if seconds is None:
+            return 0
+        cutoff = (now or _now()) - timedelta(seconds=seconds)
+        with self._lock:
+            return self._store.prune_statements_older_than(cutoff)
 
     def get_registered_statement(
         self, entry_hash: str
