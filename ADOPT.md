@@ -27,9 +27,9 @@ The ten-minute first touch. Seal capsules and verify them offline, with zero
 external services:
 
 ```python
-from capsule_emit import emit
+from capsule_emit import seal
 
-cap = emit(action="submit_order", operator="acme-co", ..., anchor=False)
+cap = seal(payload, action="submit_order", operator="acme-co", ..., anchor=False)
 ```
 
 `anchor=False` (or `CAPSULE_ANCHOR=false` in adapter/env config) writes a
