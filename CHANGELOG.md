@@ -34,8 +34,11 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   keeps the pre-existing open self-asserted-`kid` behavior, unchanged. `CheckpointStampResponse`
   gains a `grade` field (`null` for non-enrolled submissions), `"mmr-verified"` or
   `"countersigned-observed"` for an enrolled submitter depending on its configured
-  `accumulator` — a foreign accumulator is honestly labeled distinct from an MMR-verified one
-  and is never checked for internal consistency (v1 scope). Each enrolled entry also gets its
+  `accumulator` — a foreign accumulator is countersigned as observed and is never checked for
+  internal consistency: the witness verifies only structures whose VDS profile it implements,
+  and a log's `accumulator` value is the log operator's enrollment declaration, changed only by
+  the operator's own re-enrollment (a directory PR), never by a maintainer edit. Each enrolled
+  entry also gets its
   own `rate_limit_per_min`, additive to the existing global limiter. First entry: the AgenTrust
   trace registry (`trace-registry/v1`, foreign accumulator).
 - **Witness-host canonical routes, `POST /checkpoints` (default) + `POST /register`
