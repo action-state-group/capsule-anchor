@@ -12,7 +12,7 @@ from capsule_anchor.attestation.service import AttestorService
 from capsule_anchor.countersign.bundle import parse_bundle
 from capsule_anchor.countersign.policy import NullPolicyModule
 from capsule_anchor.countersign.recompute import recompute_statement
-from capsule_anchor.countersign.signer import sign_countersignature
+from capsule_anchor.countersign.signer import COUNTERSIGN_ENTRY_TYPE, sign_countersignature
 
 from .conftest import TEST_LEDGER_ID
 
@@ -46,6 +46,29 @@ def test_independent_countersignature_when_signer_differs_from_requester(valid_b
     assert entry["signer"]["key_id"] == attestor.authority_pubkey().hex()
     assert len(entry["signer"]["key_id"]) == 64
     assert entry["over"] == bundle.digest
+
+
+def test_entry_carries_the_registered_countersign_type(valid_bundle_raw, requester_key):
+    """AAC Evidence Bundle -00 MUSTs a registered ``type`` field on every
+    countersignatures[] entry -- capsulectl already emits it
+    (``countersignAPI`` in internal/cli/countersign.go); this asserts the
+    engine's own entry matches, so an absent or mismatched type is a hard
+    test failure, not a silent interop gap."""
+    bundle, statement = _statement(valid_bundle_raw)
+    attestor = AttestorService()
+    registrar = AnchorerService(attestor=attestor)
+
+    entry = sign_countersignature(
+        bundle,
+        statement,
+        attestor=attestor,
+        registrar=registrar,
+        signer_id="did:web:countersign.example",
+        requester_key_id=requester_key.pubkey_hex,
+    )
+
+    assert entry["type"] == "countersign/v1"
+    assert entry["type"] == COUNTERSIGN_ENTRY_TYPE
 
 
 def test_signature_verifies_over_the_bundle_digest_not_the_statement(valid_bundle_raw, requester_key):
