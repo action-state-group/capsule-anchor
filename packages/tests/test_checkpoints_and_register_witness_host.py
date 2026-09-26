@@ -366,8 +366,8 @@ def test_receipt_iss_sub_kid_are_signature_covered(client):
     """Mutant check: tampering iss/sub/kid on an already-issued receipt (same
     signature bytes, mutated protected header) must fail COSE verification --
     otherwise a holder could rewrite the witness's identity claim or the
-    receipt's subject without invalidating the signature. Checks BOTH halves
-    (QUEUE_PROTOCOL SS7): the genuine receipt verifies (positive control),
+    receipt's subject without invalidating the signature. Checks BOTH halves:
+    the genuine receipt verifies (positive control),
     and each of iss/sub/kid independently flips verification to failure when
     mutated (the negative side)."""
     cid = "9" * 64
