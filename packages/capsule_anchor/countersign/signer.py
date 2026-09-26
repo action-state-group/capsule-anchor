@@ -42,6 +42,12 @@ def _hex_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+# The wire type of the countersignatures[] entry this engine emits, matching
+# capsulectl's own ``countersignAPI`` const (internal/cli/countersign.go) --
+# required by the AAC Evidence Bundle -00 spec's registered "type" field.
+COUNTERSIGN_ENTRY_TYPE = "countersign/v1"
+
+
 def sign_countersignature(
     bundle: Bundle,
     statement: Statement,
@@ -91,6 +97,7 @@ def sign_countersignature(
     reg = registrar.register_signed_statement_full(bytes.fromhex(statement_digest))
 
     return {
+        "type": COUNTERSIGN_ENTRY_TYPE,
         "signer": {"id": signer_id, "key_id": signer_key_id},
         "over": bundle.digest,
         "statement": statement.wire_dict(),
