@@ -156,7 +156,7 @@
       <div class="d">
         <div class="n">02 · receipt</div>
         <h3>Issues a COSE receipt</h3>
-        <p>Returns a signed inclusion proof (RFC9162_SHA256, vds=1) you can verify offline, forever, against the log key.</p>
+        <p>Returns a signed inclusion proof (RFC9162_SHA256, vds=1) you can verify offline against the published log key. After a key rotation, earlier receipts verify for as long as the retired key stays published.</p>
       </div>
       <div class="d">
         <div class="n">03 · anchor</div>
