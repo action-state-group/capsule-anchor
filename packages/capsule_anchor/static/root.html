@@ -44,11 +44,11 @@
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(18,122,82,.45)}70%{box-shadow:0 0 0 7px rgba(18,122,82,0)}100%{box-shadow:0 0 0 0 rgba(18,122,82,0)}}
   .hero h1{font-size:clamp(28px,4vw,42px);letter-spacing:-1.2px;font-weight:700;line-height:1.1;max-width:20ch;margin-bottom:16px}
   .hero p{font-size:17px;color:var(--muted);max-width:62ch}
-  .hero .host{margin-top:22px;font-family:var(--mono);font-size:13px;color:var(--ink);background:var(--paper-2);border:1px solid var(--line);border-radius:9px;padding:12px 16px;display:inline-block}
+  .hero .host{max-width:100%;overflow-wrap:anywhere;margin-top:22px;font-family:var(--mono);font-size:13px;color:var(--ink);background:var(--paper-2);border:1px solid var(--line);border-radius:9px;padding:12px 16px;display:inline-block}
   .hero .host b{color:var(--accent)}
   .sth-strip{margin-top:14px;font-family:var(--mono);font-size:12px;color:var(--muted);display:none}
   .sth-strip.ready{display:block}
-  .sth-note{margin-top:5px;font-family:var(--mono);font-size:11px;color:var(--muted-2)}
+  .sth-note{margin-top:5px;font-family:inherit;font-size:11px;color:var(--muted-2)}
 
   section.band{padding:52px 0;border-bottom:1px solid var(--line)}
   .sec-eyebrow{font-family:var(--mono);font-size:12px;font-weight:500;letter-spacing:1.5px;text-transform:uppercase;color:var(--accent);margin-bottom:12px}
@@ -79,6 +79,7 @@
   pre.code .s{color:#9DE2B8}
   pre.code .ok{color:#54D08A;font-weight:600}
   pre.code .k{color:#C58AF9}
+  .use{min-width:0}
   .use h4{font-size:14px;font-weight:600;font-family:var(--mono);margin-bottom:10px;color:var(--muted)}
 
   /* TRUST MODEL */
@@ -195,12 +196,11 @@
     <div class="use-grid">
       <div class="use">
         <h4># register a signed statement</h4>
-<pre class="code"><span class="c"># POST your COSE_Sign1 statement (witness.agentactioncapsule.org is canonical;</span>
-<span class="c"># anchor.agentactioncapsule.org shown below since it's the name live today)</span>
+<pre class="code"><span class="c"># POST your COSE_Sign1 statement</span>
 curl -X POST \
-  https://anchor.agentactioncapsule.org/transparency/register-statement \
+  https://witness.agentactioncapsule.org/transparency/register-statement \
   -H <span class="s">"Content-Type: application/json"</span> \
-  -d <span class="s">'{"signed_statement_b64": "$(base64 statement.cose)"}'</span>
+  -d <span class="s">"{\"signed_statement_b64\": \"$(base64 &lt; statement.cose | tr -d '\n')\"}"</span>
 <span class="c"># → returns a COSE receipt (inclusion proof)</span></pre>
       </div>
       <div class="use">
