@@ -12,7 +12,11 @@ from capsule_anchor.attestation.service import AttestorService
 from capsule_anchor.countersign.bundle import parse_bundle
 from capsule_anchor.countersign.policy import NullPolicyModule
 from capsule_anchor.countersign.recompute import recompute_statement
-from capsule_anchor.countersign.signer import COUNTERSIGN_ENTRY_TYPE, sign_countersignature
+from capsule_anchor.countersign.signer import (
+    COUNTERSIGN_ENTRY_TYPE,
+    countersign_signing_input,
+    sign_countersignature,
+)
 
 from .conftest import TEST_LEDGER_ID
 
@@ -71,10 +75,10 @@ def test_entry_carries_the_registered_countersign_type(valid_bundle_raw, request
     assert entry["type"] == COUNTERSIGN_ENTRY_TYPE
 
 
-def test_signature_verifies_over_the_bundle_digest_not_the_statement(valid_bundle_raw, requester_key):
-    """Wire-shape ruling: the signature is over the UTF-8 bytes of the
-    bundle digest's 64-hex-character form (the ``over`` field) -- matching
-    the Go verifier -- never over the statement bytes."""
+def test_signature_covers_the_statement_not_the_bundle_digest_alone(valid_bundle_raw, requester_key):
+    """The signature is over UTF8(JCS({over, statement, type})): it verifies
+    over that signing input, never over the bundle digest alone, and a
+    rewritten check result breaks it."""
     bundle, statement = _statement(valid_bundle_raw)
     attestor = AttestorService()
     registrar = AnchorerService(attestor=attestor)
@@ -89,10 +93,15 @@ def test_signature_verifies_over_the_bundle_digest_not_the_statement(valid_bundl
     )
 
     pubkey = Ed25519PublicKey.from_public_bytes(attestor.authority_pubkey())
-    pubkey.verify(bytes.fromhex(entry["signature"]), bundle.digest.encode("ascii"))
-    # Also confirm it is NOT a signature over the statement bytes.
+    signature = bytes.fromhex(entry["signature"])
+    pubkey.verify(signature, countersign_signing_input(entry["over"], entry["statement"], entry["type"]))
     with pytest.raises(Exception):
-        pubkey.verify(bytes.fromhex(entry["signature"]), statement.canonical_bytes())
+        pubkey.verify(signature, bundle.digest.encode("ascii"))
+
+    tampered = dict(entry["statement"], checks=[dict(c, result="established") for c in entry["statement"]["checks"]])
+    assert tampered != entry["statement"]
+    with pytest.raises(Exception):
+        pubkey.verify(signature, countersign_signing_input(entry["over"], tampered, entry["type"]))
 
 
 def test_self_countersignature_is_well_formed_and_flagged_not_independent(valid_bundle_raw):

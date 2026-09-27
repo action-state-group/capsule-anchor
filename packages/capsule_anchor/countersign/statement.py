@@ -6,9 +6,9 @@ entry carries.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 
+from agent_action_capsule.canonical import jcs
 from pydantic import BaseModel
 
 from capsule_anchor.countersign.results import CheckResult
@@ -78,9 +78,13 @@ class Statement(BaseModel):
         return dumped
 
     def canonical_bytes(self) -> bytes:
-        """Deterministic JSON the signer signs over -- sorted keys, compact
-        separators -- so any implementation reproduces identical bytes from
-        the same statement fields. Signs the WIRE projection (``wire_dict``),
-        not the full internal statement, so what is signed/receipted always
-        matches what is actually shown on the wire."""
-        return json.dumps(self.wire_dict(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        """The JCS (RFC 8785) bytes of the wire projection (``wire_dict``) --
+        the bytes whose SHA-256 this instance registers in its own log for
+        the entry's receipt. JCS, not ad-hoc sorted-key JSON, so any
+        implementation holding only the entry's ``statement`` member
+        reproduces the identical bytes and can check the receipt.
+
+        This is NOT the signing input: the signature covers ``over``,
+        ``statement`` and ``type`` together (see
+        ``signer.countersign_signing_input``)."""
+        return jcs(self.wire_dict())

@@ -226,14 +226,16 @@ a request could be *made*. A submission's own `profile_id` is never lost:
 `profile_conformance`'s own `detail` string already names which `action_type`s
 were/weren't covered.
 
-Signed over its own canonical bytes (sorted-key, compact JSON — so any implementation
-reproduces identical bytes from the same fields) by this instance's signing key, and
-registered in this instance's own log to attach a receipt.
+Signed, together with the bundle digest and the entry type, by this instance's signing
+key (§9), and registered in this instance's own log to attach a receipt: the log entry is
+`SHA-256(JCS(statement))`, the RFC 8785 canonical bytes of the statement exactly as it
+appears in the entry, so any implementation holding only the entry can recompute it.
 
 ## 9. The `countersignatures[]` entry
 
 ```
 {
+  type: "countersign/v1",
   signer: { id, key_id },        // id is this instance's own did:web identity;
                                   // key_id is the full 32-byte Ed25519 public
                                   // key, hex-encoded (64 chars) -- never a
@@ -241,10 +243,11 @@ registered in this instance's own log to attach a receipt.
                                   // entry can check the signature offline
   over: <bundle digest>,
   statement: { ...the statement above... },
-  signature,                     // over the UTF-8 bytes of `over`'s
-                                  // 64-hex-character form, never over the
-                                  // statement (which accompanies the
-                                  // signature but is not what is signed)
+  signature,                     // Ed25519, 128 lowercase hex, over
+                                  // UTF8(JCS({"over": over,
+                                  //   "statement": statement, "type": type}))
+                                  // -- binds the bundle AND every check
+                                  // result; a rewritten result fails it
   independent: <bool>,           // false iff the signer key equals the
                                   // countersign request's own requester key_id
                                   // -- never a bundle field, the v2 Evidence
@@ -263,10 +266,16 @@ Per the wire-shape reconciliation with `capsule-cli`'s Go verifier
 (action-state-ops [countersign-engine-in-capsule-anchor]): `key_id` is
 deliberately NOT this repo's internal, truncated `sha256(pubkey)[:16]`
 identifier used for the STH/receipt signing root elsewhere in this codebase —
-that identifier never appears on this wire. The `type` field the spec's own
-base Evidence Bundle draft reserves for `countersignatures[]` entries is an
-open cross-lane question still with the spec desk; this module does not emit
-one.
+that identifier never appears on this wire. Every entry carries the registered
+`type` value `countersign/v1`.
+
+The signing input covers the statement, not the bundle digest alone. A signature over
+the digest alone would leave every check result unauthenticated: anyone holding the
+bundle could rewrite `failed` as `established` and the signature would still verify.
+`packages/tests/countersign/vectors/countersign-v1.json` is the golden vector for the
+signing input and the receipt, with negative cases (a rewritten result, a digest-only
+signature, a receipt for a different statement); other implementations commit a
+byte-identical copy.
 
 A verifier resolving this entry (see `countersign/verify.py`) reads one of five
 states: `self-attested` (no entry, and the bundle's own checkpoint carries no
