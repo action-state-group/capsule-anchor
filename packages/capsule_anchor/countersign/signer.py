@@ -24,6 +24,12 @@ from capsule_anchor.countersign.bundle import Bundle
 from capsule_anchor.countersign.statement import Statement
 
 
+class StatementRefused(ValueError):
+    """The statement has no JCS form, so it cannot be signed or registered --
+    for example a string holding a lone surrogate, which has no UTF-8
+    encoding. A caller error, refused before anything is signed or logged."""
+
+
 class Attestor(Protocol):
     """The subset of ``attestation.AttestorService`` this module needs."""
 
@@ -101,14 +107,19 @@ def sign_countersignature(
     # The signature covers the bundle digest AND the statement (and the
     # entry type), never the digest alone -- see countersign_signing_input.
     wire_statement = statement.wire_dict()
-    sig = attestor.attest(countersign_signing_input(bundle.digest, wire_statement))
+    try:
+        signing_input = countersign_signing_input(bundle.digest, wire_statement)
+        statement_bytes = statement.canonical_bytes()
+    except (TypeError, ValueError) as exc:
+        raise StatementRefused(f"statement cannot be canonicalized (JCS): {type(exc).__name__}") from exc
+    sig = attestor.attest(signing_input)
 
     # The receipt registers the STATEMENT's own digest -- SHA-256 of its JCS
     # bytes (never the bundle digest, and never the statement bytes
     # themselves) -- a fixed-size digest leaf, matching every other
     # digest-registration path this service already exposes (POST
     # /register). A verifier recomputes it from the entry's ``statement``.
-    statement_digest = _hex_sha256(statement.canonical_bytes())
+    statement_digest = _hex_sha256(statement_bytes)
     reg = registrar.register_signed_statement_full(bytes.fromhex(statement_digest))
 
     return {

@@ -160,3 +160,20 @@ def test_entry_carries_a_real_receipt_from_the_instances_own_log(valid_bundle_ra
     )
     assert entry2["receipt"]["entry_hash"] == receipt["entry_hash"]
     assert entry2["receipt"]["leaf_index"] == receipt["leaf_index"]
+
+
+def test_statement_with_a_lone_surrogate_is_refused_cleanly(valid_bundle_raw, requester_key):
+    from capsule_anchor.countersign.signer import StatementRefused
+
+    bundle, statement = _statement(valid_bundle_raw)
+    statement.scope.ledger_id = "ledger:\ud800"
+    attestor = AttestorService()
+    with pytest.raises(StatementRefused):
+        sign_countersignature(
+            bundle,
+            statement,
+            attestor=attestor,
+            registrar=AnchorerService(attestor=attestor),
+            signer_id="did:web:countersign.example",
+            requester_key_id=requester_key.pubkey_hex,
+        )
