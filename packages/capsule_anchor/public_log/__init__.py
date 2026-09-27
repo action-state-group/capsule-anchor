@@ -14,16 +14,19 @@ See module docstrings and ``docs/architecture/18-public-log-anchor.md``.
 
 from .in_memory import InMemoryPublicLog
 from .receipt_augment import augment_receipt_with_public_log
-from .rekor import RekorBundle, RekorPublicLog
+from .rekor import STH_PAYLOAD_TYPE, DsseBundle, RekorBundle, RekorPublicLog, dsse_pae
 from .scheduler import PublicLogPublisher, start_publisher_thread
 from .wrapper import attach_public_log
 
 __all__ = [
+    "DsseBundle",
     "InMemoryPublicLog",
     "PublicLogPublisher",
     "RekorBundle",
     "RekorPublicLog",
+    "STH_PAYLOAD_TYPE",
     "attach_public_log",
     "augment_receipt_with_public_log",
+    "dsse_pae",
     "start_publisher_thread",
 ]

@@ -219,6 +219,8 @@ class TestConfigAndStartup:
         publisher = get_public_log_publisher()
         assert publisher is not None
         assert publisher.backend_name == "rekor-public"
+        # dsse, not hashedrekord: public Rekor refuses a plain-Ed25519 hashedrekord.
+        assert publisher._public_log._sign is not None  # noqa: SLF001
 
 
 class TestHealthDegraded:
