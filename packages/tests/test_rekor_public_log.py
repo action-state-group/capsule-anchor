@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -22,11 +23,19 @@ import pytest
 from capsule_anchor.anchoring.service import sth_payload
 from capsule_anchor.contracts.types import Signature
 from capsule_anchor.public_log.in_memory import InMemoryPublicLog
-from capsule_anchor.public_log.rekor import RekorBundle, RekorPublicLog, _ed25519_raw_to_pem
+from capsule_anchor.public_log.rekor import (
+    STH_PAYLOAD_TYPE,
+    DsseBundle,
+    RekorBundle,
+    RekorPublicLog,
+    _ed25519_raw_to_pem,
+    dsse_pae,
+)
 from capsule_anchor.public_log.wrapper import attach_public_log
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import (
     Encoding,
+    load_pem_public_key,
     NoEncryption,
     PrivateFormat,
 )
@@ -151,6 +160,79 @@ class TestRekorPublicLogSubmit:
             log.submit(payload, sig)
 
 
+def _attest(key: Ed25519PrivateKey):
+    def sign(payload: bytes) -> Signature:
+        return _sig(key.sign(payload).hex())
+
+    return sign
+
+
+class TestDsseEntry:
+    """The production path: public Rekor verifies an Ed25519 hashedrekord as
+    Ed25519ph over SHA-512 and refuses a plain Ed25519 signature, so the
+    rail submits a dsse entry (see rekor.py's module docstring)."""
+
+    def test_pae_matches_the_dsse_spec_example(self):
+        # DSSE protocol.md: PAE("http://example.com/HelloWorld", "hello world")
+        assert (
+            dsse_pae("http://example.com/HelloWorld", b"hello world")
+            == b"DSSEv1 29 http://example.com/HelloWorld 11 hello world"
+        )
+
+    def test_bundle_shape(self):
+        key = _authority_key()
+        raw = key.public_key().public_bytes_raw()
+        payload = sth_payload(3, "aa" * 32, datetime(2026, 9, 16, tzinfo=UTC))
+        sig = _attest(key)(dsse_pae(STH_PAYLOAD_TYPE, payload))
+        body = DsseBundle.build(payload, STH_PAYLOAD_TYPE, sig, raw)
+        assert body["apiVersion"] == "0.0.1" and body["kind"] == "dsse"
+        pc = body["spec"]["proposedContent"]
+        env = json.loads(pc["envelope"])
+        assert env["payloadType"] == STH_PAYLOAD_TYPE
+        assert base64.b64decode(env["payload"]) == payload
+        assert base64.b64decode(pc["verifiers"][0]) == _ed25519_raw_to_pem(raw)
+
+    def test_submit_with_sign_sends_dsse_that_verifies_as_rekor_checks_it(self):
+        key = _authority_key()
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            body = json.loads(request.content)
+            assert body["kind"] == "dsse"
+            pc = body["spec"]["proposedContent"]
+            env = json.loads(pc["envelope"])
+            pub = load_pem_public_key(base64.b64decode(pc["verifiers"][0]))
+            payload = base64.b64decode(env["payload"])
+            # What Rekor's dsse type does: plain Ed25519 over the PAE.
+            pub.verify(base64.b64decode(env["signatures"][0]["sig"]), dsse_pae(env["payloadType"], payload))
+            seen.append(payload)
+            return httpx.Response(
+                201,
+                json={"abc": {"logIndex": 7, "integratedTime": 1, "verification": {"signedEntryTimestamp": "cw=="}}},
+            )
+
+        log = RekorPublicLog(
+            authority_pubkey=key.public_key().public_bytes_raw(),
+            httpx_client=httpx.Client(transport=httpx.MockTransport(handler)),
+            sign=_attest(key),
+        )
+        payload = sth_payload(2, "cc" * 32, datetime(2026, 9, 27, tzinfo=UTC))
+        receipt = log.submit(payload, _sig(key.sign(payload).hex()))
+        assert receipt["uuid"] == "abc" and receipt["log_index"] == 7
+        # No-plaintext invariant: the only bytes in the envelope are the STH.
+        assert seen == [payload]
+
+    def test_a_signature_over_the_raw_payload_would_not_verify(self):
+        """Guards the PAE: signing the STH bytes directly (the old sig) is
+        not a valid DSSE signature."""
+        key = _authority_key()
+        payload = sth_payload(2, "cc" * 32, datetime(2026, 9, 27, tzinfo=UTC))
+        from cryptography.exceptions import InvalidSignature
+
+        with pytest.raises(InvalidSignature):
+            key.public_key().verify(key.sign(payload), dsse_pae(STH_PAYLOAD_TYPE, payload))
+
+
 class TestRekorPublicLogVerify:
     def _log(self, handler) -> RekorPublicLog:
         transport = httpx.MockTransport(handler)
@@ -254,7 +336,7 @@ class TestLiveRekor:
 
     def test_submit_and_verify_against_real_rekor(self):
         key = Ed25519PrivateKey.generate()
-        log = RekorPublicLog(authority_pubkey=key.public_key().public_bytes_raw())
+        log = RekorPublicLog(authority_pubkey=key.public_key().public_bytes_raw(), sign=_attest(key))
         payload = sth_payload(1, "ee" * 32, datetime.now(UTC))
         sig = _sig(key.sign(payload).hex())
         try:

@@ -10,6 +10,19 @@ Why ``hashedrekord``? It is Rekor's simplest type and is the right shape for
 avoid the in-toto attestation type because we are not making an SLSA-style
 claim *about* an artifact; we are publishing the AS tree head itself.
 
+**But public Rekor refuses it for an Ed25519 key, so production uses
+``dsse``.** Rekor verifies an Ed25519 ``hashedrekord`` signature as Ed25519ph
+over a SHA-512 digest (``rekor/pkg/types/hashedrekord/v0.0.1/entry.go``:
+``WithED25519ph()``; ``sigstore/pkg/signature/ed25519ph.go``: SHA-512 only).
+The authority key signs plain Ed25519 over the STH bytes, so the
+``hashedrekord`` entry above is rejected with "verifying signature". A
+``dsse`` entry carries the envelope, so Rekor checks a plain Ed25519
+signature over the DSSE pre-authentication encoding, and stores only the
+payload and envelope hashes. ``RekorPublicLog`` takes that path whenever it is
+given a ``sign`` callable (``app.py`` passes the authority attestor's
+``attest``). ``RekorBundle`` stays for the golden vector and for a key type
+Rekor can verify over a digest.
+
 CRITICAL: the HTTP client is INJECTABLE. The default ``httpx.Client`` is built
 only when a caller does not pass one. Tests inject an ``httpx.Client`` backed
 by an ``httpx.MockTransport`` that returns canned Rekor responses; real
@@ -25,6 +38,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+from collections.abc import Callable
 from typing import Any, Self
 
 import httpx
@@ -108,6 +122,42 @@ class RekorBundle:
         }
 
 
+#: DSSE ``payloadType`` for the STH bytes ``sth_payload()`` returns
+#: (canonical JSON: ``tree_size``, ``root_hash``, ``timestamp``).
+STH_PAYLOAD_TYPE = "application/vnd.capsule-anchor.sth+json"
+
+
+def dsse_pae(payload_type: str, payload: bytes) -> bytes:
+    """DSSE v1 pre-authentication encoding -- the exact bytes a DSSE
+    signature covers."""
+    t = payload_type.encode("utf-8")
+    return b"DSSEv1 %d %s %d %s" % (len(t), t, len(payload), payload)
+
+
+class DsseBundle:
+    """Builder for a Rekor ``dsse`` v0.0.1 request body."""
+
+    @staticmethod
+    def build(payload: bytes, payload_type: str, sig: Signature, raw_pubkey: bytes) -> dict[str, Any]:
+        """``sig`` is the authority's signature over ``dsse_pae(payload_type,
+        payload)`` -- not over ``payload`` itself."""
+        envelope = {
+            "payloadType": payload_type,
+            "payload": _b64(payload),
+            "signatures": [{"keyid": sig.key_id, "sig": _b64(bytes.fromhex(sig.signature))}],
+        }
+        return {
+            "apiVersion": "0.0.1",
+            "kind": "dsse",
+            "spec": {
+                "proposedContent": {
+                    "envelope": json.dumps(envelope, separators=(",", ":")),
+                    "verifiers": [_b64(_ed25519_raw_to_pem(raw_pubkey))],
+                }
+            },
+        }
+
+
 class RekorPublicLog:
     """``PublicLog`` against a Sigstore-style Rekor REST API."""
 
@@ -119,6 +169,7 @@ class RekorPublicLog:
         rekor_url: str = "https://rekor.sigstore.dev",
         httpx_client: httpx.Client | None = None,
         timeout: float = 10.0,
+        sign: Callable[[bytes], Signature] | None = None,
     ) -> None:
         """Build a Rekor backend.
 
@@ -130,7 +181,12 @@ class RekorPublicLog:
         ``httpx_client``-- INJECTED HTTP client. Tests pass an ``httpx.Client``
                            with a ``MockTransport``; production passes None and
                            we build a default client. Real network is opt-in.
+        ``sign``        -- the authority's ``attest(bytes) -> Signature``. When
+                           given, entries are ``dsse`` (what public Rekor
+                           accepts for an Ed25519 key -- see the module
+                           docstring); without it, ``hashedrekord``.
         """
+        self._sign = sign
         self._authority_pubkey = bytes(authority_pubkey)
         self._rekor_url = rekor_url.rstrip("/")
         self._owns_client = httpx_client is None
@@ -138,8 +194,16 @@ class RekorPublicLog:
 
     # --- PublicLog protocol -------------------------------------------------
     def submit(self, payload: bytes, sig: Signature) -> dict:
-        """POST a ``hashedrekord`` entry to Rekor; return a receipt dict."""
-        body = RekorBundle.build(payload, sig, self._authority_pubkey)
+        """POST the entry to Rekor; return a receipt dict.
+
+        With ``sign`` set, a ``dsse`` entry over ``payload`` signed through
+        ``sign`` (``sig``, the plain STH signature, is not used). Without
+        it, a ``hashedrekord`` entry carrying ``sig``."""
+        if self._sign is not None:
+            dsse_sig = self._sign(dsse_pae(STH_PAYLOAD_TYPE, payload))
+            body = DsseBundle.build(payload, STH_PAYLOAD_TYPE, dsse_sig, self._authority_pubkey)
+        else:
+            body = RekorBundle.build(payload, sig, self._authority_pubkey)
         resp = self._client.post(
             f"{self._rekor_url}{_REKOR_ENTRIES_PATH}",
             json=body,

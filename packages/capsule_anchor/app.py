@@ -245,6 +245,10 @@ def create_app() -> FastAPI:
             authority_pubkey=_svc.authority_pubkey(),
             rekor_url=_rekor_url,
             timeout=_rekor_timeout,
+            # dsse, not hashedrekord: public Rekor verifies an Ed25519
+            # hashedrekord as Ed25519ph over SHA-512 and refuses our plain
+            # Ed25519 signature (see public_log/rekor.py).
+            sign=_svc.attestor.attest,
         )
         _public_log_publisher = PublicLogPublisher(_svc, _rekor_log, _svc._store)
         logger.info(

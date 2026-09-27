@@ -6,6 +6,17 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Public-log rail: submit a Rekor `dsse` entry, not `hashedrekord`.** Public Rekor
+  verifies an Ed25519 `hashedrekord` signature as Ed25519ph over a SHA-512 digest, so the
+  rail's plain-Ed25519 `hashedrekord` would be refused on every tick and `/health` would
+  sit at `"public_log": "degraded"` with no receipt. The rail now sends a `dsse` envelope
+  whose payload is the STH bytes, signed over the DSSE pre-authentication encoding by the
+  same authority key. Rekor stores only hashes. Still only `tree_size`/`root_hash`/`timestamp`
+  leave. `RekorPublicLog(sign=...)` selects `dsse`; without `sign` it still builds
+  `hashedrekord`.
+
 ### Added
 
 - **Public-log rail: publish this witness's own STHs to Sigstore Rekor

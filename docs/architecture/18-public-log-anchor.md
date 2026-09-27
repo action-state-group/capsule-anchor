@@ -9,19 +9,36 @@ by asking it.
 
 ---
 
-## 1. Why Rekor, why `hashedrekord`
+## 1. Why Rekor, why `dsse` (not `hashedrekord`)
 
 A witness that only ever asserts its own consistency is asking to be trusted on its
 own say-so. Publishing each STH into a log this service does not operate gives any
 stranger an independent point to check: "did this witness's history ever rewrite
 itself?" is answerable by watching Rekor, not by trusting this service's own API.
 
-Rekor's `hashedrekord` entry type is the right shape for that: "some bytes, signed
-under some key." An STH is exactly that — a tree size, a Merkle root, and a
-timestamp, Ed25519-signed by the authority key — never an in-toto claim *about* an
-artifact. `public_log/rekor.py`'s `RekorBundle.build()` assembles that entry by hand
-with `cbor2`/manual DER (no `cryptography`-only path needed for the SPKI wrapping),
-so the module has no dependency beyond `httpx` for the actual submission.
+The entry is "some bytes, signed under some key": an STH is a tree size, a Merkle root
+and a timestamp, Ed25519-signed by the authority key, never an in-toto claim *about* an
+artifact. Rekor's `hashedrekord` type looks like the natural fit, but public Rekor
+**refuses it for an Ed25519 key**. It verifies an Ed25519 `hashedrekord` signature as
+Ed25519ph over a SHA-512 digest
+(`rekor/pkg/types/hashedrekord/v0.0.1/entry.go`: `WithED25519ph()`;
+`sigstore/pkg/signature/ed25519ph.go`: SHA-512 only), and the authority key signs plain
+Ed25519.
+
+So the rail submits a **`dsse`** entry. The envelope's payload is the STH bytes
+(`sth_payload()`, `payloadType` `application/vnd.capsule-anchor.sth+json`). Its signature
+is the authority's plain Ed25519 signature over the DSSE pre-authentication encoding,
+which Rekor verifies with the full envelope in hand. Rekor stores only the payload and
+envelope hashes. `DsseBundle.build()` assembles the entry, and `RekorPublicLog` uses it
+whenever it is given a `sign` callable (`app.py` passes the attestor's `attest`).
+`RekorBundle` (`hashedrekord`) stays for its golden vector.
+
+**Checking our head against Rekor.** Take an entry from `GET /anchor/public-log/latest`
+(`uuid`, `sth_tree_size`), fetch `https://rekor.sigstore.dev/api/v1/log/entries/<uuid>`,
+decode `body`, and compare `spec.payloadHash.value` with the SHA-256 of
+`sth_payload(tree_size, root_hash, timestamp)` for the STH this witness served at that
+size. The verifier key in `spec.signatures[0].verifier` must be this witness's
+authority key.
 
 ## 2. The no-plaintext invariant
 
