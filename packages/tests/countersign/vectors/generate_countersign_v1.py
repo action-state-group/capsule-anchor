@@ -141,6 +141,11 @@ def _build_vector() -> dict:
         "tree_size": other_reg.tree_size,
     }
 
+    # Negative 4: as negative 3, with entry_hash removed, so a verifier
+    # cannot reject it on that string alone and must fail the proof itself.
+    wrong_receipt_no_hash = copy.deepcopy(wrong_receipt)
+    del wrong_receipt_no_hash["receipt"]["entry_hash"]
+
     vector = {
         "description": (
             "countersign/v1 golden vector. signature = Ed25519 over "
@@ -184,6 +189,12 @@ def _build_vector() -> dict:
                 "name": "receipt-for-other-statement",
                 "note": "valid signature; receipt registers a different statement",
                 "entry": wrong_receipt,
+                "expect": {"signature": "valid", "receipt": "unverified"},
+            },
+            {
+                "name": "receipt-for-other-statement-no-entry-hash",
+                "note": "as receipt-for-other-statement, with receipt.entry_hash removed",
+                "entry": wrong_receipt_no_hash,
                 "expect": {"signature": "valid", "receipt": "unverified"},
             },
         ],

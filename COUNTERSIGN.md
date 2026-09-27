@@ -274,8 +274,9 @@ the digest alone would leave every check result unauthenticated: anyone holding 
 bundle could rewrite `failed` as `established` and the signature would still verify.
 `packages/tests/countersign/vectors/countersign-v1.json` is the golden vector for the
 signing input and the receipt, with negative cases (a rewritten result, a digest-only
-signature, a receipt for a different statement); other implementations commit a
-byte-identical copy.
+signature, a receipt for a different statement with and without its `entry_hash`);
+other implementations commit a byte-identical copy and pin its SHA-256. The generator
+is deterministic: regenerating reproduces the committed bytes.
 
 A verifier resolving this entry (see `countersign/verify.py`) reads one of five
 states: `self-attested` (no entry, and the bundle's own checkpoint carries no

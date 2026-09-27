@@ -33,7 +33,7 @@ VECTOR = json.loads(VECTOR_PATH.read_text())
 
 # The committed vector's SHA-256. capsulectl pins the same value for its
 # byte-identical copy; regenerating must reproduce these bytes exactly.
-VECTOR_SHA256 = "9f5649a7daa5c3d353dcddfb508a5c90ed81644c74740f54067ba3ce4884a0f2"
+VECTOR_SHA256 = "3b278a3395ad47326f32987848de7b92eac08c6acbdfbebd71a237f94c197280"
 
 
 def test_vector_bytes_are_pinned():
@@ -131,3 +131,14 @@ def test_flipped_result_negative_differs_from_the_signed_statement_only_in_one_r
     flipped_back = json.loads(json.dumps(flipped))
     flipped_back["statement"]["checks"][1]["result"] = "failed"
     assert flipped_back == genuine
+
+
+def test_wrong_receipt_negative_without_entry_hash_reaches_the_proof():
+    """A variant of receipt-for-other-statement with ``entry_hash`` removed,
+    so a verifier cannot reject it on the entry_hash string comparison and
+    must fail it on the inclusion proof and receipt signature."""
+    case = next(c for c in VECTOR["negative"] if c["name"] == "receipt-for-other-statement-no-entry-hash")
+    assert "entry_hash" not in case["entry"]["receipt"]
+    assert case["expect"] == {"signature": "valid", "receipt": "unverified"}
+    assert _signature_valid(case["entry"])
+    assert not _receipt_valid(case["entry"])
