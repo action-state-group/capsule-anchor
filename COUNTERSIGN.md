@@ -278,18 +278,25 @@ signature, a receipt for a different statement with and without its `entry_hash`
 other implementations commit a byte-identical copy and pin its SHA-256. The generator
 is deterministic: regenerating reproduces the committed bytes.
 
-A verifier resolving this entry (see `countersign/verify.py`) reads one of five
-states: `self-attested` (no entry, and the bundle's own checkpoint carries no
-independently-authenticated evidence), `witnessed` (no entry, but the bundle's
-checkpoint DOES carry an independently-authenticated COSE statement — the free,
-permissive-policy grade), `self-countersigned` (`independent: false`),
-`unresolved signer` (independent, but the signer's `key_id` is absent from whatever
-countersigner directory the verifier consults), or `countersigned` (independent and
-resolved). When `countersignatures[]` carries more than one entry, every entry is
-considered and the best-resolved outcome wins (`countersigned` over
-`unresolved signer` over `self-countersigned`) — a real, independent
-countersignature is never hidden behind a later self-countersigned or unresolved
-one.
+`countersign/verify.py` verifies each entry before using anything it says
+(`verify_entry`): `over` must equal the bundle digest recomputed from the bundle, and
+`signature` must verify under `signer.key_id` over the signing input above (both as
+lowercase hex). Independence is computed from the producer keys the caller supplies
+(`producer_key_ids`, required); the entry's own `independent` member is never read. Each
+entry is `invalid` (either check fails; nothing it says is used), `unverified` (a type
+this module does not verify), `self-countersigned` (the signer key is one of the
+producer's), `unresolved signer` (independent, but the signer's `key_id` is absent from
+whatever countersigner directory the verifier consults), or `countersigned` (independent
+and resolved). This module does not check receipts.
+
+`resolve_entry_state` reads one state for the whole bundle. With no entries it is
+`self-attested` (the bundle's own checkpoint carries no independently-authenticated
+evidence) or `witnessed` (the bundle's checkpoint DOES carry an
+independently-authenticated COSE statement — the free, permissive-policy grade). With
+entries, every entry is verified and the best outcome wins (`countersigned` over
+`unresolved signer` over `self-countersigned` over `unverified` over `invalid`) — a real,
+independent countersignature is never hidden behind another entry, and a bundle whose
+every entry fails verification reads `invalid`.
 
 ## 10. Directory row (for a countersigner directory, if one is consulted)
 
