@@ -7,8 +7,7 @@ This subsystem IS the Action State **Transparency Service (TS)**: a SCITT-style
 Endpoints:
   --- Witness-host canonical surface (witness.agentactioncapsule.org) ---
   POST /checkpoints                     -> DEFAULT route: the checkpoint-only,
-                                           checkpoint-AWARE witness surface (stage 2,
-                                           [capsule-anchor-checkpoint-aware-witness]).
+                                           checkpoint-AWARE witness surface (stage 2).
                                            Accepts a CLL CheckpointRecord verbatim,
                                            refuses anything else with a NAMED error,
                                            verifies its Ed25519 signature, and
@@ -185,7 +184,7 @@ def configure_service(service: AnchorerService) -> None:
     _SERVICE = service
 
 
-# [capsule-anchor-rekor-rail]: the active public-log publisher, or None when
+# The active public-log publisher, or None when
 # CAPSULE_ANCHOR_PUBLIC_LOG=none (the default) -- installed by the app
 # factory. Absence means the surfacing endpoints below answer 404/empty and
 # the checkpoint stamp never carries a ``public_log`` key.
@@ -416,7 +415,7 @@ class CheckpointStampResponse(BaseModel):
     -- see [witness-receipt-signed-time-and-grade].
 
     ``continuity_grade`` is this witness's OWN per-``log_id`` continuity
-    claim ([capsule-anchor-checkpoint-aware-witness], stage 2) -- one of
+    claim (stage 2) -- one of
     exactly three values, never bare "witnessed": ``"first-seen"`` (unknown
     ``log_id``, nothing to be consistent with), ``"registered"`` (known
     ``log_id`` but no ``consistency_proof`` was submitted -- registration
@@ -440,7 +439,7 @@ class CheckpointStampResponse(BaseModel):
     SUBMITTER's own accumulator credibility, not this witness's chain-tip
     check.
 
-    ``public_log`` ([capsule-anchor-rekor-rail]) is present only when an
+    ``public_log`` is present only when an
     external public log (Rekor by default) has ALREADY published an STH
     covering this checkpoint's ``tree_size`` at response time -- ``None`` on
     every fresh registration (the scheduled publisher runs on its own
@@ -640,7 +639,7 @@ def get_router() -> APIRouter:
         pubkey_hex = raw.hex()
         return {"pubkey_hex": pubkey_hex, "key_id": svc.attestor.key_id}
 
-    # --- external public-log rail (Rekor by default) [capsule-anchor-rekor-rail] --
+    # --- external public-log rail (Rekor by default) --
     @router.get("/public-log/latest")
     def public_log_latest() -> dict:
         """Most recently persisted external-public-log receipt plus the STH
@@ -894,7 +893,7 @@ def get_router() -> APIRouter:
         try:
             result = svc.witness_checkpoint(cp)
         except ContinuityMismatchError as exc:
-            # Refuse-on-mismatch (stage 2, [capsule-anchor-checkpoint-aware-witness]):
+            # Refuse-on-mismatch (stage 2):
             # never co-signed, never appended. The body carries THIS witness's
             # own last-accepted (mmr_size, root) so an honest client that
             # skipped a cadence can re-prove from the witness's view rather
@@ -991,7 +990,7 @@ def get_router() -> APIRouter:
         the header, or sending the COSE content type, is unchanged from
         today and always routes to the COSE path above.
 
-        CHECKPOINT-AWARE (stage 2, [capsule-anchor-checkpoint-aware-witness]):
+        CHECKPOINT-AWARE (stage 2):
         inclusion is verified under the accepted witness key; the receipt
         signs the log root, not a clock, and the protected header also signs
         `iat` + `grade` (see [witness-receipt-signed-time-and-grade]). This

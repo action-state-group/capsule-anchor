@@ -99,8 +99,7 @@ _LOG_KIND_SCITT = "scitt_statement"
 #             carrying this witness's qualitative grade string
 #             (``"countersigned-observed"`` | ``"mmr-verified"``).
 #       -65538 = continuity (OPTIONAL, present only for a ``POST /checkpoints``
-#             registration graded ``CONTINUITY_GRADE_WITNESSED`` -- see
-#             [capsule-anchor-checkpoint-aware-witness]) -- a CBOR map
+#             registration graded ``CONTINUITY_GRADE_WITNESSED``) -- a CBOR map
 #             ``{policy_id, log_id, prev_size, prev_root, mmr_size, root,
 #             checked, witness_key_id, ts}`` asserting THIS witness
 #             independently checked (a) field-equality against its own
@@ -338,8 +337,7 @@ class RollbackError(RuntimeError):
 class ContinuityMismatchError(RollbackError):
     """A ``POST /checkpoints`` submission carries a ``consistency_proof`` but
     fails one of the stage-2 two-check continuity gate's checks against THIS
-    witness's own last-accepted checkpoint for ``log_id``
-    ([capsule-anchor-checkpoint-aware-witness]):
+    witness's own last-accepted checkpoint for ``log_id``:
 
     (a) the submitted ``prev_size``/``prev_root`` do not equal the witness's
         own last-accepted ``(mmr_size, mmr_root)`` for ``log_id`` (fork
@@ -437,7 +435,7 @@ def parse_checkpoint_payload(payload: bytes | None) -> dict | None:
 # Ed25519 signature server-side before ever counter-signing -- something the
 # ``mmr-checkpoint`` payload path above does not do.
 #
-# STAGE 2 ([capsule-anchor-checkpoint-aware-witness]): registration is
+# STAGE 2: registration is
 # dispatched as a bare digest (see ``AnchorerService.witness_checkpoint``),
 # which never decodes as a COSE_Sign1, so it can never trigger the LEGACY
 # ``_check_checkpoint_consistency`` (that method stays scoped to the
@@ -1388,8 +1386,8 @@ class AnchorerService:
         return "witnessed"
 
     def _check_checkpoint_continuity(self, cp: dict) -> str:
-        """Stage-2 continuity gate for ``POST /checkpoints``
-        ([capsule-anchor-checkpoint-aware-witness]). Caller holds ``self._lock``
+        """Stage-2 continuity gate for ``POST /checkpoints``.
+        Caller holds ``self._lock``
         (same discipline as ``_check_checkpoint_consistency``).
 
         ``cp`` is the output of ``checkpoint_cose.parse_and_verify_checkpoint_cose``
@@ -1477,9 +1475,8 @@ class AnchorerService:
         return CONTINUITY_GRADE_WITNESSED
 
     def witness_checkpoint(self, cp: dict) -> StatementRegistration:
-        """Checkpoint-only registration for ``POST /checkpoints``, stage 2
-        ([capsule-anchor-checkpoint-aware-witness]): checkpoint-aware,
-        per-``log_id`` continuity checking.
+        """Checkpoint-only registration for ``POST /checkpoints``, stage 2:
+        checkpoint-aware, per-``log_id`` continuity checking.
 
         ``cp`` is the output of ``checkpoint_cose.parse_and_verify_checkpoint_cose``
         (already structurally validated, with its COSE_Sign1 signature

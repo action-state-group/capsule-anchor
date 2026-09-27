@@ -1,6 +1,6 @@
 """``PublicLogPublisher`` -- the production wiring for a ``PublicLog`` backend.
 
-[capsule-anchor-rekor-rail] step 3+4. This SUPERSEDES ``wrapper.attach_public_log``
+This SUPERSEDES ``wrapper.attach_public_log``
 as the path ``app.py`` actually runs: publishing happens on a timer against the
 CURRENT Signed Tree Head, never inline on ``/checkpoints``, ``/register``, or
 ``/anchor/anchor`` -- a public-log outage must never fail a receipt to a caller.

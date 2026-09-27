@@ -72,7 +72,7 @@ tables are:
 | `log_entries` | Append-only CT log. PK: `log_index BIGINT`. Hash-chained via `prev_log_hash`; per-entry Ed25519 `log_signature` over the tree head. Never pruned by any retention setting — its row count IS `tree_size`. |
 | `submitted_statements` | Idempotent dedup + re-issue cache: `entry_hash TEXT PRIMARY KEY` → `receipt BYTEA`, `leaf_index`, `tree_size`. The ONLY table `CAPSULE_ANCHOR_ENTRY_RETENTION` prunes — see "Retention" below. |
 | `checkpoint_records` | One row per `(log_id, mmr_size)` position ever witnessed. First-seen root wins; a conflicting later root triggers an equivocation record instead. Carries the `continuity_grade` this witness assigned when it was accepted. |
-| `checkpoint_witnesses` | Chain-tip only: the last-ACCEPTED checkpoint per `log_id`. Backs both the legacy `mmr-checkpoint` monotonicity check and stage 2's continuity gate (`POST /checkpoints`, [capsule-anchor-checkpoint-aware-witness]) -- only advanced on `first-seen` or a verified `continuity-witnessed` acceptance, never on a bare `registered` one. |
+| `checkpoint_witnesses` | Chain-tip only: the last-ACCEPTED checkpoint per `log_id`. Backs both the legacy `mmr-checkpoint` monotonicity check and stage 2's continuity gate (`POST /checkpoints`) -- only advanced on `first-seen` or a verified `continuity-witnessed` acceptance, never on a bare `registered` one. |
 | `checkpoint_equivocations` | Fork evidence: appended whenever a different root arrives for an already-witnessed `(log_id, mmr_size)`. Never deleted. |
 | `countersigned_roots` | Legacy anchoring path. |
 | `log_capsule_bindings` | Sidecar: `log_index → capsule_id` binding for the legacy `GET /v1/inclusion/{capsule_id}` resolve. |

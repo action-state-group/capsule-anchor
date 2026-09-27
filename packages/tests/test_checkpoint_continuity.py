@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stage-2 checkpoint-aware witness tests: the ``consistency_proof``-bearing
-half of ``POST /checkpoints`` ([capsule-anchor-checkpoint-aware-witness],
-Amendment 2026-09-06).
+half of ``POST /checkpoints``.
 
 ``test_checkpoints_and_register_witness_host.py`` covers the proof-LESS
 default path (signature/structural gates, always-accepted `registered` /

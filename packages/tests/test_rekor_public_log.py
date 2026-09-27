@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for the Rekor ``PublicLog`` backend ([capsule-anchor-rekor-rail]
-step 7): ``RekorBundle.build`` golden vector, ``RekorPublicLog.submit``/``verify``
+"""Unit tests for the Rekor ``PublicLog`` backend:
+``RekorBundle.build`` golden vector, ``RekorPublicLog.submit``/``verify``
 against an injected ``httpx.MockTransport``, and the ``attach_public_log``
 wrapper's no-plaintext invariant.
 

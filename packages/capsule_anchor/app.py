@@ -28,8 +28,7 @@ def _start_sth_refresh_thread(svc: object, interval_s: float) -> threading.Threa
     the singleton ``signed_tree_heads`` row is written through an atomic
     compare-and-swap on ``(tree_size, timestamp)`` (see
     ``LogStore.put_sth``), so a slower writer can never move the persisted
-    STH backwards in time relative to what a client already observed
-    (see [anchor-instance-count-and-sth-refresh-race]).
+    STH backwards in time relative to what a client already observed.
     """
     def _run() -> None:
         while True:
@@ -205,7 +204,7 @@ def create_app() -> FastAPI:
         )
         _start_retention_prune_thread(_svc, _retention_interval)
 
-    # External public-log rail (Rekor by default) [capsule-anchor-rekor-rail].
+    # External public-log rail (Rekor by default).
     # Off by default (CAPSULE_ANCHOR_PUBLIC_LOG=none); additive to everything
     # above -- existing /checkpoints, /register, and /anchor/anchor receipts
     # are byte-for-byte unaffected when disabled, and Rekor is never called
@@ -331,7 +330,7 @@ def create_app() -> FastAPI:
                 result["latest_root_hash"] = sth.root_hash
             except Exception:  # noqa: BLE001, S110
                 pass
-        # [capsule-anchor-rekor-rail] step 4: surfaced only when the rail is
+        # Public-log rail health: surfaced only when the rail is
         # enabled. A degraded rail NEVER flips `ok` to false -- the witness's
         # core function (countersigning + the CT log) is unaffected by an
         # external log being unreachable.
