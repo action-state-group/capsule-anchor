@@ -256,3 +256,72 @@ curl -s https://anchor.agentactioncapsule.org/health | python3 -m json.tool
 # verify /anchor/sth returns a signed tree head
 curl -s https://anchor.agentactioncapsule.org/anchor/sth | python3 -m json.tool
 ```
+
+---
+
+## 🔴 Pre-flight: `--source .` silently drops anything `.gitignore` excludes
+
+**Incident, 2026-09-18, `scitt-verifier`.** A `gcloud run deploy --source .` failed with
+*"The user-provided container failed to start and listen on the port defined provided by the
+PORT=8080 environment variable."* The cause was not the port.
+
+`scitt-cose/.gitignore` line 5 contains `dist/`, and the repo had **no `.gcloudignore`**. When
+`.gcloudignore` is absent, `gcloud` auto-generates one that **respects `.gitignore`** — so
+`viewer/dist/aac-crypto.js` was stripped from the upload. `hosted_profiles/hosted.py` reads that
+bundle **at import**, so the import raised, nothing ever bound to 8080, and the health check timed
+out with a message that points at the port.
+
+**The trap:** the file was tracked in git (force-added past the ignore rule) and present in the
+working tree, and **`docker build` succeeded locally** — there is no `.dockerignore`, so a local
+build copies everything. Only the `--source .` upload path drops it. A green local container is not
+evidence that a source deploy will work.
+
+### Before any `gcloud run deploy --source .`, in this order
+
+```bash
+git fetch origin && git status && git pull --ff-only origin main   # deploy the remote, not a stale tree
+
+# 1. See exactly what will be uploaded, and grep for anything the app needs at import
+gcloud meta list-files-for-upload . | grep -E '<path-the-app-reads-at-import>'
+
+# 2. Capture the current revision so rollback is one command
+gcloud run services describe <SERVICE> --project=<PROJECT> --region=us-central1 \
+  --format='value(status.latestReadyRevisionName)'
+```
+
+If step 1 prints nothing, **stop** — add a `.gcloudignore`. Do **not** write
+`#!include:.gitignore`: that reintroduces the offending rule, and gitignore semantics make
+re-including a path inside an excluded directory unreliable. Write the exclusions explicitly, and
+the fallback to `.gitignore` stops entirely:
+
+```
+.git/
+.github/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.pytest_cache/
+*.egg-info/
+build/
+```
+
+**Commit the `.gcloudignore`.** Without it in the repo the next deploy hits this again.
+
+### Rollback
+
+```bash
+gcloud run services update-traffic <SERVICE> --project=<PROJECT> --region=us-central1 \
+  --to-revisions=<OLD_REVISION>=100
+```
+
+A failed revision never receives traffic — the previous revision keeps serving, so a failed deploy
+is not an outage. Confirm with a `curl` against the public hostname before doing anything else.
+
+### Applies to every service deployed from source
+
+`capsule-witness` (this repo) and `scitt-verifier` (`scitt-cose`) both deploy with `--source .`.
+Any repo that (a) ignores a directory in `.gitignore` and (b) reads a file from that directory at
+import or startup carries this defect until it has a `.gcloudignore`. **Audit the whole list, not
+just the service that failed.**
