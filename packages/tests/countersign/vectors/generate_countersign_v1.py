@@ -14,7 +14,7 @@ is deterministic too: regenerating reproduces the committed bytes exactly,
 and ``test_golden_vector.py`` fails if it does not. Other implementations (capsulectl among
 them) commit a byte-identical copy of the output and pin its SHA-256.
 
-Signing input: ``UTF8(JCS({"over": over, "statement": statement, "type": type}))``.
+Signing input: ``UTF8(JCS({"over": over, "signer": signer, "statement": statement, "type": type}))``.
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ def _build_vector() -> dict:
         signer_id="did:web:countersign.example",
         requester_key_id=producer_hex,
     )
-    signing_input = countersign_signing_input(entry["over"], entry["statement"], entry["type"])
+    signing_input = countersign_signing_input(entry["over"], entry["signer"], entry["statement"], entry["type"])
 
     # Negative 1: rewrite one result, keep the genuine signature.
     flipped = copy.deepcopy(entry)
@@ -126,6 +126,18 @@ def _build_vector() -> dict:
     # vector replaces. It must not verify under the new signing input.
     digest_only = copy.deepcopy(entry)
     digest_only["signature"] = _sign(SIGNER_SEED, entry["over"].encode("ascii"))
+
+    # Negative 5: rewrite signer.id to another countersigner's name, keep the
+    # genuine signature and key. signer is signed, so this must fail.
+    spoofed_signer = copy.deepcopy(entry)
+    spoofed_signer["signer"]["id"] = "did:web:other-countersigner.example"
+
+    # Negative 6: a signature over {over, statement, type} without signer --
+    # the scheme this vector replaces. It must not verify.
+    no_signer = copy.deepcopy(entry)
+    no_signer["signature"] = _sign(
+        SIGNER_SEED, jcs({"over": entry["over"], "statement": entry["statement"], "type": entry["type"]})
+    )
 
     # Negative 3: the signature is valid, but the receipt registers a
     # different statement. The entry stays valid; the receipt must not verify.
@@ -149,7 +161,7 @@ def _build_vector() -> dict:
     vector = {
         "description": (
             "countersign/v1 golden vector. signature = Ed25519 over "
-            'UTF8(JCS({"over": over, "statement": statement, "type": type})), '
+            'UTF8(JCS({"over": over, "signer": signer, "statement": statement, "type": type})), '
             "128 lowercase hex. receipt registers SHA-256(JCS(statement)) in the signer's log "
             "(RFC 9162 COSE Receipt; log entry hash = SHA-256 of those 32 bytes). "
             "Keys are TEST-ONLY."
@@ -183,6 +195,18 @@ def _build_vector() -> dict:
                 "name": "digest-only-signature",
                 "note": "signature over UTF8(over) alone, the pre-fix scheme",
                 "entry": digest_only,
+                "expect": {"signature": "invalid"},
+            },
+            {
+                "name": "spoofed-signer-id",
+                "note": "signer.id rewritten to another countersigner's name; key_id and signature unchanged",
+                "entry": spoofed_signer,
+                "expect": {"signature": "invalid"},
+            },
+            {
+                "name": "signature-without-signer",
+                "note": "signature over UTF8(JCS({over, statement, type})), without signer",
+                "entry": no_signer,
                 "expect": {"signature": "invalid"},
             },
             {

@@ -2,7 +2,7 @@
 
 The same file, byte for byte, is committed in capsulectl, which verifies it
 with its own Go code. These tests pin this repo's signer to it: the signature
-covers ``UTF8(JCS({over, statement, type}))``, so rewriting a single check
+covers ``UTF8(JCS({over, signer, statement, type}))``, so rewriting a single check
 result breaks it, and the receipt registers the statement's own digest.
 """
 
@@ -33,7 +33,7 @@ VECTOR = json.loads(VECTOR_PATH.read_text())
 
 # The committed vector's SHA-256. capsulectl pins the same value for its
 # byte-identical copy; regenerating must reproduce these bytes exactly.
-VECTOR_SHA256 = "3b278a3395ad47326f32987848de7b92eac08c6acbdfbebd71a237f94c197280"
+VECTOR_SHA256 = "d057691c3e20f92b815dc47780493f83b594424d8cfb9db13f3782049b3155fb"
 
 
 def test_vector_bytes_are_pinned():
@@ -51,7 +51,7 @@ def _public_key() -> Ed25519PublicKey:
 
 
 def _signature_valid(entry: dict) -> bool:
-    message = countersign_signing_input(entry["over"], entry["statement"], entry["type"])
+    message = countersign_signing_input(entry["over"], entry["signer"], entry["statement"], entry["type"])
     try:
         _public_key().verify(bytes.fromhex(entry["signature"]), message)
     except Exception:
@@ -93,8 +93,8 @@ def test_signer_reproduces_the_vector_signature_over_the_statement():
 def test_signing_input_is_jcs_of_over_statement_type():
     entry = VECTOR["entry"]
     expected = VECTOR["signing_input"].encode("utf-8")
-    assert countersign_signing_input(entry["over"], entry["statement"], entry["type"]) == expected
-    assert jcs({"over": entry["over"], "statement": entry["statement"], "type": entry["type"]}) == expected
+    assert countersign_signing_input(entry["over"], entry["signer"], entry["statement"], entry["type"]) == expected
+    assert jcs({"over": entry["over"], "signer": entry["signer"], "statement": entry["statement"], "type": entry["type"]}) == expected
 
 
 def test_positive_entry_signature_and_receipt_verify():
@@ -142,3 +142,17 @@ def test_wrong_receipt_negative_without_entry_hash_reaches_the_proof():
     assert case["expect"] == {"signature": "valid", "receipt": "unverified"}
     assert _signature_valid(case["entry"])
     assert not _receipt_valid(case["entry"])
+
+
+def test_spoofed_signer_negative_differs_only_in_signer_id():
+    """Guard the vector itself: the spoofed-signer-id case is the genuine
+    entry with only ``signer.id`` rewritten, so its failure is caused by
+    ``signer`` being inside the signing input."""
+    spoofed = next(c for c in VECTOR["negative"] if c["name"] == "spoofed-signer-id")["entry"]
+    genuine = VECTOR["entry"]
+    assert spoofed["signer"]["id"] != genuine["signer"]["id"]
+    assert spoofed["signer"]["key_id"] == genuine["signer"]["key_id"]
+    restored = json.loads(json.dumps(spoofed))
+    restored["signer"]["id"] = genuine["signer"]["id"]
+    assert restored == genuine
+    assert set(genuine["signer"]) == {"id", "key_id"}

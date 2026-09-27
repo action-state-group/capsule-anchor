@@ -76,7 +76,7 @@ def test_entry_carries_the_registered_countersign_type(valid_bundle_raw, request
 
 
 def test_signature_covers_the_statement_not_the_bundle_digest_alone(valid_bundle_raw, requester_key):
-    """The signature is over UTF8(JCS({over, statement, type})): it verifies
+    """The signature is over UTF8(JCS({over, signer, statement, type})): it verifies
     over that signing input, never over the bundle digest alone, and a
     rewritten check result breaks it."""
     bundle, statement = _statement(valid_bundle_raw)
@@ -94,14 +94,14 @@ def test_signature_covers_the_statement_not_the_bundle_digest_alone(valid_bundle
 
     pubkey = Ed25519PublicKey.from_public_bytes(attestor.authority_pubkey())
     signature = bytes.fromhex(entry["signature"])
-    pubkey.verify(signature, countersign_signing_input(entry["over"], entry["statement"], entry["type"]))
+    pubkey.verify(signature, countersign_signing_input(entry["over"], entry["signer"], entry["statement"], entry["type"]))
     with pytest.raises(Exception):
         pubkey.verify(signature, bundle.digest.encode("ascii"))
 
     tampered = dict(entry["statement"], checks=[dict(c, result="established") for c in entry["statement"]["checks"]])
     assert tampered != entry["statement"]
     with pytest.raises(Exception):
-        pubkey.verify(signature, countersign_signing_input(entry["over"], tampered, entry["type"]))
+        pubkey.verify(signature, countersign_signing_input(entry["over"], entry["signer"], tampered, entry["type"]))
 
 
 def test_self_countersignature_is_well_formed_and_flagged_not_independent(valid_bundle_raw):

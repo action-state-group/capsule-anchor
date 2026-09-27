@@ -41,7 +41,7 @@ def _entry(bundle: Bundle, private: Ed25519PrivateKey, key_id: str, **wire) -> d
         "statement": copy.deepcopy(STATEMENT),
     }
     entry["signature"] = private.sign(
-        countersign_signing_input(entry["over"], entry["statement"], entry["type"])
+        countersign_signing_input(entry["over"], entry["signer"], entry["statement"], entry["type"])
     ).hex()
     entry.update(wire)
     return entry
@@ -195,3 +195,13 @@ def test_golden_vector_negatives(case):
     )
     # This function does not check receipts; a receipt-only negative stays valid.
     assert state == ("invalid" if case["expect"]["signature"] == "invalid" else "countersigned")
+
+
+def test_spoofed_signer_id_is_invalid(bundle):
+    """``signer`` is inside the signing input: an entry whose ``signer.id``
+    is rewritten after signing (to borrow another countersigner's name)
+    fails its signature."""
+    private, key_id = _key()
+    entry = _entry(bundle, private, key_id)
+    entry["signer"]["id"] = "did:web:someone-else.example"
+    assert verify_entry(bundle, entry, producer_key_ids=[], directory={key_id: {}}) == "invalid"

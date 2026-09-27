@@ -226,8 +226,8 @@ a request could be *made*. A submission's own `profile_id` is never lost:
 `profile_conformance`'s own `detail` string already names which `action_type`s
 were/weren't covered.
 
-Signed, together with the bundle digest and the entry type, by this instance's signing
-key (§9), and registered in this instance's own log to attach a receipt: the log entry is
+Signed, together with the bundle digest, the signer and the entry type, by this
+instance's signing key (§9), and registered in this instance's own log to attach a receipt: the log entry is
 `SHA-256(JCS(statement))`, the RFC 8785 canonical bytes of the statement exactly as it
 appears in the entry, so any implementation holding only the entry can recompute it.
 
@@ -245,9 +245,11 @@ appears in the entry, so any implementation holding only the entry can recompute
   statement: { ...the statement above... },
   signature,                     // Ed25519, 128 lowercase hex, over
                                   // UTF8(JCS({"over": over,
+                                  //   "signer": signer,
                                   //   "statement": statement, "type": type}))
-                                  // -- binds the bundle AND every check
-                                  // result; a rewritten result fails it
+                                  // -- binds the bundle, the signer
+                                  // ({id, key_id}, both signed) and every
+                                  // check result; rewriting any fails it
   independent: <bool>,           // false iff the signer key equals the
                                   // countersign request's own requester key_id
                                   // -- never a bundle field, the v2 Evidence
@@ -269,12 +271,15 @@ identifier used for the STH/receipt signing root elsewhere in this codebase —
 that identifier never appears on this wire. Every entry carries the registered
 `type` value `countersign/v1`.
 
-The signing input covers the statement, not the bundle digest alone. A signature over
-the digest alone would leave every check result unauthenticated: anyone holding the
-bundle could rewrite `failed` as `established` and the signature would still verify.
+The signing input covers the signer and the statement, not the bundle digest alone. A
+signature over the digest alone would leave every check result unauthenticated: anyone
+holding the bundle could rewrite `failed` as `established` and the signature would still
+verify. Leaving `signer` out would let anyone rewrite `signer.id` to borrow another
+countersigner's name. An entry with no `type` is verified as `countersign/v1`, so the
+signing input always binds a type.
 `packages/tests/countersign/vectors/countersign-v1.json` is the golden vector for the
 signing input and the receipt, with negative cases (a rewritten result, a digest-only
-signature, a receipt for a different statement with and without its `entry_hash`);
+signature, a rewritten `signer.id`, a signature made without `signer`, a receipt for a different statement with and without its `entry_hash`);
 other implementations commit a byte-identical copy and pin its SHA-256. The generator
 is deterministic: regenerating reproduces the committed bytes.
 

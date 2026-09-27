@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The statement signer: signs the bundle digest together with the
-recomputed statement (see :func:`countersign_signing_input`), registers the
+"""The statement signer: signs the bundle digest together with the signer
+and the recomputed statement (see :func:`countersign_signing_input`), registers the
 statement in this instance's own log (reusing the
 existing digest-registration path -- the same one ``POST /register``
 already uses, ``AnchorerService.register_signed_statement_full``) to attach
@@ -57,18 +57,23 @@ def _hex_sha256(data: bytes) -> str:
 COUNTERSIGN_ENTRY_TYPE = "countersign/v1"
 
 
-def countersign_signing_input(over: str, statement: dict, entry_type: str = COUNTERSIGN_ENTRY_TYPE) -> bytes:
+def countersign_signing_input(
+    over: str, signer: dict, statement: dict, entry_type: str = COUNTERSIGN_ENTRY_TYPE
+) -> bytes:
     """The bytes a ``countersign/v1`` signature covers:
-    ``UTF8(JCS({"over": over, "statement": statement, "type": type}))``.
+    ``UTF8(JCS({"over": over, "signer": signer, "statement": statement, "type": type}))``.
 
-    ``statement`` is the entry's wire ``statement`` member exactly as it is
-    put on the wire (``Statement.wire_dict()``). Signing the digest alone
-    would leave every check result unauthenticated: anyone holding the
-    bundle could rewrite ``failed`` as ``established`` and the signature
-    would still verify. Binding ``over``, ``statement`` and ``type`` in one
-    JCS object makes any change to any of them break the signature.
+    ``signer`` and ``statement`` are the entry's wire members exactly as
+    they are put on the wire: every member of each is signed. This service
+    emits ``signer`` as ``{id, key_id}``. Signing the digest alone would
+    leave every check result unauthenticated (anyone holding the bundle could
+    rewrite ``failed`` as ``established``); leaving ``signer`` out would let
+    anyone rewrite ``signer.id`` to borrow another countersigner's name.
+    Binding all four in one JCS object makes any change to any of them break
+    the signature. An entry with no ``type`` is verified as
+    ``countersign/v1``, so the signing input always binds a type.
     """
-    return jcs({"over": over, "statement": statement, "type": entry_type})
+    return jcs({"over": over, "signer": signer, "statement": statement, "type": entry_type})
 
 
 def sign_countersignature(
@@ -104,11 +109,12 @@ def sign_countersignature(
     signer_key_id = signer_pubkey.hex()
     independent = signer_key_id.lower() != requester_key_id.lower()
 
-    # The signature covers the bundle digest AND the statement (and the
-    # entry type), never the digest alone -- see countersign_signing_input.
+    # The signature covers the bundle digest, the signer, the statement and
+    # the entry type, never the digest alone -- see countersign_signing_input.
+    wire_signer = {"id": signer_id, "key_id": signer_key_id}
     wire_statement = statement.wire_dict()
     try:
-        signing_input = countersign_signing_input(bundle.digest, wire_statement)
+        signing_input = countersign_signing_input(bundle.digest, wire_signer, wire_statement)
         statement_bytes = statement.canonical_bytes()
     except (TypeError, ValueError) as exc:
         raise StatementRefused(f"statement cannot be canonicalized (JCS): {type(exc).__name__}") from exc
@@ -124,7 +130,7 @@ def sign_countersignature(
 
     return {
         "type": COUNTERSIGN_ENTRY_TYPE,
-        "signer": {"id": signer_id, "key_id": signer_key_id},
+        "signer": wire_signer,
         "over": bundle.digest,
         "statement": wire_statement,
         "signature": sig.signature,

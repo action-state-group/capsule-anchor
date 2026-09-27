@@ -10,7 +10,8 @@ Each ``countersign/v1`` entry is verified before anything it says is used
 
 1. ``over`` must equal the bundle digest, recomputed from the bundle itself;
 2. ``signature`` must verify under ``signer.key_id`` over the signing input
-   ``UTF8(JCS({"over", "statement", "type"}))``
+   ``UTF8(JCS({"over", "signer", "statement", "type"}))`` -- a rewritten
+   ``signer.id`` fails it as surely as a rewritten result
    (``signer.countersign_signing_input``);
 3. independence is computed here, by comparing ``signer.key_id`` with the
    producer keys the caller supplies. The entry's own ``independent`` member
@@ -80,7 +81,7 @@ def _signature_valid(entry: dict, digest: str) -> bool:
         return False
     try:
         message = countersign_signing_input(
-            entry["over"], entry["statement"], entry.get("type") or COUNTERSIGN_ENTRY_TYPE
+            entry["over"], signer, entry["statement"], entry.get("type") or COUNTERSIGN_ENTRY_TYPE
         )
         Ed25519PublicKey.from_public_bytes(bytes.fromhex(key_id)).verify(bytes.fromhex(signature), message)
     except (InvalidSignature, TypeError, ValueError):

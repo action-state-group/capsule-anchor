@@ -19,10 +19,11 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Security
 
-- **`countersign/v1` signatures now cover the statement.** The signing input is
-  `UTF8(JCS({"over": over, "statement": statement, "type": type}))`; previously it
-  was the bundle digest alone, which left every check result in `statement`
-  unauthenticated. The receipt's log entry is now `SHA-256(JCS(statement))` (was
+- **`countersign/v1` signatures now cover the signer and the statement.** The
+  signing input is
+  `UTF8(JCS({"over": over, "signer": signer, "statement": statement, "type": type}))`;
+  previously it was the bundle digest alone, which left every check result in
+  `statement`, and the signer's `id`, unauthenticated. The receipt's log entry is now `SHA-256(JCS(statement))` (was
   sorted-key compact JSON). Entries signed before this change do not verify under
   the new signing input. Golden vector:
   `packages/tests/countersign/vectors/countersign-v1.json`.

@@ -85,6 +85,6 @@ class Statement(BaseModel):
         reproduces the identical bytes and can check the receipt.
 
         This is NOT the signing input: the signature covers ``over``,
-        ``statement`` and ``type`` together (see
+        ``signer``, ``statement`` and ``type`` together (see
         ``signer.countersign_signing_input``)."""
         return jcs(self.wire_dict())
