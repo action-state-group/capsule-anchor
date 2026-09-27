@@ -8,9 +8,10 @@ Run from the repository root:
 
 The vector is produced by this repo's real signer (``sign_countersignature``)
 and its real log (``AnchorerService``), under a fixed TEST-ONLY Ed25519 seed,
-so the signature is deterministic. The receipt carries the log's registration
-time, so it changes on every run; ``test_golden_vector.py`` verifies whichever
-receipt the committed file holds. Other implementations (capsulectl among
+so the signature is deterministic. The log clock is pinned to ``LOG_CLOCK``
+while the vector is built, so the receipt (which signs the registration time)
+is deterministic too: regenerating reproduces the committed bytes exactly,
+and ``test_golden_vector.py`` fails if it does not. Other implementations (capsulectl among
 them) commit a byte-identical copy of the output and pin its SHA-256.
 
 Signing input: ``UTF8(JCS({"over": over, "statement": statement, "type": type}))``.
@@ -24,6 +25,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from agent_action_capsule.bundle import bundle_digest
 from agent_action_capsule.canonical import jcs
@@ -38,6 +40,9 @@ from capsule_anchor.countersign.statement import Scope, Statement
 from capsule_anchor.signing_key import LoadedSigningKey, StaticKeyProvider
 
 OUT = Path(__file__).with_name("countersign-v1.json")
+
+# The log's registration time for every receipt in the vector.
+LOG_CLOCK = datetime(2026, 9, 27, 0, 0, 0, tzinfo=timezone.utc)
 
 # TEST-ONLY keys. Never use either seed for anything but this vector.
 SIGNER_SEED = bytes([0x42] * 32)
@@ -90,7 +95,12 @@ def _sign(seed: bytes, message: bytes) -> str:
     return Ed25519PrivateKey.from_private_bytes(seed).sign(message).hex()
 
 
-def main() -> None:
+def build_vector() -> dict:
+    with mock.patch("capsule_anchor.anchoring.service._now", return_value=LOG_CLOCK):
+        return _build_vector()
+
+
+def _build_vector() -> dict:
     key = Ed25519PrivateKey.from_private_bytes(SIGNER_SEED)
     attestor = AttestorService(key_provider=StaticKeyProvider(LoadedSigningKey(key, source="test", ephemeral=False)))
     registrar = AnchorerService(attestor=attestor)
@@ -178,7 +188,15 @@ def main() -> None:
             },
         ],
     }
-    OUT.write_text(json.dumps(vector, indent=2, sort_keys=True) + "\n")
+    return vector
+
+
+def render(vector: dict) -> bytes:
+    return (json.dumps(vector, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def main() -> None:
+    OUT.write_bytes(render(build_vector()))
     print(f"wrote {OUT} sha256={hashlib.sha256(OUT.read_bytes()).hexdigest()}")
 
 

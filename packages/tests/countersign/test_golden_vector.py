@@ -25,9 +25,25 @@ from capsule_anchor.countersign.bundle import Bundle
 from capsule_anchor.countersign.signer import countersign_signing_input, sign_countersignature
 from capsule_anchor.signing_key import LoadedSigningKey, StaticKeyProvider
 
+from .vectors import generate_countersign_v1
 from .vectors.generate_countersign_v1 import BUNDLE, STATEMENT
 
-VECTOR = json.loads((Path(__file__).parent / "vectors" / "countersign-v1.json").read_text())
+VECTOR_PATH = Path(__file__).parent / "vectors" / "countersign-v1.json"
+VECTOR = json.loads(VECTOR_PATH.read_text())
+
+# The committed vector's SHA-256. capsulectl pins the same value for its
+# byte-identical copy; regenerating must reproduce these bytes exactly.
+VECTOR_SHA256 = "9f5649a7daa5c3d353dcddfb508a5c90ed81644c74740f54067ba3ce4884a0f2"
+
+
+def test_vector_bytes_are_pinned():
+    assert hashlib.sha256(VECTOR_PATH.read_bytes()).hexdigest() == VECTOR_SHA256
+
+
+def test_generator_reproduces_the_committed_vector_byte_for_byte():
+    """The generator is deterministic (fixed signing seed, fixed log clock),
+    so a regeneration can never silently change the shared bytes."""
+    assert generate_countersign_v1.render(generate_countersign_v1.build_vector()) == VECTOR_PATH.read_bytes()
 
 
 def _public_key() -> Ed25519PublicKey:

@@ -45,7 +45,7 @@
     "receipt": {
       "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
       "leaf_index": 0,
-      "receipt_b64": "0oRPowEnGQGLAQ+hBhpquWhZoRkBjKEggUSDAQCA9lhANiGDX5+sTpB/6mjFgqhYScs7zhptNzh8fhxgeRrnes+lxYJpbqE2wfRotrsXKdDRWQQ2mMeYT5SLihMs6PFWAA==",
+      "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
       "tree_size": 1
     },
     "signature": "99b2049070fe7a340ccf77e0eb877842f5ec3ea0d2a4b075f9762dfc9b0fdc1d2123bbb41bcdeb3836df71e894484b1b6096ea5152a4b7646caab62bcc4ee003",
@@ -92,7 +92,7 @@
         "receipt": {
           "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
           "leaf_index": 0,
-          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquWhZoRkBjKEggUSDAQCA9lhANiGDX5+sTpB/6mjFgqhYScs7zhptNzh8fhxgeRrnes+lxYJpbqE2wfRotrsXKdDRWQQ2mMeYT5SLihMs6PFWAA==",
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
           "tree_size": 1
         },
         "signature": "99b2049070fe7a340ccf77e0eb877842f5ec3ea0d2a4b075f9762dfc9b0fdc1d2123bbb41bcdeb3836df71e894484b1b6096ea5152a4b7646caab62bcc4ee003",
@@ -144,7 +144,7 @@
         "receipt": {
           "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
           "leaf_index": 0,
-          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquWhZoRkBjKEggUSDAQCA9lhANiGDX5+sTpB/6mjFgqhYScs7zhptNzh8fhxgeRrnes+lxYJpbqE2wfRotrsXKdDRWQQ2mMeYT5SLihMs6PFWAA==",
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
           "tree_size": 1
         },
         "signature": "03dc97dbeb61d3b200b975e212bb9aaf59fc2ee2a8d7b81e4fedcb76a215264c2bc90da2278f4b8057cc6188f1b5884e09c0f20efbaa402a8c41a8ae4d2e4a0b",
@@ -196,7 +196,7 @@
         "receipt": {
           "entry_hash": "78303cb4e8a76588c63b74097849535d14ecae44ed015277aaa0d3b40954b056",
           "leaf_index": 1,
-          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquWhZoRkBjKEggVgmgwIBgVggX5CQ5uVxC0gI2Mwr597xeFLA3i9J/Wldk1up2oqGZBr2WEA50UJvxiUGkpaTpyi/IromqOEjXhXWPb1O7QllZnEzTN5wZTZwAtTnggpY7BMD1MKtAzAcq1P/IWO0HwEFKIIC",
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggVgmgwIBgVggX5CQ5uVxC0gI2Mwr597xeFLA3i9J/Wldk1up2oqGZBr2WEAV+KgXFNIEdL/TUzoSOQ3xgdYFd4Qca+b7DZ+Kx74KmTEsfrMa3gMsuE6mmJ20ym/Z6NfJcPSmev4n1DHn1RcH",
           "tree_size": 2
         },
         "signature": "99b2049070fe7a340ccf77e0eb877842f5ec3ea0d2a4b075f9762dfc9b0fdc1d2123bbb41bcdeb3836df71e894484b1b6096ea5152a4b7646caab62bcc4ee003",
