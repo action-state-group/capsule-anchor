@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The statement signer: signs the recomputed statement over the bundle
-digest, registers the signing act in this instance's own log (reusing the
+"""The statement signer: signs the bundle digest together with the signer
+and the recomputed statement (see :func:`countersign_signing_input`), registers the
+statement in this instance's own log (reusing the
 existing digest-registration path -- the same one ``POST /register``
 already uses, ``AnchorerService.register_signed_statement_full``) to attach
 a receipt, and assembles the ``countersignatures[]`` entry.
@@ -17,8 +18,16 @@ import base64
 import hashlib
 from typing import Protocol
 
+from agent_action_capsule.canonical import jcs
+
 from capsule_anchor.countersign.bundle import Bundle
 from capsule_anchor.countersign.statement import Statement
+
+
+class StatementRefused(ValueError):
+    """The statement has no JCS form, so it cannot be signed or registered --
+    for example a string holding a lone surrogate, which has no UTF-8
+    encoding. A caller error, refused before anything is signed or logged."""
 
 
 class Attestor(Protocol):
@@ -46,6 +55,25 @@ def _hex_sha256(data: bytes) -> str:
 # capsulectl's own ``countersignAPI`` const (internal/cli/countersign.go) --
 # required by the AAC Evidence Bundle -00 spec's registered "type" field.
 COUNTERSIGN_ENTRY_TYPE = "countersign/v1"
+
+
+def countersign_signing_input(
+    over: str, signer: dict, statement: dict, entry_type: str = COUNTERSIGN_ENTRY_TYPE
+) -> bytes:
+    """The bytes a ``countersign/v1`` signature covers:
+    ``UTF8(JCS({"over": over, "signer": signer, "statement": statement, "type": type}))``.
+
+    ``signer`` and ``statement`` are the entry's wire members exactly as
+    they are put on the wire: every member of each is signed. This service
+    emits ``signer`` as ``{id, key_id}``. Signing the digest alone would
+    leave every check result unauthenticated (anyone holding the bundle could
+    rewrite ``failed`` as ``established``); leaving ``signer`` out would let
+    anyone rewrite ``signer.id`` to borrow another countersigner's name.
+    Binding all four in one JCS object makes any change to any of them break
+    the signature. An entry with no ``type`` is verified as
+    ``countersign/v1``, so the signing input always binds a type.
+    """
+    return jcs({"over": over, "signer": signer, "statement": statement, "type": entry_type})
 
 
 def sign_countersignature(
@@ -81,26 +109,30 @@ def sign_countersignature(
     signer_key_id = signer_pubkey.hex()
     independent = signer_key_id.lower() != requester_key_id.lower()
 
-    # The signature is over the bundle digest -- the UTF-8 bytes of its
-    # 64-hex-character form (the ``over`` field), not the statement bytes.
-    # The statement accompanies the signature; it is never what is signed
-    # (the entry shape's own definition sentence).
-    sig = attestor.attest(bundle.digest.encode("ascii"))
+    # The signature covers the bundle digest, the signer, the statement and
+    # the entry type, never the digest alone -- see countersign_signing_input.
+    wire_signer = {"id": signer_id, "key_id": signer_key_id}
+    wire_statement = statement.wire_dict()
+    try:
+        signing_input = countersign_signing_input(bundle.digest, wire_signer, wire_statement)
+        statement_bytes = statement.canonical_bytes()
+    except (TypeError, ValueError) as exc:
+        raise StatementRefused(f"statement cannot be canonicalized (JCS): {type(exc).__name__}") from exc
+    sig = attestor.attest(signing_input)
 
-    # The receipt registers the STATEMENT's own digest (never the bundle
-    # digest, and never the statement bytes themselves) -- a fixed-size
-    # digest leaf, matching every other digest-registration path this
-    # service already exposes (POST /register). This is independent of what
-    # the countersignature itself signs.
-    statement_bytes = statement.canonical_bytes()
+    # The receipt registers the STATEMENT's own digest -- SHA-256 of its JCS
+    # bytes (never the bundle digest, and never the statement bytes
+    # themselves) -- a fixed-size digest leaf, matching every other
+    # digest-registration path this service already exposes (POST
+    # /register). A verifier recomputes it from the entry's ``statement``.
     statement_digest = _hex_sha256(statement_bytes)
     reg = registrar.register_signed_statement_full(bytes.fromhex(statement_digest))
 
     return {
         "type": COUNTERSIGN_ENTRY_TYPE,
-        "signer": {"id": signer_id, "key_id": signer_key_id},
+        "signer": wire_signer,
         "over": bundle.digest,
-        "statement": statement.wire_dict(),
+        "statement": wire_statement,
         "signature": sig.signature,
         "independent": independent,
         "receipt": {

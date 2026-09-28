@@ -270,3 +270,24 @@ def test_rate_limit_is_a_separate_budget_per_instance(monkeypatch, issuer_allowl
     )
     resp = client.post("/countersign/register", json={})
     assert resp.status_code != 429, resp.text
+
+
+def test_statement_that_cannot_be_canonicalized_is_a_clean_400(monkeypatch, requester_key, issuer_allowlist):
+    """A lone surrogate cannot be encoded as UTF-8, so the statement has no
+    JCS form and cannot be signed. The request is refused with a 400, never
+    a 500. (The JSON body parser already rejects a lone-surrogate escape;
+    this covers a statement that acquires one some other way.)"""
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_PUBLIC_HOST", "countersign.example")
+    real_recompute = router_module.recompute_statement
+
+    def recompute_with_surrogate(*args, **kwargs):
+        statement = real_recompute(*args, **kwargs)
+        statement.scope.ledger_id = "ledger:\ud800"
+        return statement
+
+    monkeypatch.setattr(router_module, "recompute_statement", recompute_with_surrogate)
+    safe_client = TestClient(client.app, raise_server_exceptions=False)
+    resp = safe_client.post("/countersign/register", json=_submission(base_bundle_raw(), requester_key))
+    assert resp.status_code == 400, resp.text
+    assert "statement" in resp.json()["detail"]

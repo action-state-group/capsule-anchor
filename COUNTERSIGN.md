@@ -226,14 +226,16 @@ a request could be *made*. A submission's own `profile_id` is never lost:
 `profile_conformance`'s own `detail` string already names which `action_type`s
 were/weren't covered.
 
-Signed over its own canonical bytes (sorted-key, compact JSON — so any implementation
-reproduces identical bytes from the same fields) by this instance's signing key, and
-registered in this instance's own log to attach a receipt.
+Signed, together with the bundle digest, the signer and the entry type, by this
+instance's signing key (§9), and registered in this instance's own log to attach a receipt: the log entry is
+`SHA-256(JCS(statement))`, the RFC 8785 canonical bytes of the statement exactly as it
+appears in the entry, so any implementation holding only the entry can recompute it.
 
 ## 9. The `countersignatures[]` entry
 
 ```
 {
+  type: "countersign/v1",
   signer: { id, key_id },        // id is this instance's own did:web identity;
                                   // key_id is the full 32-byte Ed25519 public
                                   // key, hex-encoded (64 chars) -- never a
@@ -241,10 +243,13 @@ registered in this instance's own log to attach a receipt.
                                   // entry can check the signature offline
   over: <bundle digest>,
   statement: { ...the statement above... },
-  signature,                     // over the UTF-8 bytes of `over`'s
-                                  // 64-hex-character form, never over the
-                                  // statement (which accompanies the
-                                  // signature but is not what is signed)
+  signature,                     // Ed25519, 128 lowercase hex, over
+                                  // UTF8(JCS({"over": over,
+                                  //   "signer": signer,
+                                  //   "statement": statement, "type": type}))
+                                  // -- binds the bundle, the signer
+                                  // ({id, key_id}, both signed) and every
+                                  // check result; rewriting any fails it
   independent: <bool>,           // false iff the signer key equals the
                                   // countersign request's own requester key_id
                                   // -- never a bundle field, the v2 Evidence
@@ -263,23 +268,40 @@ Per the wire-shape reconciliation with `capsule-cli`'s Go verifier
 (action-state-ops [countersign-engine-in-capsule-anchor]): `key_id` is
 deliberately NOT this repo's internal, truncated `sha256(pubkey)[:16]`
 identifier used for the STH/receipt signing root elsewhere in this codebase —
-that identifier never appears on this wire. The `type` field the spec's own
-base Evidence Bundle draft reserves for `countersignatures[]` entries is an
-open cross-lane question still with the spec desk; this module does not emit
-one.
+that identifier never appears on this wire. Every entry carries the registered
+`type` value `countersign/v1`.
 
-A verifier resolving this entry (see `countersign/verify.py`) reads one of five
-states: `self-attested` (no entry, and the bundle's own checkpoint carries no
-independently-authenticated evidence), `witnessed` (no entry, but the bundle's
-checkpoint DOES carry an independently-authenticated COSE statement — the free,
-permissive-policy grade), `self-countersigned` (`independent: false`),
-`unresolved signer` (independent, but the signer's `key_id` is absent from whatever
-countersigner directory the verifier consults), or `countersigned` (independent and
-resolved). When `countersignatures[]` carries more than one entry, every entry is
-considered and the best-resolved outcome wins (`countersigned` over
-`unresolved signer` over `self-countersigned`) — a real, independent
-countersignature is never hidden behind a later self-countersigned or unresolved
-one.
+The signing input covers the signer and the statement, not the bundle digest alone. A
+signature over the digest alone would leave every check result unauthenticated: anyone
+holding the bundle could rewrite `failed` as `established` and the signature would still
+verify. Leaving `signer` out would let anyone rewrite `signer.id` to borrow another
+countersigner's name. An entry with no `type` is verified as `countersign/v1`, so the
+signing input always binds a type.
+`packages/tests/countersign/vectors/countersign-v1.json` is the golden vector for the
+signing input and the receipt, with negative cases (a rewritten result, a digest-only
+signature, a rewritten `signer.id`, a signature made without `signer`, a receipt for a different statement with and without its `entry_hash`);
+other implementations commit a byte-identical copy and pin its SHA-256. The generator
+is deterministic: regenerating reproduces the committed bytes.
+
+`countersign/verify.py` verifies each entry before using anything it says
+(`verify_entry`): `over` must equal the bundle digest recomputed from the bundle, and
+`signature` must verify under `signer.key_id` over the signing input above (both as
+lowercase hex). Independence is computed from the producer keys the caller supplies
+(`producer_key_ids`, required); the entry's own `independent` member is never read. Each
+entry is `invalid` (either check fails; nothing it says is used), `unverified` (a type
+this module does not verify), `self-countersigned` (the signer key is one of the
+producer's), `unresolved signer` (independent, but the signer's `key_id` is absent from
+whatever countersigner directory the verifier consults), or `countersigned` (independent
+and resolved). This module does not check receipts.
+
+`resolve_entry_state` reads one state for the whole bundle. With no entries it is
+`self-attested` (the bundle's own checkpoint carries no independently-authenticated
+evidence) or `witnessed` (the bundle's checkpoint DOES carry an
+independently-authenticated COSE statement — the free, permissive-policy grade). With
+entries, every entry is verified and the best outcome wins (`countersigned` over
+`unresolved signer` over `self-countersigned` over `unverified` over `invalid`) — a real,
+independent countersignature is never hidden behind another entry, and a bundle whose
+every entry fails verification reads `invalid`.
 
 ## 10. Directory row (for a countersigner directory, if one is consulted)
 

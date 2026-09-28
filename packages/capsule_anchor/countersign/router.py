@@ -26,7 +26,7 @@ from capsule_anchor.countersign.bundle import BundleRefused, accept_bundle
 from capsule_anchor.countersign.issuers import IssuerAllowlist
 from capsule_anchor.countersign.policy import NullPolicyModule, PolicyRegistry, default_registry
 from capsule_anchor.countersign.recompute import recompute_statement
-from capsule_anchor.countersign.signer import Attestor, Registrar, sign_countersignature
+from capsule_anchor.countersign.signer import Attestor, Registrar, StatementRefused, sign_countersignature
 from capsule_anchor.countersign.webhooks import (
     WebhookSubscription,
     WebhookURLRefused,
@@ -167,14 +167,17 @@ def get_router() -> APIRouter:
         statement = recompute_statement(
             bundle, policy_module=module, ledger_id=req.requester.id, profile_id=req.profile_id or ""
         )
-        entry = sign_countersignature(
-            bundle,
-            statement,
-            attestor=_attestor,
-            registrar=_registrar,
-            signer_id=signer_id,
-            requester_key_id=req.requester.key_id,
-        )
+        try:
+            entry = sign_countersignature(
+                bundle,
+                statement,
+                attestor=_attestor,
+                registrar=_registrar,
+                signer_id=signer_id,
+                requester_key_id=req.requester.key_id,
+            )
+        except StatementRefused as exc:
+            raise HTTPException(status_code=400, detail=f"refused: {exc}") from exc
 
         if req.webhook_url and req.webhook_secret:
             try:

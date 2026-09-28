@@ -21,9 +21,9 @@ from .config import strict_countersign_active
 from .issuers import IssuerAllowlist
 from .recompute import recompute_statement
 from .results import CheckResult, Result
-from .signer import sign_countersignature
+from .signer import StatementRefused, sign_countersignature
 from .statement import Statement
-from .verify import resolve_entry_state
+from .verify import resolve_entry_state, verify_entry
 
 __all__ = [
     "Bundle",
@@ -32,6 +32,7 @@ __all__ = [
     "IssuerAllowlist",
     "Result",
     "Statement",
+    "StatementRefused",
     "accept_bundle",
     "compute_bundle_digest",
     "parse_bundle",
@@ -39,4 +40,5 @@ __all__ = [
     "resolve_entry_state",
     "sign_countersignature",
     "strict_countersign_active",
+    "verify_entry",
 ]

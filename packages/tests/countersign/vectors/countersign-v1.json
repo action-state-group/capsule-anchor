@@ -1,0 +1,407 @@
+{
+  "bundle": {
+    "checkpoints": [
+      {
+        "key_id": "k1",
+        "log_id": "ledger:golden-vector-001",
+        "mmr_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mmr_size": 1,
+        "prev_size": 0,
+        "timestamp": "2026-09-01T00:00:00+00:00"
+      }
+    ],
+    "closure_depth": 2,
+    "ledger_id": "ledger:golden-vector-001",
+    "payloads": "none",
+    "records": [
+      {
+        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "kind": "action",
+        "seq": 1,
+        "timestamp": "2026-09-01T00:00:00+00:00"
+      }
+    ],
+    "schema": "evidence-bundle/v2"
+  },
+  "bundle_digest": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+  "description": "countersign/v1 golden vector. signature = Ed25519 over UTF8(JCS({\"over\": over, \"signer\": signer, \"statement\": statement, \"type\": type})), 128 lowercase hex. receipt registers SHA-256(JCS(statement)) in the signer's log (RFC 9162 COSE Receipt; log entry hash = SHA-256 of those 32 bytes). Keys are TEST-ONLY.",
+  "directory": {
+    "countersigners": [
+      {
+        "endpoint": "https://countersign.example",
+        "key_ids": [
+          "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        ],
+        "name": "Countersign Test Operator",
+        "statement_types_issued": [
+          "countersign/v1"
+        ]
+      }
+    ]
+  },
+  "entry": {
+    "independent": true,
+    "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+    "receipt": {
+      "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+      "leaf_index": 0,
+      "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+      "tree_size": 1
+    },
+    "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+    "signer": {
+      "id": "did:web:countersign.example",
+      "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+    },
+    "statement": {
+      "checks": [
+        {
+          "name": "chain consistency",
+          "result": "not checked"
+        },
+        {
+          "name": "range membership",
+          "result": "failed"
+        },
+        {
+          "name": "cadence",
+          "result": "established"
+        },
+        {
+          "name": "key hygiene",
+          "result": "not present"
+        },
+        {
+          "name": "profile conformance",
+          "result": "inconclusive"
+        }
+      ],
+      "recomputed_at": "2026-09-27T00:00:00Z",
+      "scope": {
+        "closure_depth": 2,
+        "ledger_id": "ledger:golden-vector-001"
+      }
+    },
+    "type": "countersign/v1"
+  },
+  "negative": [
+    {
+      "entry": {
+        "independent": true,
+        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "receipt": {
+          "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+          "leaf_index": 0,
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+          "tree_size": 1
+        },
+        "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+        "signer": {
+          "id": "did:web:countersign.example",
+          "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        },
+        "statement": {
+          "checks": [
+            {
+              "name": "chain consistency",
+              "result": "not checked"
+            },
+            {
+              "name": "range membership",
+              "result": "established"
+            },
+            {
+              "name": "cadence",
+              "result": "established"
+            },
+            {
+              "name": "key hygiene",
+              "result": "not present"
+            },
+            {
+              "name": "profile conformance",
+              "result": "inconclusive"
+            }
+          ],
+          "recomputed_at": "2026-09-27T00:00:00Z",
+          "scope": {
+            "closure_depth": 2,
+            "ledger_id": "ledger:golden-vector-001"
+          }
+        },
+        "type": "countersign/v1"
+      },
+      "expect": {
+        "signature": "invalid"
+      },
+      "name": "flipped-result",
+      "note": "statement.checks[1].result rewritten 'failed' -> 'established'; signature unchanged"
+    },
+    {
+      "entry": {
+        "independent": true,
+        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "receipt": {
+          "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+          "leaf_index": 0,
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+          "tree_size": 1
+        },
+        "signature": "03dc97dbeb61d3b200b975e212bb9aaf59fc2ee2a8d7b81e4fedcb76a215264c2bc90da2278f4b8057cc6188f1b5884e09c0f20efbaa402a8c41a8ae4d2e4a0b",
+        "signer": {
+          "id": "did:web:countersign.example",
+          "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        },
+        "statement": {
+          "checks": [
+            {
+              "name": "chain consistency",
+              "result": "not checked"
+            },
+            {
+              "name": "range membership",
+              "result": "failed"
+            },
+            {
+              "name": "cadence",
+              "result": "established"
+            },
+            {
+              "name": "key hygiene",
+              "result": "not present"
+            },
+            {
+              "name": "profile conformance",
+              "result": "inconclusive"
+            }
+          ],
+          "recomputed_at": "2026-09-27T00:00:00Z",
+          "scope": {
+            "closure_depth": 2,
+            "ledger_id": "ledger:golden-vector-001"
+          }
+        },
+        "type": "countersign/v1"
+      },
+      "expect": {
+        "signature": "invalid"
+      },
+      "name": "digest-only-signature",
+      "note": "signature over UTF8(over) alone, the pre-fix scheme"
+    },
+    {
+      "entry": {
+        "independent": true,
+        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "receipt": {
+          "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+          "leaf_index": 0,
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+          "tree_size": 1
+        },
+        "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+        "signer": {
+          "id": "did:web:other-countersigner.example",
+          "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        },
+        "statement": {
+          "checks": [
+            {
+              "name": "chain consistency",
+              "result": "not checked"
+            },
+            {
+              "name": "range membership",
+              "result": "failed"
+            },
+            {
+              "name": "cadence",
+              "result": "established"
+            },
+            {
+              "name": "key hygiene",
+              "result": "not present"
+            },
+            {
+              "name": "profile conformance",
+              "result": "inconclusive"
+            }
+          ],
+          "recomputed_at": "2026-09-27T00:00:00Z",
+          "scope": {
+            "closure_depth": 2,
+            "ledger_id": "ledger:golden-vector-001"
+          }
+        },
+        "type": "countersign/v1"
+      },
+      "expect": {
+        "signature": "invalid"
+      },
+      "name": "spoofed-signer-id",
+      "note": "signer.id rewritten to another countersigner's name; key_id and signature unchanged"
+    },
+    {
+      "entry": {
+        "independent": true,
+        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "receipt": {
+          "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+          "leaf_index": 0,
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+          "tree_size": 1
+        },
+        "signature": "99b2049070fe7a340ccf77e0eb877842f5ec3ea0d2a4b075f9762dfc9b0fdc1d2123bbb41bcdeb3836df71e894484b1b6096ea5152a4b7646caab62bcc4ee003",
+        "signer": {
+          "id": "did:web:countersign.example",
+          "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        },
+        "statement": {
+          "checks": [
+            {
+              "name": "chain consistency",
+              "result": "not checked"
+            },
+            {
+              "name": "range membership",
+              "result": "failed"
+            },
+            {
+              "name": "cadence",
+              "result": "established"
+            },
+            {
+              "name": "key hygiene",
+              "result": "not present"
+            },
+            {
+              "name": "profile conformance",
+              "result": "inconclusive"
+            }
+          ],
+          "recomputed_at": "2026-09-27T00:00:00Z",
+          "scope": {
+            "closure_depth": 2,
+            "ledger_id": "ledger:golden-vector-001"
+          }
+        },
+        "type": "countersign/v1"
+      },
+      "expect": {
+        "signature": "invalid"
+      },
+      "name": "signature-without-signer",
+      "note": "signature over UTF8(JCS({over, statement, type})), without signer"
+    },
+    {
+      "entry": {
+        "independent": true,
+        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "receipt": {
+          "entry_hash": "78303cb4e8a76588c63b74097849535d14ecae44ed015277aaa0d3b40954b056",
+          "leaf_index": 1,
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggVgmgwIBgVggX5CQ5uVxC0gI2Mwr597xeFLA3i9J/Wldk1up2oqGZBr2WEAV+KgXFNIEdL/TUzoSOQ3xgdYFd4Qca+b7DZ+Kx74KmTEsfrMa3gMsuE6mmJ20ym/Z6NfJcPSmev4n1DHn1RcH",
+          "tree_size": 2
+        },
+        "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+        "signer": {
+          "id": "did:web:countersign.example",
+          "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        },
+        "statement": {
+          "checks": [
+            {
+              "name": "chain consistency",
+              "result": "not checked"
+            },
+            {
+              "name": "range membership",
+              "result": "failed"
+            },
+            {
+              "name": "cadence",
+              "result": "established"
+            },
+            {
+              "name": "key hygiene",
+              "result": "not present"
+            },
+            {
+              "name": "profile conformance",
+              "result": "inconclusive"
+            }
+          ],
+          "recomputed_at": "2026-09-27T00:00:00Z",
+          "scope": {
+            "closure_depth": 2,
+            "ledger_id": "ledger:golden-vector-001"
+          }
+        },
+        "type": "countersign/v1"
+      },
+      "expect": {
+        "receipt": "unverified",
+        "signature": "valid"
+      },
+      "name": "receipt-for-other-statement",
+      "note": "valid signature; receipt registers a different statement"
+    },
+    {
+      "entry": {
+        "independent": true,
+        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "receipt": {
+          "leaf_index": 1,
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggVgmgwIBgVggX5CQ5uVxC0gI2Mwr597xeFLA3i9J/Wldk1up2oqGZBr2WEAV+KgXFNIEdL/TUzoSOQ3xgdYFd4Qca+b7DZ+Kx74KmTEsfrMa3gMsuE6mmJ20ym/Z6NfJcPSmev4n1DHn1RcH",
+          "tree_size": 2
+        },
+        "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+        "signer": {
+          "id": "did:web:countersign.example",
+          "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
+        },
+        "statement": {
+          "checks": [
+            {
+              "name": "chain consistency",
+              "result": "not checked"
+            },
+            {
+              "name": "range membership",
+              "result": "failed"
+            },
+            {
+              "name": "cadence",
+              "result": "established"
+            },
+            {
+              "name": "key hygiene",
+              "result": "not present"
+            },
+            {
+              "name": "profile conformance",
+              "result": "inconclusive"
+            }
+          ],
+          "recomputed_at": "2026-09-27T00:00:00Z",
+          "scope": {
+            "closure_depth": 2,
+            "ledger_id": "ledger:golden-vector-001"
+          }
+        },
+        "type": "countersign/v1"
+      },
+      "expect": {
+        "receipt": "unverified",
+        "signature": "valid"
+      },
+      "name": "receipt-for-other-statement-no-entry-hash",
+      "note": "as receipt-for-other-statement, with receipt.entry_hash removed"
+    }
+  ],
+  "producer_public_key_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+  "signer_public_key_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
+  "signer_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+  "signing_input": "{\"over\":\"d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b\",\"signer\":{\"id\":\"did:web:countersign.example\",\"key_id\":\"2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\"},\"statement\":{\"checks\":[{\"name\":\"chain consistency\",\"result\":\"not checked\"},{\"name\":\"range membership\",\"result\":\"failed\"},{\"name\":\"cadence\",\"result\":\"established\"},{\"name\":\"key hygiene\",\"result\":\"not present\"},{\"name\":\"profile conformance\",\"result\":\"inconclusive\"}],\"recomputed_at\":\"2026-09-27T00:00:00Z\",\"scope\":{\"closure_depth\":2,\"ledger_id\":\"ledger:golden-vector-001\"}},\"type\":\"countersign/v1\"}",
+  "statement_digest": "25517d12f50344e9f962f72c6a3d96f714c419847d62763d7bab3ee2de38abb5"
+}
