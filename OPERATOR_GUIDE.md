@@ -406,10 +406,10 @@ touches.
 **The asymmetric trade.** Roots are `O(checkpoints)` — small. Entries are
 `O(entries)` — the thing that actually grows without bound, and specifically
 `submitted_statements`, which stores every issued receipt as `BYTEA` keyed
-by `entry_hash`. Historically this witness kept every entry forever and
+by `entry_hash`. Historically this witness never pruned an entry and
 persisted only a SINGLE latest Signed Tree Head — the expensive thing was
-kept forever and the cheap thing was not retained at all. This inverts that:
-`signed_tree_head_history` retains every signed root forever (small); entry
+never pruned and the cheap thing was not retained at all. This inverts that:
+`signed_tree_head_history` never deletes a signed root (small); entry
 retention — meaning the `submitted_statements` re-issue cache — is now
 configurable via `CAPSULE_ANCHOR_ENTRY_RETENTION`.
 
@@ -423,7 +423,8 @@ or `checkpoint_equivocations`. **What you give up:** `GET /v1/inclusion/{capsule
 and any other re-issue lookup for a pruned entry returns 404 instead of the
 cached receipt — the ORIGINAL receipt, already handed to the holder at
 registration time, is completely unaffected and remains independently
-verifiable forever, per §5. A resubmission of the exact same statement after
+verifiable offline, per §5, for as long as the key that signed it stays
+published (see "Key rotation"). A resubmission of the exact same statement after
 its cache row was pruned is treated as new (a fresh log entry, a fresh
 receipt) rather than an idempotent cache hit — a policy tradeoff, not
 corruption; both entries verify.
