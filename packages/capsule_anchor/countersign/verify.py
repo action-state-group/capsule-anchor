@@ -103,8 +103,10 @@ def verify_entry(
     resolvable signer ``key_id`` to its directory row."""
     if not isinstance(entry, dict):
         return "invalid"
+    # An absent or empty type is verified as countersign/v1 (matching
+    # capsulectl); the signing input then binds "countersign/v1", never "".
     entry_type = entry.get("type")
-    if entry_type is not None and entry_type != COUNTERSIGN_ENTRY_TYPE:
+    if entry_type not in (None, "") and entry_type != COUNTERSIGN_ENTRY_TYPE:
         return "unverified"
     if not _signature_valid(entry, compute_bundle_digest(bundle)):
         return "invalid"

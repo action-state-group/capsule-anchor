@@ -205,3 +205,28 @@ def test_spoofed_signer_id_is_invalid(bundle):
     entry = _entry(bundle, private, key_id)
     entry["signer"]["id"] = "did:web:someone-else.example"
     assert verify_entry(bundle, entry, producer_key_ids=[], directory={key_id: {}}) == "invalid"
+
+
+@pytest.mark.parametrize("missing", ["absent", "empty"])
+def test_missing_or_empty_type_is_verified_as_v1(bundle, missing):
+    """Matches capsulectl: an entry whose ``type`` is absent or "" is
+    verified as countersign/v1, over a signing input that binds
+    "countersign/v1" -- no downgrade."""
+    private, key_id = _key()
+    entry = _entry(bundle, private, key_id)  # signed with type countersign/v1
+    if missing == "absent":
+        del entry["type"]
+    else:
+        entry["type"] = ""
+    assert verify_entry(bundle, entry, producer_key_ids=[], directory={key_id: {}}) == "countersigned"
+
+
+def test_empty_type_does_not_verify_a_signature_over_an_empty_type(bundle):
+    """The "" tolerance never lets a signature over ``"type": ""`` through:
+    the signing input always binds "countersign/v1"."""
+    private, key_id = _key()
+    entry = _entry(bundle, private, key_id, type="")
+    entry["signature"] = private.sign(
+        countersign_signing_input(entry["over"], entry["signer"], entry["statement"], "")
+    ).hex()
+    assert verify_entry(bundle, entry, producer_key_ids=[], directory={key_id: {}}) == "invalid"
