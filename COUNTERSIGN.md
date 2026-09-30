@@ -23,13 +23,22 @@ reconciliation, rejected 100% of `capsulectl`'s real output).
 ## 1. What this is, and what it is not
 
 The witness (see `OPERATOR_GUIDE.md`) answers one question: *does an entry exist in
-this log at this tree size, and has the log been consistent since?* It accepts almost
-anything, is permissive by design, and never inspects the content of what it
-witnesses.
+this log at this tree size, and has the log been consistent since?* In RFC 9943 terms
+it is a Transparency Service registering checkpoint statements under a published
+Registration Policy (`OPERATOR_GUIDE.md` §1, "Registration Policy"). On
+`POST /checkpoints`, the checkpoint must be well-formed and its signature must verify,
+and, when it carries a consistency proof, its previous size and root must match the
+last checkpoint registered for that log and the proof must verify. The older
+`mmr-checkpoint` path on `/transparency/register-statement` checks size only: the
+previous size must match the last registered size, and the size must grow. The policy
+is open as to who may submit, and the witness never inspects the content of the log a
+checkpoint commits to.
 
 Countersign answers a different, narrower question: *does a specific bundle of
 records — digests only, no payloads — hold together structurally, and does it satisfy
-a named profile's own checks?* It is:
+a named profile's own checks?* In RFC 9943 terms it plays the **Auditor** role. RFC
+9943 defines that role and leaves open how an Auditor checks; §3 and §5 state what
+this module checks. It is:
 
 - **Additive.** A second, opt-in registration surface in the same codebase, gated
   behind two environment variables (§4). Absent both, this module changes nothing
@@ -48,10 +57,12 @@ path (`POST /checkpoints`, see `README.md`'s "Witness host" section and
 as plain English for the ordinary act of signing and receipting whatever checkpoint
 it accepts — including the `countersigned-observed` grade a foreign-accumulator
 checkpoint earns when this witness observes and timestamps it without independently
-verifying its accumulator math. That is witness behavior: permissive by design, no
-registration policy, no issuer allowlist, no distinct signer identity from the
-submitter. It predates this module and is not this module — this document is the
-only place in this codebase where **Countersign** (capitalized) names a service.
+verifying its accumulator math. That is witness behavior, under the witness's own
+published Registration Policy (`OPERATOR_GUIDE.md` §1): open as to who may submit (no
+issuer allowlist outside the enrolled submitters, no distinct signer identity from
+the submitter), with a consistency check on what is submitted. It predates this
+module and is not this module — this document is the only place in this codebase
+where **Countersign** (capitalized) names a service.
 
 ## 2. The five results
 
@@ -124,10 +135,12 @@ set, `POST /countersign/register` is mounted.
 
 ## 5. Registration policy — the trust anchor
 
-**This is the part that makes a strict instance a Transparency Service in the
-RFC 9943 sense, and the open witness surface is not one.** RFC 9943 §5.1.1.1
+**This is the Registration Policy of the countersign surface.** RFC 9943 §5.1.1.1
 requires a Transparency Service to authenticate a Signed Statement's issuer under a
-Registration Policy, and to publish that policy. This section is that publication.
+Registration Policy, and to publish that policy. This section is that publication
+for `POST /countersign/register`. The witness's checkpoint paths run under a
+different published policy, a consistency check with open submission
+(`OPERATOR_GUIDE.md` §1, "Registration Policy").
 
 Under `CAPSULE_ANCHOR_REGISTRATION_POLICY=strict`, every registration is checked
 against exactly this, in order — anything failing any step is refused before the
@@ -156,11 +169,13 @@ recompute in §3 ever runs:
    `profile_id` field to send one with) still succeeds — the five generic checks
    only, no profile-specific coverage, never a refusal.
 
-The witness's permissive surfaces (`/checkpoints`, `/register`) make none of these
-claims and are not described as a Transparency Service by this module — they accept
-a self-asserted key for any unenrolled identity, by design, and that design is
-correct for what they are. Only an instance running under strict policy, with an
-issuer allowlist actually configured, satisfies this section.
+The witness's other surfaces (`/checkpoints`, `/register`) make none of these four
+claims: they accept a self-asserted key for any unenrolled identity, by design, and
+that design is correct for what they are. Their own Registration Policy is published
+in `OPERATOR_GUIDE.md` §1 (the checkpoint paths) and in `README.md`, "Registration
+Policy and Issuer Binding" (the open policy for `/register`). Only an instance
+running under strict policy, with an issuer allowlist actually configured, satisfies
+this section.
 
 ## 6. The issuer allowlist (trust anchor config)
 

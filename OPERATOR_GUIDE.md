@@ -29,7 +29,49 @@ self-attested to a relying party outside its operator's trust domain. Two or mor
 independently operated witnesses that have each issued a receipt for the same
 checkpoint give a relying party cryptographic evidence from multiple parties who
 could not have colluded undetected — that is the meaningful transparency guarantee.
-A witness is one row in an alphabetical directory, not a moat.
+A witness is one row in an alphabetical directory; any conforming Transparency Service can
+take its place.
+
+### Registration Policy
+
+RFC 9943 has no role named "witness". In its terms, a witness is a Transparency Service,
+a checkpoint is a Signed Statement whose payload is a log head, the checks the witness
+runs before it signs are its Registration Policy, and what it returns is a Receipt. RFC
+9943 requires a Transparency Service to publish its Registration Policy. This section is
+that publication for the checkpoint paths.
+
+**`POST /checkpoints`.** A checkpoint is registered only if all of these hold:
+
+1. **Shape.** The body is a CLL checkpoint (a `CheckpointRecord`, in its JSON or COSE
+   form). Anything else is refused (400).
+2. **Signature.** The checkpoint's Ed25519 signature verifies under its own `key_id`, or,
+   for an enrolled `log_id` (see the appendix), under the key pinned for that `log_id`.
+   Otherwise it is refused (401).
+3. **Consistency.** For a `log_id` this witness already knows, a checkpoint that carries a
+   `consistency_proof` must (a) name, as `prev_size`/`prev_root`, exactly the size and root
+   of the last checkpoint this witness accepted for that `log_id`, and (b) carry a proof
+   that verifies as extending that state. If either fails it is refused (409): nothing is
+   appended and nothing is signed.
+
+Two cases register without the consistency check, and the grade on the response says so:
+a `log_id` this witness has never seen (`first-seen`: there is nothing yet to be consistent
+with), and a checkpoint for a known `log_id` that carries no `consistency_proof`
+(`registered`). Only a checkpoint that passed step 3 is graded `continuity-witnessed`.
+
+**`mmr-checkpoint` statements on `/transparency/register-statement`.** A Signed Statement
+whose payload declares `"artifact_type": "mmr-checkpoint"` must be well-formed (400
+otherwise), and, for a known `log_id`, its `prev_size` must equal the `mmr_size` of the
+last checkpoint registered for that `log_id` and its `mmr_size` must be strictly greater
+(409 otherwise). This path carries no previous root, so the check is on size only.
+
+The policy is open as to who may submit: outside the enrolled-submitter allowlist, any
+key may register a checkpoint for any `log_id`. It constrains what is registered, not who
+registers it.
+
+A Receipt issued under this policy is a COSE Receipt: an inclusion proof in this witness's
+own log. It proves that the checkpoint was registered there under the policy above. It
+does not prove that anyone else holds the same checkpoint, or that the witness agrees with
+anything the checkpointed log contains.
 
 ---
 
@@ -603,7 +645,8 @@ Each response carries its own `receipt_b64` and `entry_hash`. A relying party ca
 verify each receipt independently against each witness's own public key (resolved from
 each witness's `/.well-known/did.json`).
 
-**What witnesses check.** Each witness independently verifies the checkpoint's
+**What witnesses check.** These checks are the witness's published Registration Policy
+(§1, [Registration Policy](#registration-policy)). Each witness independently verifies the checkpoint's
 Ed25519 signature before signing, records the entry in its own CT log, and
 issues a COSE Receipt. It also remembers, per `log_id`, the last checkpoint it
 accepted: a checkpoint that omits the optional `consistency_proof` claim is

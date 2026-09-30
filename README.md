@@ -36,6 +36,10 @@ content-free Signed Tree Heads.
 https://witness.agentactioncapsule.org
 ```
 
+A "witness" here is a SCITT Transparency Service registering checkpoint statements under
+a consistency Registration Policy ([RFC 9943](https://www.rfc-editor.org/rfc/rfc9943)).
+The policy is published in [`OPERATOR_GUIDE.md`](OPERATOR_GUIDE.md#registration-policy).
+
 **One service, two vocabularies of route.** `witness.agentactioncapsule.org` is the
 checkpoint/CLL-primary name: `POST /checkpoints` is the default route every
 `capsule-emit` client registers against; `POST /register` is the explicit opt-in,
@@ -144,6 +148,13 @@ guarantees temporal inclusion; it does not attest issuer provenance.
 Production deployments SHOULD enforce issuer binding. The open policy is explicitly stated
 here so that relying parties know not to interpret a receipt from the public instance as a
 guarantee that the issuer was authenticated.
+
+The policy is open as to who may submit. The checkpoint paths additionally check what is
+submitted: a checkpoint that claims to extend an earlier one is registered only if that
+claim is consistent with the last checkpoint registered for the same log. That consistency
+check is part of the published Registration Policy — see
+[`OPERATOR_GUIDE.md`](OPERATOR_GUIDE.md#registration-policy) for exactly what is checked on
+each path.
 
 ### Supported issuer-binding patterns
 
@@ -327,9 +338,12 @@ is WITNESS behavior: a statement whose payload self-declares `"artifact_type":
 "mmr-checkpoint"` is auto-recognized and checked against the log's own last-witnessed
 checkpoint for its `log_id` before being co-signed. Any other `artifact_type` (or none)
 registers exactly as an ordinary Signed Statement — `checkpoint_witness` stays `null`.
-`/checkpoints` (stage 1 of the CLL checkpoint witness) accepts the bare `CheckpointRecord`
-wire shape directly, verifies its own signature server-side, and is stateless — the two
-surfaces are independent; a client uses one or the other, not both.
+`/checkpoints` accepts the bare `CheckpointRecord` wire shape directly and verifies its
+signature server-side, which this path does not. It is not stateless: it remembers, per
+`log_id`, the last checkpoint it accepted, and advances that record only on a `first-seen`
+or `continuity-witnessed` acceptance (never on a bare `registered` one) — see the
+`/checkpoints` section above. Both surfaces read and write that same per-`log_id` record,
+so a client uses one or the other for a given `log_id`, not both.
 
 Payload shape (JSON, embedded as the COSE_Sign1's payload):
 
