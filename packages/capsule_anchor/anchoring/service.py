@@ -39,6 +39,7 @@ from __future__ import annotations
 import collections.abc
 import hashlib
 import json
+import logging
 import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -60,7 +61,10 @@ from capsule_anchor.contracts.types import (
 
 from . import ct
 from .store import InMemoryLogStore, SqliteLogStore
+from .submitters import GRADE_COUNTERSIGNED_OBSERVED
 from .tsa import TsaError, timestamp_root_hash, tsa_enabled
+
+logger = logging.getLogger("capsule_anchor")
 
 # Coordinate scheme for the (scaffold) public log location.
 _LOG_LOCATION_PREFIX = "as-transparency-log://entry/"
@@ -363,6 +367,47 @@ class ContinuityMismatchError(RollbackError):
         super().__init__(message)
         self.last_accepted_mmr_size = last_accepted_mmr_size
         self.last_accepted_root = last_accepted_root
+
+
+class ConsistencyProofRequiredError(ContinuityMismatchError):
+    """A ``POST /checkpoints`` submission for a NATIVE CLL log (COSE wire,
+    not a foreign accumulator) that this witness has already accepted a
+    checkpoint for, but which carries no ``consistency_proof``. Raised only
+    when the consistency-proof policy is ``enforce`` (see
+    ``CONSISTENCY_PROOF_POLICIES``).
+
+    ``code`` is the stable, machine-readable name of the refusal. The
+    message tells a node that lost its local state what to do: a log that
+    restarted from empty cannot prove it extends what this witness accepted,
+    so it must start a NEW ``log_id`` rather than reuse the old one."""
+
+    code = "consistency_proof_required"
+
+
+#: ``AnchorerService(consistency_proof_policy=...)`` / env
+#: ``CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF``: what this witness does with a
+#: NATIVE log's later checkpoint (its ``log_id`` already accepted) that
+#: carries no ``consistency_proof``.
+#:
+#: * ``off``: accept it, graded ``registered`` (the stage-2 behavior).
+#: * ``warn``: accept it exactly as ``off``, but log the refusal ``enforce``
+#:   WOULD have made and count it per ``log_id``
+#:   (``AnchorerService.consistency_proof_would_refuse``).
+#: * ``enforce``: refuse it with ``ConsistencyProofRequiredError`` (409).
+#:
+#: A foreign accumulator (enrolled ``accumulator: foreign``, graded
+#: ``countersigned-observed``) and the JSON wire form are NEVER subject to
+#: this policy: this witness cannot verify their accumulator, so they send no
+#: proof and stay countersigned-observed.
+CONSISTENCY_PROOF_POLICY_OFF = "off"
+CONSISTENCY_PROOF_POLICY_WARN = "warn"
+CONSISTENCY_PROOF_POLICY_ENFORCE = "enforce"
+CONSISTENCY_PROOF_POLICIES = (
+    CONSISTENCY_PROOF_POLICY_OFF,
+    CONSISTENCY_PROOF_POLICY_WARN,
+    CONSISTENCY_PROOF_POLICY_ENFORCE,
+)
+DEFAULT_CONSISTENCY_PROOF_POLICY = CONSISTENCY_PROOF_POLICY_WARN
 
 
 def parse_checkpoint_payload(payload: bytes | None) -> dict | None:
@@ -671,7 +716,19 @@ class AnchorerService:
         db_path: str | None = None,
         key_provider: KeyProvider | None = None,
         store=None,
+        consistency_proof_policy: str = DEFAULT_CONSISTENCY_PROOF_POLICY,
     ) -> None:
+        if consistency_proof_policy not in CONSISTENCY_PROOF_POLICIES:
+            raise ValueError(
+                f"consistency_proof_policy must be one of {CONSISTENCY_PROOF_POLICIES}, "
+                f"got {consistency_proof_policy!r}"
+            )
+        self.consistency_proof_policy = consistency_proof_policy
+        #: ``warn`` mode only: per-``log_id`` count of proof-less checkpoints
+        #: this witness accepted but ``enforce`` would have refused. In-process
+        #: (resets on restart); the matching WARNING log line is the durable
+        #: signal to count across instances.
+        self.consistency_proof_would_refuse: dict[str, int] = {}
         # If a key_provider is given (and no explicit attestor), build the
         # attestor against the custody seam; otherwise the in-process key.
         if attestor is not None:
@@ -1371,6 +1428,11 @@ class AnchorerService:
         prev = self._store.get_checkpoint_witness(cp["log_id"])
         if prev is None:
             return "first-seen"
+        # This path carries no consistency proof at all, so under the
+        # consistency-proof policy it can take only a log's FIRST checkpoint.
+        # It shares the per-log_id tip with POST /checkpoints: without this a
+        # checkpoint refused there could be registered here instead.
+        self._apply_consistency_proof_policy_legacy(cp, prev)
         # Peak-consistency, given the accepted wire shape (no prev_root is
         # transmitted): the new checkpoint's prev_size must chain exactly from
         # the size we last witnessed, and mmr_size must strictly increase.
@@ -1407,9 +1469,14 @@ class AnchorerService:
           witness knows, not what is objectively true of the log.
         * ``CONTINUITY_GRADE_REGISTERED`` -- a known ``log_id``, but ``cp``
           carries no ``consistency_proof``. Registered only, exactly like
-          stage 1 -- NEVER refused for lack of proof (a pre-stage-2 client
-          keeps working). This witness's chain-tip state is deliberately NOT
-          advanced for this grade -- see the caller.
+          stage 1, under consistency-proof policy ``off`` or ``warn``
+          (``warn`` also logs and counts it). Under ``enforce`` a NATIVE
+          log's proof-less checkpoint is instead refused with
+          ``ConsistencyProofRequiredError``; foreign accumulators and the
+          JSON wire form are never refused for lack of proof -- see
+          ``_apply_consistency_proof_policy``. This witness's chain-tip
+          state is deliberately NOT advanced for this grade -- see the
+          caller.
         * ``CONTINUITY_GRADE_WITNESSED`` -- a known ``log_id``, ``cp`` carries
           a ``consistency_proof``, and BOTH checks below passed.
 
@@ -1445,6 +1512,7 @@ class AnchorerService:
 
         proof = cp.get("consistency_proof")
         if proof is None:
+            self._apply_consistency_proof_policy(cp, prev)
             return CONTINUITY_GRADE_REGISTERED
 
         if cp["prev_size"] != prev["mmr_size"] or cp["prev_root"] != prev["mmr_root"]:
@@ -1475,6 +1543,85 @@ class AnchorerService:
             )
 
         return CONTINUITY_GRADE_WITNESSED
+
+    @staticmethod
+    def _consistency_proof_policy_applies(cp: dict) -> bool:
+        """True for a NATIVE CLL log: the COSE wire form (only
+        ``checkpoint_cose.parse_and_verify_checkpoint_cose`` emits the
+        ``consistency_proof`` key, even as ``None``) and not an enrolled
+        foreign accumulator. The JSON wire form and every foreign
+        accumulator are exempt: this witness cannot verify their
+        accumulator, so they stay ``countersigned-observed``."""
+        return "consistency_proof" in cp and cp.get("grade") != GRADE_COUNTERSIGNED_OBSERVED
+
+    def _apply_consistency_proof_policy(self, cp: dict, prev: dict) -> None:
+        """A proof-less checkpoint for a ``log_id`` this witness has already
+        accepted. Under ``enforce``, refuse a native log's checkpoint with
+        ``ConsistencyProofRequiredError``; under ``warn``, accept it but log
+        and count the refusal ``enforce`` would make; under ``off``, do
+        nothing. Caller holds ``self._lock``."""
+        if self.consistency_proof_policy == CONSISTENCY_PROOF_POLICY_OFF:
+            return
+        if not self._consistency_proof_policy_applies(cp):
+            return
+        log_id = cp["log_id"]
+        restarted = cp["prev_size"] == 0 or cp["mmr_size"] <= prev["mmr_size"]
+        message = (
+            f"checkpoint for log_id={log_id!r} carries no consistency_proof, but this "
+            f"witness already accepted a checkpoint for that log_id (accepted mmr_size="
+            f"{prev['mmr_size']}, root={prev['mmr_root']}; submitted prev_size="
+            f"{cp['prev_size']}, mmr_size={cp['mmr_size']}). Every checkpoint after a "
+            "log's first must prove it extends the last accepted one"
+        )
+        if restarted:
+            message += (
+                ". This checkpoint does not extend the accepted one: if this node lost its "
+                "local log state, it cannot prove continuity and must start a NEW log_id"
+            )
+        else:
+            message += (
+                ". Attach a consistency_proof from the accepted mmr_size; a node that lost "
+                "its local log state must start a NEW log_id"
+            )
+        self._refuse_or_count(log_id, prev, message)
+
+    def _apply_consistency_proof_policy_legacy(self, cp: dict, prev: dict) -> None:
+        """The ``mmr-checkpoint`` statement path on
+        ``/transparency/register-statement``: it carries no
+        ``consistency_proof``, so a checkpoint for a ``log_id`` this witness
+        already holds is refused under ``enforce`` (logged and counted under
+        ``warn``) exactly as a proof-less one on ``POST /checkpoints`` is.
+        Caller holds ``self._lock``."""
+        if self.consistency_proof_policy == CONSISTENCY_PROOF_POLICY_OFF:
+            return
+        log_id = cp["log_id"]
+        message = (
+            f"mmr-checkpoint statement for log_id={log_id!r}: this witness already accepted a "
+            f"checkpoint for that log_id (accepted mmr_size={prev['mmr_size']}, root="
+            f"{prev['mmr_root']}), and every checkpoint after a log's first must carry a "
+            "consistency_proof, which this path cannot. Submit it to POST /checkpoints with a "
+            "consistency_proof from the accepted mmr_size; a node that lost its local log state "
+            "must start a NEW log_id"
+        )
+        self._refuse_or_count(log_id, prev, message)
+
+    def _refuse_or_count(self, log_id: str, prev: dict, message: str) -> None:
+        """Under ``enforce`` raise ``ConsistencyProofRequiredError``; under
+        ``warn`` log the would-refuse and count it per ``log_id``."""
+        if self.consistency_proof_policy == CONSISTENCY_PROOF_POLICY_ENFORCE:
+            raise ConsistencyProofRequiredError(
+                message,
+                last_accepted_mmr_size=prev["mmr_size"],
+                last_accepted_root=prev["mmr_root"],
+            )
+        count = self.consistency_proof_would_refuse.get(log_id, 0) + 1
+        self.consistency_proof_would_refuse[log_id] = count
+        logger.warning(
+            "consistency_proof_required would-refuse (policy=warn) log_id=%r count=%d: %s",
+            log_id,
+            count,
+            message,
+        )
 
     def witness_checkpoint(self, cp: dict) -> StatementRegistration:
         """Checkpoint-only registration for ``POST /checkpoints``, stage 2

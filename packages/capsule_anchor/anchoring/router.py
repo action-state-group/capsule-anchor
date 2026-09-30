@@ -118,6 +118,7 @@ from .service import (
     AnchorerService,
     CheckpointPayloadError,
     CheckpointSignatureError,
+    ConsistencyProofRequiredError,
     ContinuityMismatchError,
     NotACheckpointError,
     RollbackError,
@@ -720,6 +721,18 @@ def get_router() -> APIRouter:
             result = svc.register_signed_statement_full(statement_bytes)
         except CheckpointPayloadError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ConsistencyProofRequiredError as exc:
+            # policy=enforce: a later mmr-checkpoint for a known log_id. Same
+            # 409 shape and code as POST /checkpoints.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": str(exc),
+                    "code": exc.code,
+                    "last_accepted_mmr_size": exc.last_accepted_mmr_size,
+                    "last_accepted_root": exc.last_accepted_root,
+                },
+            ) from exc
         except RollbackError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RegisterStatementResponse(
@@ -899,14 +912,17 @@ def get_router() -> APIRouter:
             # own last-accepted (mmr_size, root) so an honest client that
             # skipped a cadence can re-prove from the witness's view rather
             # than retrying its own stale prev.
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": str(exc),
-                    "last_accepted_mmr_size": exc.last_accepted_mmr_size,
-                    "last_accepted_root": exc.last_accepted_root,
-                },
-            ) from exc
+            # A ConsistencyProofRequiredError (policy=enforce, a native log's
+            # proof-less later checkpoint) carries a stable ``code`` so a
+            # client can tell it apart from a fork/rewrite refusal.
+            detail = {
+                "error": str(exc),
+                "last_accepted_mmr_size": exc.last_accepted_mmr_size,
+                "last_accepted_root": exc.last_accepted_root,
+            }
+            if isinstance(exc, ConsistencyProofRequiredError):
+                detail["code"] = exc.code
+            raise HTTPException(status_code=409, detail=detail) from exc
         receipt_bytes = result.receipt
         public_log_entry = None
         publisher = get_public_log_publisher()
@@ -997,9 +1013,15 @@ def get_router() -> APIRouter:
         `iat` + `grade` (see [witness-receipt-signed-time-and-grade]). This
         witness additionally remembers, per `log_id`, the last checkpoint it
         accepted. A checkpoint that omits the optional `consistency_proof`
-        claim is **registered only** (graded `"registered"`) -- exactly stage
-        1's behavior, NEVER refused for the proof's absence, so a client on
-        an older wire version keeps working. A checkpoint that CARRIES a
+        claim is **registered only** (graded `"registered"`) under the
+        consistency-proof policy `off` or `warn` (the default; `warn` also
+        logs and counts it per `log_id`). Under `enforce`
+        (`CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF=enforce`), a NATIVE CLL
+        log's proof-less checkpoint for a `log_id` this witness has already
+        accepted is refused with **409**, body `code:
+        "consistency_proof_required"`; a node that lost its local log state
+        must start a new `log_id`. Foreign accumulators and the JSON wire
+        form are never refused for the proof's absence. A checkpoint that CARRIES a
         `consistency_proof` is checked against this witness's own
         last-accepted state for `log_id` on TWO axes, refused with **409** on
         either failing (never counter-signed, no log append): (a) the

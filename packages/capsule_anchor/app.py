@@ -166,12 +166,35 @@ def create_app() -> FastAPI:
             "to acknowledge this risk and start with volatile in-memory storage."
         )
 
+    # Consistency-proof policy for NATIVE CLL logs on POST /checkpoints:
+    # off | warn | enforce (default warn). See
+    # service.CONSISTENCY_PROOF_POLICIES. A malformed value fails startup
+    # closed, like every other knob in this file.
+    from capsule_anchor.anchoring.service import (
+        CONSISTENCY_PROOF_POLICIES,
+        DEFAULT_CONSISTENCY_PROOF_POLICY,
+    )
+
+    consistency_proof_policy = (
+        os.environ.get("CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF", DEFAULT_CONSISTENCY_PROOF_POLICY)
+        .strip()
+        .lower()
+    )
+    if consistency_proof_policy not in CONSISTENCY_PROOF_POLICIES:
+        raise RuntimeError(
+            "CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF must be one of "
+            f"{', '.join(CONSISTENCY_PROOF_POLICIES)}; got {consistency_proof_policy!r}"
+        )
+
     if database_url:
         from capsule_anchor.anchoring.store import PostgresLogStore
         _store: object = PostgresLogStore(database_url)
-        _svc = AnchorerService(attestor=attestor, store=_store)
+        _svc = AnchorerService(
+            attestor=attestor, store=_store, consistency_proof_policy=consistency_proof_policy
+        )
     else:
-        _svc = AnchorerService(attestor=attestor)
+        _svc = AnchorerService(attestor=attestor, consistency_proof_policy=consistency_proof_policy)
+    logger.info("consistency-proof policy for native checkpoint logs: %s", consistency_proof_policy)
     cfg_anchor(_svc)
 
     # Enrolled external checkpoint submitters (POST /checkpoints identity
