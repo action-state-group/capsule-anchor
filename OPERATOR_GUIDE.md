@@ -52,11 +52,27 @@ that publication for the checkpoint paths.
    of the last checkpoint this witness accepted for that `log_id`, and (b) carry a proof
    that verifies as extending that state. If either fails it is refused (409): nothing is
    appended and nothing is signed.
+4. **Proof required (native logs).** For a native CLL log (see the table below), every
+   checkpoint after the first one this witness accepted for its `log_id` must carry a
+   `consistency_proof`. Under `CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF=enforce`, one that
+   does not is refused (409, `code: consistency_proof_required`). A node that lost its local
+   log state cannot prove it extends what this witness accepted, so it must start a new
+   `log_id`; the refusal says so. The setting is `warn` by default: the checkpoint is
+   registered, graded `registered`, and the witness logs that `enforce` would have refused
+   it. `off` registers it without the warning.
 
-Two cases register without the consistency check, and the grade on the response says so:
-a `log_id` this witness has never seen (`first-seen`: there is nothing yet to be consistent
-with), and a checkpoint for a known `log_id` that carries no `consistency_proof`
-(`registered`). Only a checkpoint that passed step 3 is graded `continuity-witnessed`.
+A `log_id` this witness has never seen registers without the consistency check
+(`first-seen`: there is nothing yet to be consistent with). A proof-less checkpoint that
+step 4 lets through (a foreign accumulator, or a native log under `warn` or `off`) is graded
+`registered`. Only a checkpoint that passed step 3 is graded `continuity-witnessed`.
+
+What step 4 applies to depends on the submitter's accumulator:
+
+| Accumulator | Wire form | Proof after the first checkpoint | Grade |
+|---|---|---|---|
+| Native CLL MMR, not enrolled | COSE | Required under `enforce` | none (`continuity_grade` only) |
+| Native CLL MMR, enrolled `native_mmr` | COSE | Required under `enforce` | `mmr-verified` |
+| Foreign, enrolled `foreign` | COSE or JSON | Never required. This witness cannot verify a foreign accumulator, so it sends no proof | `countersigned-observed` |
 
 **`mmr-checkpoint` statements on `/transparency/register-statement`.** A Signed Statement
 whose payload declares `"artifact_type": "mmr-checkpoint"` must be well-formed (400
@@ -650,9 +666,10 @@ each witness's `/.well-known/did.json`).
 (§1, [Registration Policy](#registration-policy)). Each witness independently verifies the checkpoint's
 Ed25519 signature before signing, records the entry in its own CT log, and
 issues a COSE Receipt. It also remembers, per `log_id`, the last checkpoint it
-accepted: a checkpoint that omits the optional `consistency_proof` claim is
-registered only (graded `registered`, exactly the original inclusion-only behavior —
-never refused for the proof's absence), while one that carries a `consistency_proof`
+accepted: for a native CLL log, a later checkpoint that omits the `consistency_proof`
+claim is refused under `enforce` and registered only (graded `registered`) under `warn`
+(the default) or `off`; a foreign accumulator's checkpoint is never refused for the proof's
+absence (see §1, [Registration Policy](#registration-policy)). One that carries a `consistency_proof`
 is checked on two axes — the claimed `prev_size`/`prev_root` must equal what this
 witness itself last accepted, AND the proof must independently verify (via the
 neutral CLL core's `verify_consistency`) as extending that same state — refused with
