@@ -1428,6 +1428,11 @@ class AnchorerService:
         prev = self._store.get_checkpoint_witness(cp["log_id"])
         if prev is None:
             return "first-seen"
+        # This path carries no consistency proof at all, so under the
+        # consistency-proof policy it can take only a log's FIRST checkpoint.
+        # It shares the per-log_id tip with POST /checkpoints: without this a
+        # checkpoint refused there could be registered here instead.
+        self._apply_consistency_proof_policy_legacy(cp, prev)
         # Peak-consistency, given the accepted wire shape (no prev_root is
         # transmitted): the new checkpoint's prev_size must chain exactly from
         # the size we last witnessed, and mmr_size must strictly increase.
@@ -1578,6 +1583,31 @@ class AnchorerService:
                 ". Attach a consistency_proof from the accepted mmr_size; a node that lost "
                 "its local log state must start a NEW log_id"
             )
+        self._refuse_or_count(log_id, prev, message)
+
+    def _apply_consistency_proof_policy_legacy(self, cp: dict, prev: dict) -> None:
+        """The ``mmr-checkpoint`` statement path on
+        ``/transparency/register-statement``: it carries no
+        ``consistency_proof``, so a checkpoint for a ``log_id`` this witness
+        already holds is refused under ``enforce`` (logged and counted under
+        ``warn``) exactly as a proof-less one on ``POST /checkpoints`` is.
+        Caller holds ``self._lock``."""
+        if self.consistency_proof_policy == CONSISTENCY_PROOF_POLICY_OFF:
+            return
+        log_id = cp["log_id"]
+        message = (
+            f"mmr-checkpoint statement for log_id={log_id!r}: this witness already accepted a "
+            f"checkpoint for that log_id (accepted mmr_size={prev['mmr_size']}, root="
+            f"{prev['mmr_root']}), and every checkpoint after a log's first must carry a "
+            "consistency_proof, which this path cannot. Submit it to POST /checkpoints with a "
+            "consistency_proof from the accepted mmr_size; a node that lost its local log state "
+            "must start a NEW log_id"
+        )
+        self._refuse_or_count(log_id, prev, message)
+
+    def _refuse_or_count(self, log_id: str, prev: dict, message: str) -> None:
+        """Under ``enforce`` raise ``ConsistencyProofRequiredError``; under
+        ``warn`` log the would-refuse and count it per ``log_id``."""
         if self.consistency_proof_policy == CONSISTENCY_PROOF_POLICY_ENFORCE:
             raise ConsistencyProofRequiredError(
                 message,

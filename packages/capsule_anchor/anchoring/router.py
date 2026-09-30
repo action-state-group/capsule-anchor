@@ -721,6 +721,18 @@ def get_router() -> APIRouter:
             result = svc.register_signed_statement_full(statement_bytes)
         except CheckpointPayloadError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ConsistencyProofRequiredError as exc:
+            # policy=enforce: a later mmr-checkpoint for a known log_id. Same
+            # 409 shape and code as POST /checkpoints.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": str(exc),
+                    "code": exc.code,
+                    "last_accepted_mmr_size": exc.last_accepted_mmr_size,
+                    "last_accepted_root": exc.last_accepted_root,
+                },
+            ) from exc
         except RollbackError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RegisterStatementResponse(

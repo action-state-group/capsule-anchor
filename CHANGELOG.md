@@ -13,7 +13,11 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   with no `consistency_proof` is registered (`off`), registered with a
   `consistency_proof_required would-refuse` warning and a per-`log_id` count (`warn`), or
   refused with 409 and `code: consistency_proof_required` (`enforce`). The refusal tells a
-  node that lost its local log state to start a new `log_id`. Foreign accumulators
+  node that lost its local log state to start a new `log_id`. The `mmr-checkpoint`
+  statement path on `/transparency/register-statement` carries no proof, so it follows
+  the same setting for a `log_id` already held (sharing the tip with `POST /checkpoints`):
+  only a log's first checkpoint registers there under `enforce`, with the same 409 code
+  and a message pointing to `POST /checkpoints`. Foreign accumulators
   (enrolled `accumulator: foreign`, COSE or JSON wire) are exempt: they stay
   `countersigned-observed`. An unknown value fails startup.
 

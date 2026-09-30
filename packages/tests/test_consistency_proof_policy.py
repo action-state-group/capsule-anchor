@@ -31,7 +31,9 @@ from capsule_anchor.anchoring.service import (
 )
 from capsule_anchor.anchoring.submitters import (
     ACCUMULATOR_FOREIGN,
+    ACCUMULATOR_NATIVE_MMR,
     GRADE_COUNTERSIGNED_OBSERVED,
+    GRADE_MMR_VERIFIED,
     WIRE_FORM_COSE_SIGN1,
     WIRE_FORM_JSON_ED25519,
     SubmitterAllowlist,
@@ -42,6 +44,9 @@ from fastapi.testclient import TestClient
 
 from tests.test_checkpoint_continuity import _Log, _post_checkpoint, _proof_claim
 from tests.test_checkpoint_json import _checkpoint as _json_checkpoint
+from tests.test_checkpoint_witness import _build_statement
+from tests.test_checkpoint_witness import _checkpoint as _legacy_checkpoint
+from tests.test_checkpoint_witness import _register as _legacy_register
 
 _ENV = "CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF"
 _JSON_CONTENT_TYPE = "application/cll-checkpoint+json"
@@ -263,19 +268,23 @@ def test_warn_counts_the_reset_case(monkeypatch, key):
 # --- foreign accumulators are exempt --------------------------------------------------
 
 
-def _enroll_foreign(log_id: str, key: Ed25519PrivateKey, wire_form: str) -> None:
+def _enroll(log_id: str, key: Ed25519PrivateKey, wire_form: str, accumulator: str) -> None:
     configure_submitters(
         SubmitterAllowlist.from_list(
             [
                 {
                     "log_id": log_id,
                     "pubkey_hex": key.public_key().public_bytes_raw().hex(),
-                    "accumulator": ACCUMULATOR_FOREIGN,
+                    "accumulator": accumulator,
                     "wire_form": wire_form,
                 }
             ]
         )
     )
+
+
+def _enroll_foreign(log_id: str, key: Ed25519PrivateKey, wire_form: str) -> None:
+    _enroll(log_id, key, wire_form, ACCUMULATOR_FOREIGN)
 
 
 def test_enforce_exempts_foreign_accumulator_cose_wire(monkeypatch, key):
@@ -299,3 +308,91 @@ def test_enforce_exempts_foreign_accumulator_json_wire(monkeypatch, key):
     assert resp2.status_code == 200, resp2.json()
     assert resp2.json()["grade"] == GRADE_COUNTERSIGNED_OBSERVED
     assert get_service().consistency_proof_would_refuse == {}
+
+
+def test_enforce_exempts_an_enrolled_native_mmr_json_submitter(monkeypatch, key):
+    """The JSON wire form carries no consistency_proof, so a native_mmr
+    submitter enrolled with it is never refused for the proof's absence."""
+    client = _client(monkeypatch, "enforce")
+    _enroll("native-json/v1", key, WIRE_FORM_JSON_ED25519, ACCUMULATOR_NATIVE_MMR)
+    headers = {"Content-Type": _JSON_CONTENT_TYPE}
+    cp1 = _json_checkpoint(key, log_id="native-json/v1", mmr_size=1)
+    resp1 = client.post("/checkpoints", content=json.dumps(cp1).encode(), headers=headers)
+    assert resp1.status_code == 200, resp1.json()
+    cp2 = _json_checkpoint(key, log_id="native-json/v1", mmr_size=3, prev_size=1, root="c" * 64)
+    resp2 = client.post("/checkpoints", content=json.dumps(cp2).encode(), headers=headers)
+    assert resp2.status_code == 200, resp2.json()
+    assert resp2.json()["grade"] == GRADE_MMR_VERIFIED
+    assert resp2.json()["continuity_grade"] == CONTINUITY_GRADE_REGISTERED
+
+
+# --- the mmr-checkpoint statement path on /transparency/register-statement ---------
+
+
+def _legacy_first_then_second(client, key, log_id):
+    s1, b1 = _legacy_register(client, _build_statement(_legacy_checkpoint(log_id, mmr_size=100, prev_size=0), key))
+    assert s1 == 200, b1
+    assert b1["checkpoint_witness"]["status"] == "first-seen"
+    return _legacy_register(client, _build_statement(_legacy_checkpoint(log_id, mmr_size=250, prev_size=100), key))
+
+
+def test_legacy_path_enforce_refuses_a_later_checkpoint_and_points_to_checkpoints(monkeypatch, key):
+    client = _client(monkeypatch, "enforce")
+    status, body = _legacy_first_then_second(client, key, "legacy-enforce")
+    assert status == 409, body
+    detail = body["detail"]
+    assert detail["code"] == "consistency_proof_required"
+    assert detail["last_accepted_mmr_size"] == 100
+    assert "POST /checkpoints" in detail["error"]
+    assert "NEW log_id" in detail["error"]
+
+
+def test_legacy_path_warn_registers_but_logs_and_counts(monkeypatch, key, caplog):
+    client = _client(monkeypatch, "warn")
+    with caplog.at_level(logging.WARNING, logger="capsule_anchor"):
+        status, body = _legacy_first_then_second(client, key, "legacy-warn")
+    assert status == 200, body
+    assert body["checkpoint_witness"]["status"] == "witnessed"
+    assert get_service().consistency_proof_would_refuse == {"legacy-warn": 1}
+    assert "consistency_proof_required would-refuse" in caplog.text
+
+
+def test_legacy_path_off_registers_without_counting(monkeypatch, key):
+    client = _client(monkeypatch, "off")
+    status, body = _legacy_first_then_second(client, key, "legacy-off")
+    assert status == 200, body
+    assert get_service().consistency_proof_would_refuse == {}
+
+
+def test_legacy_path_enforce_first_checkpoint_and_resubmission_accepted(monkeypatch, key):
+    client = _client(monkeypatch, "enforce")
+    stmt = _build_statement(_legacy_checkpoint("legacy-first", mmr_size=100, prev_size=0), key)
+    s1, b1 = _legacy_register(client, stmt)
+    s2, b2 = _legacy_register(client, stmt)
+    assert s1 == s2 == 200
+    assert b2["receipt_b64"] == b1["receipt_b64"]
+
+
+def test_enforce_closes_the_bypass_through_the_legacy_path(monkeypatch, key):
+    """A native log's proof-less checkpoint refused on POST /checkpoints must
+    not register through the mmr-checkpoint statement path instead: both
+    share the per-log_id tip."""
+    client = _client(monkeypatch, "enforce")
+    log = _Log("bypass-log")
+    size1 = log.grow_leaves(2)
+    status, body = _post_checkpoint(
+        client, log.checkpoint_cose(key, size=size1, prev_size=0, issued_at="2026-09-30T00:00:00Z")
+    )
+    assert status == 200, body
+    size2 = log.grow_leaves(2)
+    status, body = _post_checkpoint(
+        client, log.checkpoint_cose(key, size=size2, prev_size=size1, issued_at="2026-09-30T00:05:00Z")
+    )
+    assert status == 409, body
+
+    legacy = _legacy_checkpoint(
+        "bypass-log", mmr_size=size2, prev_size=size1, mmr_root=log.root_at(size2).hex()
+    )
+    status, body = _legacy_register(client, _build_statement(legacy, key))
+    assert status == 409, body
+    assert body["detail"]["code"] == "consistency_proof_required"
