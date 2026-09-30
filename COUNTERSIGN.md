@@ -25,11 +25,14 @@ reconciliation, rejected 100% of `capsulectl`'s real output).
 The witness (see `OPERATOR_GUIDE.md`) answers one question: *does an entry exist in
 this log at this tree size, and has the log been consistent since?* In RFC 9943 terms
 it is a Transparency Service registering checkpoint statements under a published
-Registration Policy (`OPERATOR_GUIDE.md` §1, "Registration Policy"): the checkpoint
-must be well-formed and signed, and, when it carries a consistency proof, its previous
-size and root must match the last checkpoint registered for that log and the proof
-must verify. The policy is open as to who may submit, and the witness never inspects
-the content of the log a checkpoint commits to.
+Registration Policy (`OPERATOR_GUIDE.md` §1, "Registration Policy"). On
+`POST /checkpoints`, the checkpoint must be well-formed and its signature must verify,
+and, when it carries a consistency proof, its previous size and root must match the
+last checkpoint registered for that log and the proof must verify. The older
+`mmr-checkpoint` path on `/transparency/register-statement` checks size only: the
+previous size must match the last registered size, and the size must grow. The policy
+is open as to who may submit, and the witness never inspects the content of the log a
+checkpoint commits to.
 
 Countersign answers a different, narrower question: *does a specific bundle of
 records — digests only, no payloads — hold together structurally, and does it satisfy

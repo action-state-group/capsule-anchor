@@ -29,7 +29,8 @@ self-attested to a relying party outside its operator's trust domain. Two or mor
 independently operated witnesses that have each issued a receipt for the same
 checkpoint give a relying party cryptographic evidence from multiple parties who
 could not have colluded undetected — that is the meaningful transparency guarantee.
-A witness is one row in an alphabetical directory, not a moat.
+A witness is one row in an alphabetical directory; any conforming Transparency Service can
+take its place.
 
 ### Registration Policy
 
