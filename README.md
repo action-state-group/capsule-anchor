@@ -338,9 +338,12 @@ is WITNESS behavior: a statement whose payload self-declares `"artifact_type":
 "mmr-checkpoint"` is auto-recognized and checked against the log's own last-witnessed
 checkpoint for its `log_id` before being co-signed. Any other `artifact_type` (or none)
 registers exactly as an ordinary Signed Statement — `checkpoint_witness` stays `null`.
-`/checkpoints` (stage 1 of the CLL checkpoint witness) accepts the bare `CheckpointRecord`
-wire shape directly, verifies its own signature server-side, and is stateless — the two
-surfaces are independent; a client uses one or the other, not both.
+`/checkpoints` accepts the bare `CheckpointRecord` wire shape directly and verifies its
+signature server-side, which this path does not. It is not stateless: it remembers, per
+`log_id`, the last checkpoint it accepted, and advances that record only on a `first-seen`
+or `continuity-witnessed` acceptance (never on a bare `registered` one) — see the
+`/checkpoints` section above. Both surfaces read and write that same per-`log_id` record,
+so a client uses one or the other for a given `log_id`, not both.
 
 Payload shape (JSON, embedded as the COSE_Sign1's payload):
 
