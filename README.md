@@ -36,6 +36,10 @@ content-free Signed Tree Heads.
 https://witness.agentactioncapsule.org
 ```
 
+A "witness" here is a SCITT Transparency Service registering checkpoint statements under
+a consistency Registration Policy ([RFC 9943](https://www.rfc-editor.org/rfc/rfc9943)).
+The policy is published in [`OPERATOR_GUIDE.md`](OPERATOR_GUIDE.md#registration-policy).
+
 **One service, two vocabularies of route.** `witness.agentactioncapsule.org` is the
 checkpoint/CLL-primary name: `POST /checkpoints` is the default route every
 `capsule-emit` client registers against; `POST /register` is the explicit opt-in,
@@ -144,6 +148,13 @@ guarantees temporal inclusion; it does not attest issuer provenance.
 Production deployments SHOULD enforce issuer binding. The open policy is explicitly stated
 here so that relying parties know not to interpret a receipt from the public instance as a
 guarantee that the issuer was authenticated.
+
+The policy is open as to who may submit. The checkpoint paths additionally check what is
+submitted: a checkpoint that claims to extend an earlier one is registered only if that
+claim is consistent with the last checkpoint registered for the same log. That consistency
+check is part of the published Registration Policy — see
+[`OPERATOR_GUIDE.md`](OPERATOR_GUIDE.md#registration-policy) for exactly what is checked on
+each path.
 
 ### Supported issuer-binding patterns
 
