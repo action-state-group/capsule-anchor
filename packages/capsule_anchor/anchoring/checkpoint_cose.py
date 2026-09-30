@@ -215,13 +215,17 @@ def parse_and_verify_checkpoint_cose(
     Returns a dict shaped like the legacy JSON ``CheckpointRecord`` path's
     9 signing-body fields (``v, kind, log_id, mmr_size, root, prev_size,
     prev_root, key_id, timestamp``) PLUS a ``grade`` key (``None`` unless
-    ``log_id`` is an enrolled submitter -- see below) and a
-    ``consistency_proof`` key (a ``cll.checkpoint.core.ConsistencyProof``, or
-    ``None`` if the claims carried none), suitable for
-    ``AnchorerService.witness_checkpoint`` unchanged (neither ``grade`` nor
-    ``consistency_proof`` is one of the signing-body fields
-    ``_checkpoint_signing_body`` hashes, so their presence never changes the
-    digest/signature math).
+    ``log_id`` is an enrolled submitter -- see below), a ``sub`` key (the
+    checkpoint's own AUTHENTICATED CWT subject, ``<log_id>#<mmr_size>``,
+    validated below against the statement's signed payload -- threaded
+    through so ``AnchorerService.witness_checkpoint`` can mirror it
+    byte-for-byte into the receipt's own RFC 9943 ``sub`` claim, RFC 9943
+    Figure 10 + SS3) and a ``consistency_proof`` key (a
+    ``cll.checkpoint.core.ConsistencyProof``, or ``None`` if the claims
+    carried none), suitable for ``AnchorerService.witness_checkpoint``
+    unchanged (none of ``grade``, ``sub``, ``consistency_proof`` is one of
+    the signing-body fields ``_checkpoint_signing_body`` hashes, so their
+    presence never changes the digest/signature math).
 
     Order of checks (BEFORE any counter-signing, matching the JSON path's
     own two-phase gate):
@@ -380,9 +384,19 @@ def parse_and_verify_checkpoint_cose(
         # entry is resolved), else `kid` as before.
         "key_id": entry.pubkey.hex() if entry is not None else kid.hex(),
         "timestamp": issued_at,
-        # Not part of _CHECKPOINT_RECORD_FIELDS / the signing body -- purely
-        # informational, served on the stamp for an enrolled submitter only.
+        # Neither key below is part of _CHECKPOINT_RECORD_FIELDS / the
+        # signing body -- both are purely additive metadata riding alongside
+        # the 9 signed fields.
+        # grade: informational, served on the stamp for an enrolled submitter only.
         "grade": entry.grade if entry is not None else None,
+        # sub: the checkpoint's own AUTHENTICATED CWT subject -- `parsed["subject"]`
+        # was already verified above to equal `expected_subject`
+        # (`f"{issuer}#{mmr_size}"`) before this dict is even built, so this is
+        # not a re-peek: it is the SAME value the signature already covers.
+        # See RFC 9943 Figure 10 + SS3, threaded through so
+        # `AnchorerService.witness_checkpoint` can mirror it byte-for-byte
+        # into the receipt's own `sub` claim.
+        "sub": parsed["subject"],
         # Structurally decoded but NOT yet verified -- see this function's
         # docstring. None if the claims carried no consistency_proof.
         "consistency_proof": consistency_proof,

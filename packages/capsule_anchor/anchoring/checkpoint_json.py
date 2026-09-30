@@ -36,6 +36,14 @@ comparing two different commitment schemes as if they were one (see
 ``submitters.py``'s ``accumulator``/grade docstring and
 ``cross_witness_conformance.checker.check_checkpoint_wire``, which keeps the
 same discipline on the read side).
+
+Unlike the COSE path, this dict carries no ``sub`` key: a plain-JSON
+``CheckpointRecord`` has no CWT claims map, so there is no checkpoint-level
+subject to mirror into the receipt (RFC 9943 Figure 10 + SS3). Leaving the
+key absent (rather than inventing one) means ``witness_checkpoint``'s
+``cp.get("sub")`` returns ``None`` and the receipt's ``sub`` falls back to
+the documented entry-digest default -- never a synthesized value this
+module cannot actually authenticate.
 """
 from __future__ import annotations
 
