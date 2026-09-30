@@ -233,7 +233,7 @@ checkpoint it accepted, and returns exactly one of three continuity grades — n
 | `continuity_grade` | Meaning |
 |---|---|
 | `first-seen` | This witness has never seen `log_id` before. Nothing to be consistent with; no continuity is implied, even if the log itself has a long history elsewhere. |
-| `registered` | A known `log_id`, but the checkpoint carried no `consistency_proof`. Registration only. For a native CLL log this happens only under the `warn` (default) or `off` setting of `CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF`; under `enforce` it is refused (409, `code: consistency_proof_required`). A foreign accumulator is never refused for the proof's absence. |
+| `registered` | A known `log_id`, but the checkpoint carried no `consistency_proof`. Registration only. For a native CLL log this happens only under the `warn` (default) or `off` setting of `CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF`; under `enforce` it is refused (409, `code: consistency_proof_required`). A foreign accumulator, or any JSON-wire submitter, is never refused for the proof's absence. |
 | `continuity-witnessed` | A known `log_id`, a `consistency_proof` was submitted, and this witness independently verified BOTH that the submitted `prev_size`/`prev_root` equal its own last-accepted checkpoint for `log_id` (fork detection) AND that the proof itself (checked with the neutral CLL core's `verify_consistency` — this witness never builds trees) bridges its last-accepted state to the new one. Only this grade signs a continuity assertion into the receipt's protected header. |
 
 A checkpoint carrying a `consistency_proof` that fails either check is refused with
