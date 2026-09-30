@@ -6,6 +6,17 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF` = `off` | `warn` | `enforce` (default `warn`).**
+  After a native CLL log's first accepted checkpoint, a later checkpoint for that `log_id`
+  with no `consistency_proof` is registered (`off`), registered with a
+  `consistency_proof_required would-refuse` warning and a per-`log_id` count (`warn`), or
+  refused with 409 and `code: consistency_proof_required` (`enforce`). The refusal tells a
+  node that lost its local log state to start a new `log_id`. Foreign accumulators
+  (enrolled `accumulator: foreign`, COSE or JSON wire) are exempt: they stay
+  `countersigned-observed`. An unknown value fails startup.
+
 ### Fixed
 
 - **Public-log rail: submit a Rekor `dsse` entry, not `hashedrekord`.** Public Rekor
