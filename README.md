@@ -76,12 +76,12 @@ An enrolled entry's stamp additionally carries a `grade`:
 | `grade` | Meaning |
 |---|---|
 | `mmr-verified` | The submitter's commitment is our own CLL MMR peaks-and-root scheme, which this witness fully understands. |
-| `countersigned-observed` | The submitter's commitment is a FOREIGN accumulator this witness does not independently verify — it only observes, timestamps, and countersigns the submitted commitment bytes. **Never equivalent to `mmr-verified`** — this witness does not check a foreign log's own consistency proofs (out of scope for v1). |
+| `observed-only` | The submitter's commitment is a FOREIGN accumulator this witness does not independently verify — it checks the signature under the pinned key, then registers and timestamps the submitted commitment bytes. **Never equivalent to `mmr-verified`** — this witness does not check a foreign log's own consistency proofs (out of scope for v1). Receipts issued before this label replaced `countersigned-observed` keep that older label, which means the same thing; verifiers accept both. |
 
 Each enrolled entry also gets its own `rate_limit_per_min`, enforced in addition to (not instead
 of) the global 300/min budget above.
 
-Currently enrolled: the AgenTrust trace registry (`trace-registry/v1`, `countersigned-observed`
+Currently enrolled: the AgenTrust trace registry (`trace-registry/v1`, `observed-only`
 grade) — see `packages/capsule_anchor/config/checkpoint_submitters.json`.
 
 ---

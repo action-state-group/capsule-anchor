@@ -398,7 +398,7 @@ class TestByteStability:
             root=hashlib.sha256(b"root").digest(),
             sign=sk.sign,
             iat=1000,
-            grade="countersigned-observed",
+            grade="observed-only",
         )
         augmented = augment_receipt_with_public_log(
             receipt, {"backend": "rekor-public", "uuid": "u", "log_index": 1, "sth_tree_size": 5}

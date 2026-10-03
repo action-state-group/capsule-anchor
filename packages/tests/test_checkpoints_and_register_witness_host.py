@@ -294,7 +294,7 @@ def test_enrolled_checkpoint_receipt_signs_grade(client, agentrust_key):
     cose = _checkpoint_cose(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1, new_peaks=new_peaks)
     status, body = _post_checkpoint(client, cose)
     assert status == 200, body
-    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert body["grade"] == GRADE_OBSERVED_ONLY
     protected = _receipt_protected_header(body["receipt_b64"])
     assert protected[_COSE_GRADE_LABEL] == body["grade"]
     assert HDR_CWT_CLAIMS in protected  # iat still signed too
@@ -597,7 +597,7 @@ from capsule_anchor.anchoring.submitters import (  # noqa: E402
     ACCUMULATOR_FOREIGN,
     ACCUMULATOR_NATIVE_MMR,
     DEFAULT_CONFIG_PATH,
-    GRADE_COUNTERSIGNED_OBSERVED,
+    GRADE_OBSERVED_ONLY,
     GRADE_MMR_VERIFIED,
     WIRE_FORM_COSE_SIGN1,
     WIRE_FORM_JSON_ED25519,
@@ -657,7 +657,7 @@ def test_real_shipped_config_enrolls_trace_registry_with_foreign_grade():
     assert entry is not None, "trace-registry/v1 is not enrolled in the shipped config"
     assert entry.pubkey.hex() == _TRACE_REGISTRY_PUBKEY_HEX
     assert entry.accumulator == ACCUMULATOR_FOREIGN
-    assert entry.grade == GRADE_COUNTERSIGNED_OBSERVED
+    assert entry.grade == GRADE_OBSERVED_ONLY
     # AgenTrust's pipeline mints json-ed25519, not COSE_Sign1 -- see
     # checkpoint_submitters.json's _comment (added 2026-09-02).
     assert entry.wire_form == WIRE_FORM_JSON_ED25519
@@ -675,7 +675,7 @@ def test_enrolled_submission_signed_by_pinned_key_accepted_with_grade(client, ag
     )
     status, body = _post_checkpoint(client, cose)
     assert status == 200, body
-    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert body["grade"] == GRADE_OBSERVED_ONLY
 
 
 def test_enrolled_native_mmr_submitter_gets_mmr_verified_grade(client, agentrust_key):
@@ -842,11 +842,11 @@ def test_readback_reflects_enrolled_submitters_grade(client, agentrust_key):
     )
     post_status, post_body = _post_checkpoint(client, cose)
     assert post_status == 200, post_body
-    assert post_body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert post_body["grade"] == GRADE_OBSERVED_ONLY
 
     resp = client.get(f"/checkpoints/{_TRACE_REGISTRY_LOG_ID}")
     assert resp.status_code == 200, resp.text
-    assert resp.json()["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert resp.json()["grade"] == GRADE_OBSERVED_ONLY
 
 
 def test_readback_tracks_the_most_recently_witnessed_position(client, key):
@@ -1018,7 +1018,7 @@ def test_json_enrolled_submission_accepted_with_grade(client, agentrust_key):
     cp = _json_checkpoint(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=1)
     status, body = _post_json_checkpoint(client, cp)
     assert status == 200, body
-    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert body["grade"] == GRADE_OBSERVED_ONLY
     assert body["receipt_b64"]
 
 
@@ -1047,7 +1047,7 @@ def test_json_real_live_checkpoint_1_accepted_end_to_end(client):
     }
     status, body = _post_json_checkpoint(client, cp)
     assert status == 200, body
-    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert body["grade"] == GRADE_OBSERVED_ONLY
 
 
 def test_json_unknown_key_claiming_enrolled_iss_rejects_401(client, key, agentrust_key):
@@ -1128,7 +1128,7 @@ def test_default_content_type_still_routes_to_cose_path(client, agentrust_key):
     )
     status, body = _post_checkpoint(client, cose)  # explicit cose content-type, as every COSE test above sends
     assert status == 200, body
-    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert body["grade"] == GRADE_OBSERVED_ONLY
 
 
 def test_json_bytes_sent_with_no_content_type_treated_as_cose_and_fails_cleanly(client, agentrust_key):
@@ -1143,3 +1143,87 @@ def test_json_bytes_sent_with_no_content_type_treated_as_cose_and_fails_cleanly(
     resp = client.post("/checkpoints", content=json.dumps(cp))  # no Content-Type header
     assert resp.status_code == 400
     assert resp.status_code != 500
+
+
+# --- observed-only replaces countersigned-observed ---
+#
+# A witness registers and timestamps; it does not countersign. The foreign-
+# accumulator grade is now emitted as ``observed-only``. Receipts issued
+# before the rename keep their signed ``countersigned-observed`` bytes, and
+# every reader keeps accepting that label with the same meaning.
+
+from capsule_anchor.anchoring.checkpoint_cose import parse_and_verify_checkpoint_cose  # noqa: E402
+from capsule_anchor.anchoring.router import get_service, get_submitters  # noqa: E402
+from capsule_anchor.anchoring.submitters import (  # noqa: E402
+    GRADE_COUNTERSIGNED_OBSERVED_LEGACY,
+    is_observed_only,
+    normalize_grade,
+)
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey  # noqa: E402
+from cryptography.hazmat.primitives.serialization import PublicFormat  # noqa: E402
+from scitt_cose.receipt import HDR_GRADE, verify_receipt  # noqa: E402
+
+
+def _verified_receipt_grade(client: TestClient, receipt_b64: str, entry_hash: str) -> str | None:
+    """Verify the receipt offline under the witness's published key and
+    return the grade it signed, read only from a receipt that verifies."""
+    pubkey_hex = client.get("/anchor/authority-pubkey").json()["pubkey_hex"]
+    pem = Ed25519PublicKey.from_public_bytes(bytes.fromhex(pubkey_hex)).public_bytes(
+        Encoding.PEM, PublicFormat.SubjectPublicKeyInfo
+    )
+    result = verify_receipt(base64.b64decode(receipt_b64), leaf_entry_hex=entry_hash, log_public_key_pem=pem)
+    assert result.ok, result.errors
+    return result.protected_header_ext.get(HDR_GRADE)
+
+
+def test_new_foreign_receipt_carries_observed_only_never_the_legacy_label(client, agentrust_key):
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    cose = _checkpoint_cose(
+        agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=7, new_peaks=_peaks_for("rename-new-7"),
+    )
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    assert body["grade"] == "observed-only"
+    assert _verified_receipt_grade(client, body["receipt_b64"], body["entry_hash"]) == "observed-only"
+    assert b"countersigned" not in base64.b64decode(body["receipt_b64"])
+
+
+def test_receipt_issued_under_the_legacy_label_still_verifies_and_reads_back(client, agentrust_key):
+    """Simulate a checkpoint the witness registered before the rename: the
+    same parse the route runs, registered with the label the old witness
+    signed. Its receipt must keep verifying; a resubmission must return that
+    same receipt with the grade it actually carries (never a label the
+    receipt does not hold); the read-back surface must report it unchanged;
+    and every reader must read it as the same meaning as observed-only."""
+    _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID, pubkey=agentrust_key.public_key().public_bytes_raw())
+    cose = _checkpoint_cose(
+        agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID, mmr_size=9, new_peaks=_peaks_for("rename-old-9"),
+    )
+    cp = parse_and_verify_checkpoint_cose(cose, allowlist=get_submitters())
+    assert cp["grade"] == "observed-only"
+    old = get_service().witness_checkpoint({**cp, "grade": GRADE_COUNTERSIGNED_OBSERVED_LEGACY})
+    old_receipt_b64 = base64.b64encode(old.receipt).decode("ascii")
+    assert _verified_receipt_grade(client, old_receipt_b64, old.entry_hash) == "countersigned-observed"
+
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    assert body["entry_hash"] == old.entry_hash
+    assert base64.b64decode(body["receipt_b64"]) == old.receipt  # released bytes untouched
+    assert body["grade"] == "countersigned-observed"
+    assert _verified_receipt_grade(client, body["receipt_b64"], body["entry_hash"]) == body["grade"]
+    assert normalize_grade(body["grade"]) == "observed-only"
+
+    readback = client.get(f"/checkpoints/{_TRACE_REGISTRY_LOG_ID}").json()
+    assert readback["grade"] == "countersigned-observed"
+    assert is_observed_only(readback["grade"])
+
+
+def test_normalize_grade_maps_only_the_legacy_label():
+    assert normalize_grade("countersigned-observed") == "observed-only"
+    assert normalize_grade("observed-only") == "observed-only"
+    assert normalize_grade("mmr-verified") == "mmr-verified"
+    assert normalize_grade(None) is None
+    assert is_observed_only("countersigned-observed")
+    assert is_observed_only("observed-only")
+    assert not is_observed_only("mmr-verified")
+    assert not is_observed_only(None)

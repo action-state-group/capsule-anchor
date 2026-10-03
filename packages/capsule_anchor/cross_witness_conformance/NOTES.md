@@ -40,7 +40,7 @@ this: `packages/capsule_anchor/anchoring/submitters.py` (`SubmitterAllowlist`, `
 / `GRADE_COUNTERSIGNED_OBSERVED`) plus a committed config,
 `packages/capsule_anchor/config/checkpoint_submitters.json`, enrolling `trace-registry/v1` with
 AgenTrust's real key (`bc133259c094f63694b4ec48a295d7501a9a0cd536df5631fb4663c155f7bc90`) and
-`accumulator: "foreign"` (→ `grade: "countersigned-observed"`, never `"mmr-verified"`).
+`accumulator: "foreign"` (→ `grade: "observed-only"`, formerly `"countersigned-observed"`; never `"mmr-verified"`).
 
 `parse_and_verify_checkpoint_cose` now takes an `allowlist` kwarg: for an enrolled `log_id`, it
 PINS verification to the config key (the self-asserted COSE `kid` is ignored entirely) and returns
@@ -117,7 +117,7 @@ JSON submission 401ed.
    that hasn't declared `json-ed25519`, gets a named 400, never a fallback to the retired
    fully-open JSON `key_id`-trusting path. The signature is always verified against the entry's
    PINNED `pubkey`, never the submitted `key_id` — mirrors the COSE path's key-pinning exactly, and
-   the SAME grade rules apply (`accumulator: foreign` → `countersigned-observed`).
+   the SAME grade rules apply (`accumulator: foreign` → `observed-only`).
 2. `checker.check_checkpoint_wire` now dispatches to the DECODER `expected_log_id` declares
    (`entry.wire_form`) instead of hardcoding COSE — a `json-ed25519`-declared submitter's checkpoint
    is checked as JSON, a `cose`-declared one as COSE, and sending the WRONG form for a submitter's
@@ -138,7 +138,7 @@ retyped/guessed (§7b). `test_step3_live_checkpoint_1_conformance_pass` runs
 `check_checkpoint_wire` against these EXACT bytes through the real committed (post-amendment)
 config: **PASS** — wire well-formed, signature verifies under the pinned key, `sub`-equivalent
 binding holds (log_id/mmr_size are direct signed fields in json-ed25519 form), `grade ==
-countersigned-observed`. This is an OFFLINE conformance pass (our own decode/verify code, the
+countersigned-observed` (the label at the time; now `observed-only`, same meaning). This is an OFFLINE conformance pass (our own decode/verify code, the
 committed allowlist) — a live-witness tie-back (`check_witness_tie_back` against
 witness.agentactioncapsule.org) was NOT attempted for checkpoint 1, because the JSON-acceptance
 code in this PR is NOT YET DEPLOYED (held, Steven's click) — the live witness today only accepts

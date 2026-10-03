@@ -135,7 +135,7 @@
   <div class="wrap">
     <div class="live"><span class="pulse"></span> Live · public SCITT log</div>
     <h1>A neutral transparency service for agent actions.</h1>
-    <p>This service registers Agent Action Capsule signed statements, issues COSE receipts, and anchors them to an append-only RFC 9162 Merkle log — so the record of an agent action can be proven included, and never quietly dropped or rewritten. It is infrastructure, not a product: it verifies nothing for you and asks you to trust nothing you can't check yourself.</p>
+    <p>This service registers Agent Action Capsule signed statements, issues COSE receipts, and anchors them to an append-only RFC 9162 Merkle log — so anyone can prove the record of an agent action was included, and a later rewrite or removal would be detectable. It is infrastructure, not a product: it verifies nothing for you and asks you to trust nothing you can't check yourself.</p>
     <div class="host">POST a checkpoint → <b>witness.agentactioncapsule.org/checkpoints</b></div>
     <div class="sth-strip" id="sth-strip"></div>
     <p class="sth-note">Early access — tree includes initial test submissions.</p>
@@ -161,7 +161,7 @@
       <div class="d">
         <div class="n">03 · anchor</div>
         <h3>Publishes a signed tree head</h3>
-        <p>Exposes the current root, inclusion and consistency proofs — the append-only guarantees of a transparency log.</p>
+        <p>Exposes the current root, inclusion and consistency proofs — the evidence that makes a rewrite of the log detectable.</p>
       </div>
     </div>
   </div>
@@ -228,14 +228,14 @@ r = verify_receipt(receipt, leaf_entry_hex=leaf,
         <ul>
           <li>The signature on each capsule — who sealed it</li>
           <li>The inclusion proof in the receipt — that the log included it</li>
-          <li>Consistency between any two tree heads — that the log stayed append-only</li>
+          <li>Consistency between any two tree heads — that nothing earlier was rewritten or removed</li>
           <li>Everything from the bytes, offline, with the open verifier</li>
         </ul>
       </div>
       <div class="tcol trust-req">
-        <h4><span class="b">THE LOG COMMITS TO</span> Operational guarantees</h4>
+        <h4><span class="b">THE LOG COMMITS TO</span> Operational commitments</h4>
         <ul>
-          <li>Uptime and durable, append-only storage</li>
+          <li>Uptime and durable storage (the log only grows; a rewrite would be detectable from a consistency proof)</li>
           <li>Single-operator non-equivocation — we commit not to show different views to different verifiers; an independent witness is what removes the need to trust that commitment</li>
           <li>A stable signing key, published at /.well-known/did.json</li>
           <li>This service runs the open-source capsule-anchor — auditable in full</li>

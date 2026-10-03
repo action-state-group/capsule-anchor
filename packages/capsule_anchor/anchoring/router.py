@@ -433,9 +433,13 @@ class CheckpointStampResponse(BaseModel):
 
     ``grade`` is populated only when ``log_id`` is an ENROLLED submitter
     (``submitters.py``): ``"mmr-verified"`` for a native CLL log, or
-    ``"countersigned-observed"`` for a foreign accumulator this witness does
-    not independently verify -- it only observed and countersigned the
-    submitted commitment. ``None`` for every non-enrolled ``log_id``, same
+    ``"observed-only"`` for a foreign accumulator this witness does not
+    independently verify -- it checked the signature under the pinned key,
+    then registered and timestamped the submitted commitment. ``grade`` is
+    the label signed into ``receipt_b64``: resubmitting a checkpoint whose
+    receipt was issued before the rename returns that receipt and its
+    original ``"countersigned-observed"``, which means the same as
+    ``"observed-only"``. ``None`` for every non-enrolled ``log_id``, same
     as before enrollment existed; never presented as equivalent to either
     grade. Distinct from ``continuity_grade`` above: this describes the
     SUBMITTER's own accumulator credibility, not this witness's chain-tip
@@ -944,7 +948,7 @@ def get_router() -> APIRouter:
             entry_hash_scheme=result.entry_hash_scheme,
             leaf_index=result.leaf_index,
             tree_size=result.tree_size,
-            grade=cp.get("grade"),
+            grade=result.receipt_grade,
             continuity_grade=result.continuity_grade,
             public_log=public_log_entry,
         )
@@ -986,9 +990,10 @@ def get_router() -> APIRouter:
         self-signing with their own key. Every other ``log_id`` keeps the
         open self-asserted-``kid`` behavior above, unchanged. An enrolled
         submitter's stamp additionally carries a ``grade``
-        (``"mmr-verified"`` or ``"countersigned-observed"`` for a foreign
+        (``"mmr-verified"``, or ``"observed-only"`` for a foreign
         accumulator this witness only observes and does not independently
-        verify) and is subject to its own configured per-identity rate limit
+        verify; a receipt issued before the rename carries
+        ``"countersigned-observed"``, the same meaning) and is subject to its own configured per-identity rate limit
         on top of the global one.
 
         **JSON-form enrolled submitters:** an enrolled entry may instead
