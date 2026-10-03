@@ -37,7 +37,7 @@ Originally (base_sha `26083a7`) no grade/status field existed anywhere in the wi
 this task was in progress, `#33` (`feat(witness): config-driven allowlist for enrolled checkpoint
 submitters, enroll AgenTrust trace-registry/v1`) merged onto `origin/main` and shipped exactly
 this: `packages/capsule_anchor/anchoring/submitters.py` (`SubmitterAllowlist`, `GRADE_MMR_VERIFIED`
-/ `GRADE_COUNTERSIGNED_OBSERVED`) plus a committed config,
+/ `GRADE_OBSERVED_ONLY`, then named `GRADE_COUNTERSIGNED_OBSERVED`) plus a committed config,
 `packages/capsule_anchor/config/checkpoint_submitters.json`, enrolling `trace-registry/v1` with
 AgenTrust's real key (`bc133259c094f63694b4ec48a295d7501a9a0cd536df5631fb4663c155f7bc90`) and
 `accumulator: "foreign"` (→ `grade: "observed-only"`, formerly `"countersigned-observed"`; never `"mmr-verified"`).
