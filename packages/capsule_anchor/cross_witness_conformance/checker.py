@@ -12,7 +12,7 @@ never guesses at how).
 As of `#33` (merged onto `origin/main` while this was being built,
 2026-09-01), `capsule_anchor.anchoring.submitters.SubmitterAllowlist` pins
 `trace-registry/v1` to AgenTrust's enrolled key AND labels the checkpoint's
-`grade` (`"countersigned-observed"` for their foreign accumulator, never
+`grade` (`"observed-only"` for their foreign accumulator, never
 `"mmr-verified"`) -- both handled here by passing the SAME committed
 allowlist config into `parse_and_verify_checkpoint_cose` that the live
 witness itself loads, rather than re-deriving either independently.
@@ -43,19 +43,21 @@ from capsule_anchor.anchoring.checkpoint_cose import (
 from capsule_anchor.anchoring.checkpoint_json import parse_and_verify_checkpoint_json
 from capsule_anchor.anchoring.service import _checkpoint_digest
 from capsule_anchor.anchoring.submitters import (
-    GRADE_COUNTERSIGNED_OBSERVED,
+    GRADE_OBSERVED_ONLY,
     WIRE_FORM_COSE_SIGN1,
     WIRE_FORM_JSON_ED25519,
     SubmitterAllowlist,
+    normalize_grade,
 )
 
 #: Identity enrolled 2026-09-01 (Imran, AgenTrust) -- see
 #: `packages/capsule_anchor/config/checkpoint_submitters.json`, the single
 #: committed source of truth for both the log_id and its expected grade
-#: (`accumulator: "foreign"` -> `GRADE_COUNTERSIGNED_OBSERVED`). Callers may
-#: override either per-call.
+#: (`accumulator: "foreign"` -> `GRADE_OBSERVED_ONLY`). Callers may
+#: override either per-call; an expected grade given under its legacy label
+#: (`"countersigned-observed"`) matches the same as `"observed-only"`.
 DEFAULT_EXPECTED_LOG_ID = "trace-registry/v1"
-DEFAULT_EXPECTED_GRADE = GRADE_COUNTERSIGNED_OBSERVED
+DEFAULT_EXPECTED_GRADE = GRADE_OBSERVED_ONLY
 
 CheckStatus = str  # "PASS" | "FAIL" | "UNKNOWN"
 
@@ -138,7 +140,7 @@ def check_checkpoint_wire(
 
     `claims["grade"]` (also server-computed) is checked against
     `expected_grade` -- for the committed config's `accumulator: "foreign"`
-    entry that must be `GRADE_COUNTERSIGNED_OBSERVED`, never
+    entry that must be `GRADE_OBSERVED_ONLY`, never
     `GRADE_MMR_VERIFIED`. `grade` is `None` whenever `log_id` isn't resolved
     against the allowlist at all (e.g. the entry went missing from a
     deployed config) -- that FAILs this check too, rather than skipping it.
@@ -218,12 +220,12 @@ def check_checkpoint_wire(
         )
 
     if expected_grade is None:
-        report.add("countersign_grade", "UNKNOWN", "no expected grade configured for this check")
-    elif claims.get("grade") == expected_grade:
-        report.add("countersign_grade", "PASS", f"grade={claims['grade']!r}")
+        report.add("witness_grade", "UNKNOWN", "no expected grade configured for this check")
+    elif normalize_grade(claims.get("grade")) == normalize_grade(expected_grade):
+        report.add("witness_grade", "PASS", f"grade={claims['grade']!r}")
     else:
         report.add(
-            "countersign_grade",
+            "witness_grade",
             "FAIL",
             f"grade={claims.get('grade')!r}, expected {expected_grade!r} -- a foreign "
             "accumulator must never be presented as mmr-verified (and grade=None means "
@@ -261,14 +263,14 @@ def make_http_getter(base_url: str) -> Callable[[str], _Resp]:
 
 def check_witness_tie_back(claims: dict, *, get: Callable[[str], Any]) -> ConformanceReport:
     """Task item (1)'s "fetch it from the witness" step: confirm the witness
-    actually countersigned THIS exact checkpoint.
+    actually registered THIS exact checkpoint.
 
     Note this is separate from the grade check (folded into
     `check_checkpoint_wire` instead): `grade` is only ever returned
     synchronously on the ORIGINAL `POST /checkpoints` response (which
     AgenTrust sees, not us) -- `InclusionResolveResponse` (`GET /v1/
     inclusion/{capsule_id}`, what this function reads) never carries it. So
-    "confirm the witness countersigned under the observed grade" resolves,
+    "confirm the witness registered it under the observed grade" resolves,
     from our external vantage point, to recomputing what grade the witness
     WOULD have/DID assign from the same committed allowlist config
     ourselves (`check_checkpoint_wire`), not to reading it back here.
@@ -280,7 +282,7 @@ def check_witness_tie_back(claims: dict, *, get: Callable[[str], Any]) -> Confor
     (`_checkpoint_digest`) from claims already obtained out of band, then
     independently verifies the COSE Receipt the witness holds for that exact
     digest via `GET /v1/inclusion/{capsule_id}` -- proving the witness
-    actually countersigned THIS checkpoint, not merely that something from
+    actually registered THIS checkpoint, not merely that something from
     this submitter exists somewhere.
     """
     report = ConformanceReport()

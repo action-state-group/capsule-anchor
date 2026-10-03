@@ -19,7 +19,23 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   only a log's first checkpoint registers there under `enforce`, with the same 409 code
   and a message pointing to `POST /checkpoints`. Foreign accumulators
   (enrolled `accumulator: foreign`, COSE or JSON wire) are exempt: they stay
-  `countersigned-observed`. An unknown value fails startup.
+  `observed-only`. An unknown value fails startup.
+
+### Changed
+
+- **The foreign-accumulator grade is now `observed-only` (was `countersigned-observed`).**
+  A witness registers and timestamps a checkpoint; it does not countersign it, so the old
+  name described the wrong act. The meaning is unchanged: the signature was checked under
+  the pinned key and the commitment registered, and the foreign accumulator was not.
+  New receipts sign `observed-only` under protected label -65537. Receipts already issued
+  keep their signed `countersigned-observed` bytes and still verify; resubmitting such a
+  checkpoint returns that receipt with the grade it carries, and `GET /checkpoints/{log_id}`
+  reports the stored grade as it was signed. Readers accept both labels as one meaning
+  (`submitters.normalize_grade`), including the cross-witness conformance checker, whose
+  grade check is now named `witness_grade`.
+- **Root page wording.** "Never quietly dropped or rewritten" and "append-only guarantees"
+  now say what a verifier can actually establish: a rewrite or removal would be detectable
+  from the proofs. "Operational guarantees" is now "Operational commitments".
 
 ### Fixed
 

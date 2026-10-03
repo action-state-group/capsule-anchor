@@ -12,7 +12,7 @@ for that ``log_id`` is expected to carry a ``consistency_proof``:
 
 Foreign accumulators (enrolled ``accumulator: foreign``, COSE or JSON wire)
 are never subject to the policy: this witness cannot verify their
-accumulator, so they send no proof and stay ``countersigned-observed``.
+accumulator, so they send no proof and stay ``observed-only``.
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from capsule_anchor.anchoring.service import (
 from capsule_anchor.anchoring.submitters import (
     ACCUMULATOR_FOREIGN,
     ACCUMULATOR_NATIVE_MMR,
-    GRADE_COUNTERSIGNED_OBSERVED,
+    GRADE_OBSERVED_ONLY,
     GRADE_MMR_VERIFIED,
     WIRE_FORM_COSE_SIGN1,
     WIRE_FORM_JSON_ED25519,
@@ -292,7 +292,7 @@ def test_enforce_exempts_foreign_accumulator_cose_wire(monkeypatch, key):
     _enroll_foreign("foreign-cose/v1", key, WIRE_FORM_COSE_SIGN1)
     status, body = _first_then_proofless(client, key, _Log("foreign-cose/v1"))
     assert status == 200, body
-    assert body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert body["grade"] == GRADE_OBSERVED_ONLY
     assert body["continuity_grade"] == CONTINUITY_GRADE_REGISTERED
 
 
@@ -306,7 +306,7 @@ def test_enforce_exempts_foreign_accumulator_json_wire(monkeypatch, key):
     cp2 = _json_checkpoint(key, log_id="foreign-json/v1", mmr_size=3, prev_size=1, root="c" * 64)
     resp2 = client.post("/checkpoints", content=json.dumps(cp2).encode(), headers=headers)
     assert resp2.status_code == 200, resp2.json()
-    assert resp2.json()["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert resp2.json()["grade"] == GRADE_OBSERVED_ONLY
     assert get_service().consistency_proof_would_refuse == {}
 
 

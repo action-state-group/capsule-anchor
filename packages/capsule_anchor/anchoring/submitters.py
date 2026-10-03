@@ -4,7 +4,7 @@
 
 ``/checkpoints`` (see ``checkpoint_cose.py`` / ``router.py``) was built as a
 fully open existence-timestamp surface: any COSE_Sign1 checkpoint verifying
-under its OWN self-asserted ``kid`` gets counter-signed, for any ``log_id``
+under its OWN self-asserted ``kid`` gets a signed receipt, for any ``log_id``
 (CWT ``iss``) -- this stays TRUE and UNCHANGED for every ``log_id`` that has
 no entry here. That default-open behavior is what a default ``capsule-emit``
 client relies on and is deliberately not gated by this module.
@@ -86,7 +86,33 @@ _IDENTITY_FIELD_MAP = {k: k for k in _JSON_CHECKPOINT_ALL_FIELDS}
 #: module docstring on ``checkpoint_cose.py`` and the cross-witness launch
 #: brief's "foreign-accumulator honesty" requirement).
 GRADE_MMR_VERIFIED = "mmr-verified"
-GRADE_COUNTERSIGNED_OBSERVED = "countersigned-observed"
+GRADE_OBSERVED_ONLY = "observed-only"
+
+#: The label this witness emitted for a foreign accumulator before
+#: ``observed-only`` replaced it. A witness registers and timestamps; it does
+#: not countersign, so the old name described the wrong act. Receipts already
+#: issued keep these exact signed bytes, so every reader of a grade accepts it
+#: as the same meaning as ``GRADE_OBSERVED_ONLY`` (see :func:`normalize_grade`).
+#: Never emitted.
+GRADE_COUNTERSIGNED_OBSERVED_LEGACY = "countersigned-observed"
+
+_LEGACY_GRADE_ALIASES = {GRADE_COUNTERSIGNED_OBSERVED_LEGACY: GRADE_OBSERVED_ONLY}
+
+
+def normalize_grade(grade: str | None) -> str | None:
+    """Map a grade read from input (a stored record, an issued receipt, a
+    caller's expectation) to its current label. A legacy label maps to the
+    label that replaced it; every other value, ``None`` included, is
+    returned unchanged."""
+    if grade is None:
+        return None
+    return _LEGACY_GRADE_ALIASES.get(grade, grade)
+
+
+def is_observed_only(grade: str | None) -> bool:
+    """True for a foreign-accumulator grade under either its current or its
+    legacy label."""
+    return normalize_grade(grade) == GRADE_OBSERVED_ONLY
 
 #: Default per-submitter rate limit when a config entry doesn't override it.
 DEFAULT_SUBMITTER_RATE_LIMIT_PER_MIN = 60
@@ -119,7 +145,7 @@ class SubmitterEntry:
     @property
     def grade(self) -> str:
         return (
-            GRADE_COUNTERSIGNED_OBSERVED
+            GRADE_OBSERVED_ONLY
             if self.accumulator == ACCUMULATOR_FOREIGN
             else GRADE_MMR_VERIFIED
         )

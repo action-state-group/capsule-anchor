@@ -55,7 +55,7 @@ this module checks. It is:
 path (`POST /checkpoints`, see `README.md`'s "Witness host" section and
 `OPERATOR_GUIDE.md` §"What witnesses check") uses "counter-signed"/"countersigns"
 as plain English for the ordinary act of signing and receipting whatever checkpoint
-it accepts — including the `countersigned-observed` grade a foreign-accumulator
+it accepts — including the `observed-only` grade (formerly `countersigned-observed`) a foreign-accumulator
 checkpoint earns when this witness observes and timestamps it without independently
 verifying its accumulator math. That is witness behavior, under the witness's own
 published Registration Policy (`OPERATOR_GUIDE.md` §1): open as to who may submit (no

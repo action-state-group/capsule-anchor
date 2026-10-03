@@ -33,7 +33,7 @@ from capsule_anchor.anchoring.submitters import (
     ACCUMULATOR_FOREIGN,
     ACCUMULATOR_NATIVE_MMR,
     DEFAULT_CONFIG_PATH,
-    GRADE_COUNTERSIGNED_OBSERVED,
+    GRADE_OBSERVED_ONLY,
     GRADE_MMR_VERIFIED,
     WIRE_FORM_COSE_SIGN1,
     WIRE_FORM_JSON_ED25519,
@@ -202,10 +202,22 @@ def test_valid_checkpoint_passes_every_wire_check(enrolled_key):
     report = check_checkpoint_wire(cose, expected_log_id=_LOG_ID, allowlist=allowlist)
     assert not report.has_failure, report.render()
     names = {c.name for c in report.checks}
-    assert names == {"wire_structure", "signature_verified", "sub_pattern", "enrolled_log_id", "countersign_grade"}
+    assert names == {"wire_structure", "signature_verified", "sub_pattern", "enrolled_log_id", "witness_grade"}
     assert report.claims["log_id"] == _LOG_ID
     assert report.claims["mmr_size"] == 10
-    assert report.claims["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert report.claims["grade"] == GRADE_OBSERVED_ONLY
+
+
+def test_expected_grade_under_the_legacy_label_still_passes(enrolled_key):
+    """A caller that still expects the pre-rename label gets the same
+    verdict: ``countersigned-observed`` means ``observed-only``."""
+    allowlist = _allowlist(pubkey=enrolled_key.public_key().public_bytes_raw())
+    cose = _checkpoint_cose(enrolled_key, mmr_size=10)
+    report = check_checkpoint_wire(
+        cose, expected_log_id=_LOG_ID, expected_grade="countersigned-observed", allowlist=allowlist
+    )
+    assert not report.has_failure, report.render()
+    assert report.claims["grade"] == "observed-only"
 
 
 def test_wrong_content_type_fails_named(enrolled_key):
@@ -271,7 +283,7 @@ def test_grade_fails_when_expecting_mmr_verified_for_a_foreign_entry(enrolled_ke
     cose = _checkpoint_cose(enrolled_key, mmr_size=10)
     report = check_checkpoint_wire(cose, allowlist=allowlist, expected_grade=GRADE_MMR_VERIFIED)
     assert report.has_failure
-    assert any(c.name == "countersign_grade" and c.status == "FAIL" for c in report.checks)
+    assert any(c.name == "witness_grade" and c.status == "FAIL" for c in report.checks)
 
 
 def test_grade_passes_for_a_native_mmr_entry_expecting_mmr_verified(enrolled_key):
@@ -292,7 +304,7 @@ def test_grade_fails_when_log_id_is_not_enrolled_at_all(enrolled_key):
     report = check_checkpoint_wire(cose, allowlist=empty_allowlist)
     assert report.has_failure
     assert report.claims["grade"] is None
-    assert any(c.name == "countersign_grade" and c.status == "FAIL" for c in report.checks)
+    assert any(c.name == "witness_grade" and c.status == "FAIL" for c in report.checks)
 
 
 def test_grade_check_reports_unknown_when_no_expectation_configured(enrolled_key):
@@ -301,7 +313,7 @@ def test_grade_check_reports_unknown_when_no_expectation_configured(enrolled_key
     report = check_checkpoint_wire(cose, allowlist=allowlist, expected_grade=None)
     assert not report.has_failure
     status = {c.name: c.status for c in report.checks}
-    assert status["countersign_grade"] == "UNKNOWN"
+    assert status["witness_grade"] == "UNKNOWN"
 
 
 def test_defaults_match_the_real_shipped_config():
@@ -332,8 +344,8 @@ def test_json_declared_submitter_checked_as_json(enrolled_key):
     report = check_checkpoint_wire(body, expected_log_id=_LOG_ID, allowlist=allowlist)
     assert not report.has_failure, report.render()
     names = {c.name for c in report.checks}
-    assert names == {"wire_structure", "signature_verified", "sub_pattern", "enrolled_log_id", "countersign_grade"}
-    assert report.claims["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert names == {"wire_structure", "signature_verified", "sub_pattern", "enrolled_log_id", "witness_grade"}
+    assert report.claims["grade"] == GRADE_OBSERVED_ONLY
     wire_detail = next(c.detail for c in report.checks if c.name == "wire_structure")
     assert "json-ed25519" in wire_detail
 
@@ -451,7 +463,7 @@ def test_step3_live_checkpoint_1_conformance_pass():
     assert not report.has_failure, report.render()
     assert report.claims["mmr_size"] == 1
     assert report.claims["root"] == "3af8ddf2c1f429bb4fc670437e48640887f60de809b18f8ccea55fefb0c6639a"
-    assert report.claims["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert report.claims["grade"] == GRADE_OBSERVED_ONLY
 
 
 def test_step3_chain_continuity_harness_ready_for_checkpoint_2():

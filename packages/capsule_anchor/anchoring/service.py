@@ -61,7 +61,7 @@ from capsule_anchor.contracts.types import (
 
 from . import ct
 from .store import InMemoryLogStore, SqliteLogStore
-from .submitters import GRADE_COUNTERSIGNED_OBSERVED
+from .submitters import is_observed_only
 from .tsa import TsaError, timestamp_root_hash, tsa_enabled
 
 logger = logging.getLogger("capsule_anchor")
@@ -101,7 +101,9 @@ _LOG_KIND_SCITT = "scitt_statement"
 #       -65537 = grade (OPTIONAL, present whenever ``grade`` is given) --
 #             private-use protected label (mirrors ``scitt_cose.receipt.HDR_GRADE``)
 #             carrying this witness's qualitative grade string
-#             (``"countersigned-observed"`` | ``"mmr-verified"``).
+#             (``"observed-only"`` | ``"mmr-verified"``; receipts issued
+#             before the rename carry ``"countersigned-observed"``, read as
+#             ``"observed-only"``).
 #       -65538 = continuity (OPTIONAL, present only for a ``POST /checkpoints``
 #             registration graded ``CONTINUITY_GRADE_WITNESSED`` -- see
 #             [capsule-anchor-checkpoint-aware-witness]) -- a CBOR map
@@ -396,9 +398,9 @@ class ConsistencyProofRequiredError(ContinuityMismatchError):
 #: * ``enforce``: refuse it with ``ConsistencyProofRequiredError`` (409).
 #:
 #: A foreign accumulator (enrolled ``accumulator: foreign``, graded
-#: ``countersigned-observed``) and the JSON wire form are NEVER subject to
+#: ``observed-only``) and the JSON wire form are NEVER subject to
 #: this policy: this witness cannot verify their accumulator, so they send no
-#: proof and stay countersigned-observed.
+#: proof and stay observed-only.
 CONSISTENCY_PROOF_POLICY_OFF = "off"
 CONSISTENCY_PROOF_POLICY_WARN = "warn"
 CONSISTENCY_PROOF_POLICY_ENFORCE = "enforce"
@@ -571,6 +573,13 @@ class StatementRegistration:
     #: credibility, not this witness's OWN chain-tip check). See
     #: ``AnchorerService._check_checkpoint_continuity``.
     continuity_grade: str | None = field(default=None)
+    #: The grade signed into ``receipt`` (protected label -65537), exactly as
+    #: those bytes carry it: the ``grade`` passed in for a new registration,
+    #: or the stored grade for a resubmission that returns the cached
+    #: receipt. A receipt issued before the ``observed-only`` rename keeps
+    #: ``countersigned-observed`` here, so a response never reports a label
+    #: its own receipt does not carry.
+    receipt_grade: str | None = field(default=None)
 
 
 def _now() -> datetime:
@@ -1266,12 +1275,15 @@ class AnchorerService:
                 # would make a fresh check(a) fail for a perfectly legitimate
                 # resubmission of an OLDER, already-accepted checkpoint.
                 cached_continuity_grade: str | None = None
+                cached_receipt_grade: str | None = grade
                 if checkpoint_continuity is not None:
                     stored = self._store.get_checkpoint_record(
                         checkpoint_continuity["log_id"], checkpoint_continuity["mmr_size"]
                     )
                     if stored is not None:
                         cached_continuity_grade = stored.get("continuity_grade")
+                        if stored.get("entry_hash") == returned_hash:
+                            cached_receipt_grade = stored.get("grade")
                 return StatementRegistration(
                     receipt=receipt_bytes,
                     entry_hash=returned_hash,
@@ -1281,6 +1293,7 @@ class AnchorerService:
                     checkpoint_witness=witness_info,
                     subject=subject,
                     continuity_grade=cached_continuity_grade,
+                    receipt_grade=cached_receipt_grade,
                 )
 
             # Not cached: a genuinely new signing act. If it's a checkpoint,
@@ -1416,6 +1429,7 @@ class AnchorerService:
             checkpoint_witness=witness_info,
             subject=subject,
             continuity_grade=continuity_grade,
+            receipt_grade=grade,
         )
 
     def _check_checkpoint_consistency(self, cp: dict) -> str:
@@ -1551,8 +1565,8 @@ class AnchorerService:
         ``consistency_proof`` key, even as ``None``) and not an enrolled
         foreign accumulator. The JSON wire form and every foreign
         accumulator are exempt: this witness cannot verify their
-        accumulator, so they stay ``countersigned-observed``."""
-        return "consistency_proof" in cp and cp.get("grade") != GRADE_COUNTERSIGNED_OBSERVED
+        accumulator, so they stay ``observed-only``."""
+        return "consistency_proof" in cp and not is_observed_only(cp.get("grade"))
 
     def _apply_consistency_proof_policy(self, cp: dict, prev: dict) -> None:
         """A proof-less checkpoint for a ``log_id`` this witness has already

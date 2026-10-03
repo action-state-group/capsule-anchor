@@ -13,7 +13,7 @@ from capsule_anchor.anchoring.submitters import (
     ACCUMULATOR_NATIVE_MMR,
     DEFAULT_CONFIG_PATH,
     DEFAULT_SUBMITTER_RATE_LIMIT_PER_MIN,
-    GRADE_COUNTERSIGNED_OBSERVED,
+    GRADE_OBSERVED_ONLY,
     GRADE_MMR_VERIFIED,
     WIRE_FORM_COSE_SIGN1,
     WIRE_FORM_JSON_ED25519,
@@ -30,12 +30,12 @@ def test_empty_list_yields_empty_allowlist():
     assert allowlist.get("anything") is None
 
 
-def test_foreign_entry_grades_countersigned_observed():
+def test_foreign_entry_grades_observed_only():
     allowlist = SubmitterAllowlist.from_list(
         [{"log_id": "trace-registry/v1", "pubkey_hex": _VALID_HEX, "accumulator": ACCUMULATOR_FOREIGN}]
     )
     entry = allowlist.get("trace-registry/v1")
-    assert entry.grade == GRADE_COUNTERSIGNED_OBSERVED
+    assert entry.grade == GRADE_OBSERVED_ONLY
     assert entry.rate_limit_per_min == DEFAULT_SUBMITTER_RATE_LIMIT_PER_MIN
 
 
@@ -48,7 +48,7 @@ def test_native_mmr_entry_grades_mmr_verified():
 
 def test_accumulator_defaults_to_foreign_when_omitted():
     """Absent accumulator is treated as the MORE CONSERVATIVE (not
-    over-claiming) case -- foreign/countersigned-observed, never silently
+    over-claiming) case -- foreign/observed-only, never silently
     assumed to be our own verified MMR."""
     allowlist = SubmitterAllowlist.from_list([{"log_id": "x", "pubkey_hex": _VALID_HEX}])
     assert allowlist.get("x").accumulator == ACCUMULATOR_FOREIGN
@@ -96,7 +96,7 @@ def test_malformed_entry_fails_closed(entry):
 def test_real_shipped_config_enrolls_selftest_log_with_native_mmr_grade():
     """Pins the ACTUAL committed config file: the self-test log must grade
     mmr-verified (proving the grade path is genuinely exercised, not
-    countersigned-observed by omission/default) and must be named so it
+    observed-only by omission/default) and must be named so it
     cannot be mistaken for an independent party."""
     allowlist = SubmitterAllowlist.load(DEFAULT_CONFIG_PATH)
     entry = allowlist.get("asg-selftest/v1")

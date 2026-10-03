@@ -263,9 +263,9 @@ def parse_and_verify_checkpoint_cose(
     ``log_id`` ``"first-seen"`` regardless.
 
     Foreign-accumulator entries (``grade`` ==
-    ``submitters.GRADE_COUNTERSIGNED_OBSERVED``) are explicitly NEVER
+    ``submitters.GRADE_OBSERVED_ONLY``) are explicitly NEVER
     checked for internal consistency in v1 regardless -- this witness only
-    countersigns that it observed the submitted commitment, it does not
+    registers and timestamps the commitment it observed; it does not
     understand or verify a foreign log's own accumulator math.
     """
     kid, content_type, unauth_iss = _extract_protected_fields(cose_bytes)

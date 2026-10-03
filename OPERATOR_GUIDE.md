@@ -74,7 +74,7 @@ What step 4 applies to depends on the submitter's accumulator:
 | Native CLL MMR, not enrolled | COSE | Required under `enforce` | none (`continuity_grade` only) |
 | Native CLL MMR, enrolled `native_mmr` | COSE | Required under `enforce` | `mmr-verified` |
 | Native CLL MMR, enrolled `native_mmr` | JSON | Never required (the JSON wire form carries no proof) | `mmr-verified` |
-| Foreign, enrolled `foreign` | COSE or JSON | Never required. This witness cannot verify a foreign accumulator, so it sends no proof | `countersigned-observed` |
+| Foreign, enrolled `foreign` | COSE or JSON | Never required. This witness cannot verify a foreign accumulator, so it sends no proof | `observed-only` |
 
 **`mmr-checkpoint` statements on `/transparency/register-statement`.** A Signed Statement
 whose payload declares `"artifact_type": "mmr-checkpoint"` must be well-formed (400
@@ -742,7 +742,7 @@ An enrolled entry's stamp additionally carries a `grade`:
 | `grade` | Meaning |
 |---------|---------|
 | `mmr-verified` | The submitter's commitment is the CLL MMR peaks-and-root scheme, which this witness fully understands. |
-| `countersigned-observed` | A foreign accumulator this witness does not independently verify — it observes, timestamps, and countersigns the submitted commitment bytes. Never equivalent to `mmr-verified`. |
+| `observed-only` | A foreign accumulator this witness does not independently verify — it checks the signature under the pinned key, then registers and timestamps the submitted commitment bytes. Never equivalent to `mmr-verified`. Receipts issued before this label replaced `countersigned-observed` keep that older label, which means the same thing; verifiers accept both. |
 
 Enrollment is a committed config change and redeploy, not an open signup mechanism.
 Every `log_id` that is not enrolled keeps the default open self-asserted-key behavior

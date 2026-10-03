@@ -142,7 +142,7 @@ scheduler checks before submitting.
 A Rekor entry proves *existence and time* — a third party attests it was submitted
 before some moment, and it is content-visible to anyone forever after. It never
 independently re-verifies the CT tree's internal consistency. Per the register's
-row-5 vocabulary, that is `countersigned-observed`, never `mmr-verified` — and this
+row-5 vocabulary, that is `observed-only` (formerly `countersigned-observed`), never `mmr-verified` — and this
 rail does not participate in a checkpoint's `grade`/`continuity_grade` fields at all
 (those describe the SUBMITTER's accumulator and this witness's own chain-tip check,
 respectively; the public-log rail is a THIRD, orthogonal piece of evidence, reported

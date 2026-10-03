@@ -22,7 +22,7 @@ from capsule_anchor.anchoring.checkpoint_json import parse_and_verify_checkpoint
 from capsule_anchor.anchoring.service import CheckpointSignatureError, NotACheckpointError
 from capsule_anchor.anchoring.submitters import (
     ACCUMULATOR_FOREIGN,
-    GRADE_COUNTERSIGNED_OBSERVED,
+    GRADE_OBSERVED_ONLY,
     WIRE_FORM_COSE_SIGN1,
     WIRE_FORM_JSON_ED25519,
     SubmitterAllowlist,
@@ -99,7 +99,7 @@ def test_real_live_checkpoint_1_accepted_and_graded():
     assert result["log_id"] == _LIVE_LOG_ID
     assert result["mmr_size"] == 1
     assert result["root"] == _LIVE_CHECKPOINT_1["root"]
-    assert result["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert result["grade"] == GRADE_OBSERVED_ONLY
 
 
 # --- accepted path (synthetic) -----------------------------------------------
@@ -112,7 +112,7 @@ def test_enrolled_json_submission_accepted_with_grade():
     result = parse_and_verify_checkpoint_json(json.dumps(cp).encode(), allowlist=allowlist)
     assert result["log_id"] == "log-A"
     assert result["mmr_size"] == 10
-    assert result["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert result["grade"] == GRADE_OBSERVED_ONLY
 
 
 def test_root_and_prev_root_pass_through_opaque_never_reconstructed():
@@ -266,7 +266,7 @@ def test_explicit_field_map_reads_submitters_own_field_names():
     result = parse_and_verify_checkpoint_json(json.dumps(renamed).encode(), allowlist=allowlist)
     assert result["log_id"] == "renamed-log/v1"
     assert result["mmr_size"] == 7
-    assert result["grade"] == GRADE_COUNTERSIGNED_OBSERVED
+    assert result["grade"] == GRADE_OBSERVED_ONLY
 
 
 def test_our_own_field_names_rejected_once_a_field_map_renames_them():
