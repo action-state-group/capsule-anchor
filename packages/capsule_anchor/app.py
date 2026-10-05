@@ -186,14 +186,30 @@ def create_app() -> FastAPI:
             f"{', '.join(CONSISTENCY_PROOF_POLICIES)}; got {consistency_proof_policy!r}"
         )
 
+    # u480: the registration policy for embedded payloads (RFC 9943 5.1.1):
+    # by default a statement's embedded payload is stored detached (its
+    # SHA-256), unless it is itself a digest. Malformed values fail startup.
+    from capsule_anchor.anchoring.payload_policy import policy_from_env
+    from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES
+
+    payload_policy = policy_from_env(statement_limit=MAX_STATEMENT_BYTES)
+
     if database_url:
         from capsule_anchor.anchoring.store import PostgresLogStore
         _store: object = PostgresLogStore(database_url)
         _svc = AnchorerService(
-            attestor=attestor, store=_store, consistency_proof_policy=consistency_proof_policy
+            attestor=attestor,
+            store=_store,
+            consistency_proof_policy=consistency_proof_policy,
+            payload_policy=payload_policy,
         )
     else:
-        _svc = AnchorerService(attestor=attestor, consistency_proof_policy=consistency_proof_policy)
+        _svc = AnchorerService(
+            attestor=attestor,
+            consistency_proof_policy=consistency_proof_policy,
+            payload_policy=payload_policy,
+        )
+    logger.info("embedded payloads: %s", payload_policy.describe()["embedded_payloads"])
     logger.info("consistency-proof policy for native checkpoint logs: %s", consistency_proof_policy)
     cfg_anchor(_svc)
 
@@ -350,6 +366,9 @@ def create_app() -> FastAPI:
             # value; only the receipt re-issue cache ages out. A policy
             # nobody can read is not a promise.
             "entry_retention": declared_posture(),
+            # u480: what an embedded payload is kept as. The full policy and
+            # privacy posture: GET /transparency/registration-policy.
+            "embedded_payloads": "as_submitted_up_to_cap" if payload_policy.store_embedded else "detached",
         }
         if tree_size > 0:
             try:
@@ -365,6 +384,44 @@ def create_app() -> FastAPI:
         if _public_log_publisher is not None:
             result["public_log"] = "degraded" if _public_log_publisher.degraded else "ok"
         return result
+
+    @app.get("/transparency/registration-policy", tags=["transparency-service"])
+    def registration_policy() -> dict:
+        """This service's registration policy and privacy posture, published so
+        an issuer can decide what to submit (RFC 9943 5.1.1 and 8.2: the
+        privacy check is the issuer's). Reflects this instance's configuration."""
+        from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES
+        from capsule_anchor.countersign.config import strict_countersign_active
+
+        leaves = []
+        if _public_log_publisher is not None:
+            leaves.append("this service's own signed tree heads, to an external public log")
+        if os.environ.get("CAPSULE_ANCHOR_TSA_ENABLED") == "1":
+            leaves.append("the SHA-256 of a countersigned root, to an RFC 3161 timestamp authority")
+        if strict_countersign_active():
+            leaves.append("a countersignature, to the webhook a countersign request names")
+        return {
+            "statement_max_bytes": MAX_STATEMENT_BYTES,
+            "signed_statements": {
+                "signature_verified_at_registration": False,
+                "issuer_binding": "open: any issuer may register; a receipt attests inclusion, not issuer identity",
+                **payload_policy.describe(),
+            },
+            "recommended_submission": "a statement made over a hash (RFC 9943 6.2 hash envelope: "
+            "payload = the digest, protected header 258 payload_hash_alg); keep the preimage yourself",
+            "privacy": {
+                "stored": [
+                    "the log's leaf hashes (entry hashes) and the receipts issued for them",
+                    "per-log_id checkpoint state and recorded equivocations",
+                    "the signed tree heads",
+                    "for a statement naming a CWT subject: the subject, the entry hash, and its payload "
+                    "as the embedded-payload policy above says (a digest, or a payload's SHA-256)",
+                    "for /anchor/anchor: the caller's tenant_id and root hash",
+                ],
+                "leaves": leaves,
+                "telemetry": "none",
+            },
+        }
 
     @app.get("/.well-known/did.json", tags=["meta"])
     def did_document() -> dict:

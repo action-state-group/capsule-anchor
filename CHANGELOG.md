@@ -6,7 +6,25 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **A Signed Statement's embedded payload is stored detached by default.** On
+  `/transparency/register-statement`, a statement naming a CWT `sub` used to keep its embedded
+  payload as submitted in the subject index. Now the service keeps the payload only when the
+  statement was made over a hash (the RFC 9943 §6.2 hash envelope, or a 32-byte `capsule_id`
+  under the AAC capsule-id content type); for any other payload it keeps only the SHA-256.
+  `GET /transparency/statements` returns a new `payload_form` (`digest`, `sha256` or
+  `embedded`; `null` for rows stored before). Receipts are unchanged. Existing rows are not
+  rewritten: new registrations only.
+
 ### Added
+
+- **`CAPSULE_ANCHOR_STORE_EMBEDDED_PAYLOADS` (`off` | `on`) and
+  `CAPSULE_ANCHOR_EMBEDDED_PAYLOAD_MAX_BYTES` (default 1024).** The operator's registration policy
+  for embedded payloads; malformed values fail startup.
+- **`GET /transparency/registration-policy`.** Publishes the registration policy and the service's
+  privacy posture (what it stores, what leaves it, for this instance's configuration); `/health`
+  carries `embedded_payloads`.
 
 - **`CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF` = `off` | `warn` | `enforce` (default `warn`).**
   After a native CLL log's first accepted checkpoint, a later checkpoint for that `log_id`

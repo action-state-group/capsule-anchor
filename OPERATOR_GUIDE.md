@@ -95,6 +95,24 @@ The policy is open as to who may submit: outside the enrolled-submitter allowlis
 key may register a checkpoint for any `log_id`. It constrains what is registered, not who
 registers it.
 
+**Signed Statements on `/transparency/register-statement`: embedded payloads.** A statement
+up to 64 KB is registered; its signature is not verified. When it names a CWT `sub`, it is
+indexed under that subject, and of its payload the service keeps
+(`anchoring/payload_policy.py`):
+
+- the payload as submitted, when the statement was made over a hash: the RFC 9943 §6.2
+  hash envelope (protected header 258 `payload_hash_alg`, payload of that digest's length),
+  or a 32-byte `capsule_id` under the Agent Action Capsule capsule-id content type;
+- otherwise only the payload's SHA-256 (the payload is stored detached), unless the
+  operator sets `CAPSULE_ANCHOR_STORE_EMBEDDED_PAYLOADS=on`, which keeps payloads up to
+  `CAPSULE_ANCHOR_EMBEDDED_PAYLOAD_MAX_BYTES` (default 1024) as submitted.
+
+The receipt covers the statement's `Sig_structure`, payload included, so it verifies the
+same either way; re-checking a detached statement's signature needs the payload from its
+issuer. `GET /transparency/registration-policy` publishes this policy and what the
+service stores and sends, so an issuer can check before submitting (§8.2). Statements
+registered before this policy keep what was stored then.
+
 A Receipt issued under this policy is a COSE Receipt: an inclusion proof in this witness's
 own log. It proves that the checkpoint was registered there under the policy above. It
 does not prove that anyone else holds the same checkpoint, or that the witness agrees with
@@ -186,6 +204,8 @@ is missing — never silently degraded.
 | `CAPSULE_ANCHOR_REKOR_URL` | No | Rekor instance base URL (default `https://rekor.sigstore.dev`). Only read when `CAPSULE_ANCHOR_PUBLIC_LOG=rekor`. |
 | `CAPSULE_ANCHOR_PUBLIC_LOG_INTERVAL` | No | Seconds between scheduled publish attempts (default `300`). |
 | `CAPSULE_ANCHOR_PUBLIC_LOG_TIMEOUT` | No | HTTP timeout in seconds for the public-log backend (default `10`). |
+| `CAPSULE_ANCHOR_STORE_EMBEDDED_PAYLOADS` | No | `off` (default) or `on`. With `off`, a Signed Statement's embedded payload is stored detached (its SHA-256 only) unless the statement was made over a hash; `on` keeps payloads up to the cap as submitted. Published at `/transparency/registration-policy`. Any other value fails startup. |
+| `CAPSULE_ANCHOR_EMBEDDED_PAYLOAD_MAX_BYTES` | No | The cap for `on` (default `1024`; at most the 64 KB statement limit). A larger payload is stored detached. A malformed value fails startup. |
 | `CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY` | Dev only | Set `1` to allow startup without a configured signing key. An ephemeral key changes on every restart and invalidates all prior receipts. Never set in production. |
 | `CAPSULE_ANCHOR_INSECURE_IN_MEMORY` | Dev only | Set `1` to allow startup without `CAPSULE_ANCHOR_DATABASE_URL`. All log state is lost on restart. Never set in production. |
 

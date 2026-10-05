@@ -28,9 +28,11 @@ Merkle tree:
 What it keeps is what callers submit: digests, checkpoints (signed commitments
 to a log), and Signed Statements. Nothing leaves it unless the operator turns
 it on: its own signed tree heads to an external public log, a root's hash to an
-RFC 3161 timestamp authority, or a countersignature to a requester's webhook. A Signed Statement's embedded payload
-is kept as submitted, so submit a digest as the payload, not content. See
-[Data: what is stored and what leaves](#data-what-is-stored-and-what-leaves).
+RFC 3161 timestamp authority, or a countersignature to a requester's webhook.
+A Signed Statement's embedded payload is stored detached (only its SHA-256)
+unless the statement was made over a hash; submit a statement over a hash and
+keep the content yourself. The policy is published at
+[`/transparency/registration-policy`](#data-what-is-stored-and-what-leaves).
 
 ---
 
@@ -398,7 +400,8 @@ From `packages/capsule_anchor/app.py` and `anchoring/router.py` (and
 | `POST` | `/v1/digest` | Legacy alias of `/register` |
 | `GET`  | `/v1/inclusion/{capsule_id}` | Inclusion proof and receipt for a registered digest (404 if absent); never registers |
 | `POST` | `/transparency/register-statement` | Register a SCITT Signed Statement (above) |
-| `GET`  | `/transparency/statements?subject=` | Every statement registered under a CWT `sub` (unauthenticated claims; see [Data](#data-what-is-stored-and-what-leaves)) |
+| `GET`  | `/transparency/statements?subject=` | Every statement registered under a CWT `sub`, with what was kept of its payload and `payload_form` (unauthenticated claims; see [Data](#data-what-is-stored-and-what-leaves)) |
+| `GET`  | `/transparency/registration-policy` | This service's registration policy (embedded-payload storage, size limits, issuer binding) and privacy posture (what it stores, what leaves it) |
 | `POST` | `/anchor/anchor` | Countersign a caller's `{tenant_id, root_hash, seq_from, seq_to}` and append it to the log; adds an RFC 3161 timestamp when the TSA is on |
 | `GET`  | `/anchor/countersigned-root` | Look up a countersigned root by `tenant_id` and `root_hash` |
 | `GET`  | `/anchor/sth` | Current RFC 6962 Signed Tree Head |
@@ -422,14 +425,44 @@ to log entries; the receipt cache; per-`log_id` checkpoint state and recorded
 equivocations; the tree heads; public-log receipts and failures; and a subject
 index for Signed Statements.
 
-**A Signed Statement's payload is kept as submitted.**
+**A Signed Statement's embedded payload is stored detached by default.**
 `/transparency/register-statement` accepts any COSE_Sign1 up to 64 KB and does
 not verify its signature. When the statement's protected header carries a CWT
-`sub`, the service stores that subject and the embedded payload's bytes
-(hex-encoded) in the subject index, and `GET /transparency/statements`
-returns them (`anchoring/service.py:1229-1232`, `1372-1373`). Submit a digest
-as the payload, never content. The subject and a countersigned root's
-`tenant_id` are stored verbatim.
+`sub`, the service indexes it under that subject and keeps, of its payload
+(`anchoring/payload_policy.py`):
+
+| The statement | Kept in the subject index | `payload_form` |
+|---|---|---|
+| made over a hash: the [RFC 9943](https://www.rfc-editor.org/rfc/rfc9943) §6.2 hash envelope (protected header 258 `payload_hash_alg`, payload of that digest's length), or a 32-byte `capsule_id` under `application/vnd.agent-action-capsule.capsule-id+octet-stream` | the payload as submitted (it is a digest) | `digest` |
+| any other embedded payload (the default) | only the payload's SHA-256 (§8.4) | `sha256` |
+| any other embedded payload, when the operator opts in and it is within the cap | the payload as submitted | `embedded` |
+
+`GET /transparency/statements` returns that value with its `payload_form`.
+**Submit a statement made over a hash** (§6.2): put the digest in the payload
+and keep the preimage yourself.
+
+**Receipts are unaffected.** A receipt covers the entry hash, the SHA-256 of
+the statement's `Sig_structure`, which includes the payload and is computed at
+registration, so it verifies offline with any SCITT verifier exactly as before.
+What a detached payload changes is who can re-check the statement's signature
+later: anyone holding the statement from its issuer can; this service no longer
+holds the payload to (§5.1.3). A relying party gets the statement, payload
+included, from its issuer.
+
+**The registration policy is the operator's and is published** (§5.1.1):
+`CAPSULE_ANCHOR_STORE_EMBEDDED_PAYLOADS` (`off` by default, or `on`) and
+`CAPSULE_ANCHOR_EMBEDDED_PAYLOAD_MAX_BYTES` (the cap for `on`, default 1024;
+a larger payload is stored detached). A malformed value stops startup.
+`GET /transparency/registration-policy` publishes this policy and the service's
+privacy posture (what it stores, what leaves it) so an issuer can decide what
+to submit: RFC 9943 §8.2 puts that check on issuers. `/health` carries
+`embedded_payloads` (`detached` or `as_submitted_up_to_cap`).
+
+**Statements registered before this policy** keep what was stored then (their
+payload as submitted; `payload_form` is `null`). The policy applies to new
+registrations only; nothing is rewritten.
+
+The subject and a countersigned root's `tenant_id` are stored verbatim.
 
 **What leaves the service**, each only when the operator turns it on:
 
@@ -598,6 +631,8 @@ and a durable store. The `INSECURE_*` env vars below are dev-only escape hatches
 | `CAPSULE_ANCHOR_REGISTRATION_POLICY` | — | `strict` (needed for countersign). |
 | `CAPSULE_ANCHOR_COUNTERSIGN_ISSUERS_FILE` | — | The countersign issuer allowlist; unset refuses every request. |
 | `CAPSULE_ANCHOR_COUNTERSIGN_WEBHOOK_ALLOWED_HOSTS` | — | Optional comma list of webhook hosts. |
+| `CAPSULE_ANCHOR_STORE_EMBEDDED_PAYLOADS` | `off` | `on` keeps a Signed Statement's embedded payload as submitted, up to the cap; `off` stores it detached (its SHA-256). |
+| `CAPSULE_ANCHOR_EMBEDDED_PAYLOAD_MAX_BYTES` | `1024` | The cap for `on`; a larger payload is stored detached. |
 | `AAC_ANCHOR_URL` | — | Consumed by `capsule-emit` to point at this instance. |
 | `CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY` | — | **Dev only.** Set `1` to allow startup without a signing key. |
 | `CAPSULE_ANCHOR_INSECURE_IN_MEMORY` | — | **Dev only.** Set `1` to allow startup without `CAPSULE_ANCHOR_DATABASE_URL`. |
