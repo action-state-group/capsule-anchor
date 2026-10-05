@@ -25,8 +25,12 @@ Merkle tree:
    or any SCITT-compatible verifier — the receipt proves the digest was in the
    log at a given tree size, without trusting the anchor service itself.
 
-No plaintext is ever submitted or stored. All inputs are digests or
-content-free Signed Tree Heads.
+What it keeps is what callers submit: digests, checkpoints (signed commitments
+to a log), and Signed Statements. Nothing leaves it unless the operator turns
+it on: its own signed tree heads to an external public log, a root's hash to an
+RFC 3161 timestamp authority, or a countersignature to a requester's webhook. A Signed Statement's embedded payload
+is kept as submitted, so submit a digest as the payload, not content. See
+[Data: what is stored and what leaves](#data-what-is-stored-and-what-leaves).
 
 ---
 
@@ -51,7 +55,7 @@ See [Witness host: checkpoints vs. registration](#witness-host-checkpoints-vs-re
 below for the full picture, and `deploy/DEPLOY.md` for the DNS mapping.
 
 - Free, public, unauthenticated — for every `log_id` NOT in the enrolled-submitter allowlist
-  below, which is every `log_id` today except one.
+  below, which is every `log_id` today except two.
 - Stable Ed25519 authority key; resolve the current `key_id` at [`/.well-known/did.json`](https://witness.agentactioncapsule.org/.well-known/did.json)
 - Interactive API docs: [`/docs`](https://witness.agentactioncapsule.org/docs)
 - Health: [`/health`](https://witness.agentactioncapsule.org/health)
@@ -81,8 +85,12 @@ An enrolled entry's stamp additionally carries a `grade`:
 Each enrolled entry also gets its own `rate_limit_per_min`, enforced in addition to (not instead
 of) the global 300/min budget above.
 
-Currently enrolled: the AgenTrust trace registry (`trace-registry/v1`, `countersigned-observed`
-grade) — see `packages/capsule_anchor/config/checkpoint_submitters.json`.
+Currently enrolled (`packages/capsule_anchor/config/checkpoint_submitters.json`):
+
+- `trace-registry/v1`, the AgenTrust trace registry: a foreign accumulator
+  (`countersigned-observed`), submitted in the JSON wire form.
+- `asg-selftest/v1`: a self-operated test log of this service's operator, a
+  native CLL MMR (`mmr-verified`), submitted as COSE.
 
 ---
 
@@ -109,29 +117,18 @@ documentation.
 
 ## Quick start with capsule-emit
 
-If you use [`capsule-emit`](https://github.com/action-state-group/capsule-emit),
-anchoring is on by default and hits the free public instance automatically:
-
-```python
-from capsule_emit import emit
-
-cap = emit(action="summarize", outcome="ok", anchor=True)
-print(cap.capsule_id)    # SHA-256 hex digest
-print(cap.anchored)      # True
-```
-
-To point at your own `capsule-anchor` instance, set `AAC_ANCHOR_URL`:
+[`capsule-emit`](https://github.com/action-state-group/capsule-emit) contacts no
+witness until you name one: there is no default. Name this service (the public
+instance, or your own) for its checkpoint witnessing:
 
 ```bash
-export AAC_ANCHOR_URL=https://your-anchor-host/v1/digest
+export CAPSULE_WITNESS_URL=https://witness.agentactioncapsule.org   # or your own host
 python your_script.py
 ```
 
-Or per-call:
-
-```python
-cap = emit(..., anchor=True, anchor_url="https://your-anchor-host/v1/digest")
-```
+or pass `witness_url=` to `seal()`. The per-record `/register` route is the
+legacy opt-in: `AAC_ANCHOR_URL=https://your-host/v1/digest`, or
+`seal(payload, anchor_url=...)`. See capsule-emit's README for both.
 
 ---
 
@@ -190,8 +187,7 @@ pattern as equivalent to verification under another.
 SPIFFE SVID is the third issuer-binding type alongside did:web and x5chain. The mechanism
 sketch — including how the X.509-SVID chain is carried in `x5chain`, why the SPIFFE ID
 persists across SPIRE-managed short-lived cert rotations, and the representation discipline
-for content-addressing the DER cert bytes — is in the internal design note
-`_work/spiffe-who-binding-note.md` and is expected to land in a dedicated profile spec.
+for content-addressing the DER cert bytes — is expected to land in a dedicated profile spec.
 
 ---
 
@@ -201,10 +197,15 @@ for content-addressing the DER cert bytes — is in the internal design note
 
 ```bash
 curl -s -X POST https://witness.agentactioncapsule.org/checkpoints \
-  -H 'Content-Type: application/json' \
+  -H 'Content-Type: application/cll-checkpoint+json' \
   -d '{"v":1,"kind":"mmr_checkpoint","log_id":"...","mmr_size":100,"root":"<64-hex>","prev_size":0,"prev_root":"","key_id":"<64-hex pubkey>","timestamp":"2026-08-27T00:00:00Z","signature":"<hex>"}' \
   | python3 -m json.tool
 ```
+
+The body is a COSE_Sign1 checkpoint (the default wire form). The JSON form shown
+above is accepted only with `Content-Type: application/cll-checkpoint+json`, and
+only for a `log_id` enrolled with the JSON wire form (see the enrolled submitters
+above); any other `Content-Type` is parsed as COSE.
 
 Accepts a CLL (Checkpointed Local Log, `draft-mih-scitt-checkpointed-local-log`)
 `CheckpointRecord` verbatim — nothing else. Any other shape is refused with a **named
@@ -380,17 +381,144 @@ This is a chain-linkage check against what THIS service has witnessed, not an in
 recomputation of the MMR's peaks (the witness never sees the raw log) — the strongest
 check available given the accepted wire shape above.
 
-### CT monitor endpoints
+### Every route
+
+From `packages/capsule_anchor/app.py` and `anchoring/router.py` (and
+`countersign/router.py`, mounted only when countersign is on). FastAPI's
+`/docs`, `/redoc` and `/openapi.json` are served too.
 
 | Method | Path | Description |
 |--------|------|-------------|
+| `GET`  | `/` | Static landing page |
+| `GET`  | `/health`, `/healthz`, `/livez` | Health: signing-key source, `key_id`, tree size, storage, entry retention, latest tree head, and the public-log state when that is on |
+| `GET`  | `/.well-known/did.json` | Authority key as a DID document (JWK OKP), from `CAPSULE_ANCHOR_PUBLIC_HOST` |
+| `POST` | `/checkpoints` | Register a CLL checkpoint (above) |
+| `GET`  | `/checkpoints/{log_id}` | The last checkpoint witnessed for `log_id`, with any equivocations recorded (404 if never seen) |
+| `POST` | `/register` | Register a 64-hex digest (above) |
+| `POST` | `/v1/digest` | Legacy alias of `/register` |
+| `GET`  | `/v1/inclusion/{capsule_id}` | Inclusion proof and receipt for a registered digest (404 if absent); never registers |
+| `POST` | `/transparency/register-statement` | Register a SCITT Signed Statement (above) |
+| `GET`  | `/transparency/statements?subject=` | Every statement registered under a CWT `sub` (unauthenticated claims; see [Data](#data-what-is-stored-and-what-leaves)) |
+| `POST` | `/anchor/anchor` | Countersign a caller's `{tenant_id, root_hash, seq_from, seq_to}` and append it to the log; adds an RFC 3161 timestamp when the TSA is on |
+| `GET`  | `/anchor/countersigned-root` | Look up a countersigned root by `tenant_id` and `root_hash` |
 | `GET`  | `/anchor/sth` | Current RFC 6962 Signed Tree Head |
 | `GET`  | `/anchor/transparency-log` | Append-only log feed |
 | `GET`  | `/anchor/inclusion-proof-ct` | RFC 6962 CT inclusion proof |
 | `GET`  | `/anchor/consistency-proof` | RFC 6962 consistency proof |
+| `POST` | `/anchor/inclusion-proof` | A Merkle proof over leaf hashes the caller supplies |
+| `POST` | `/anchor/verify-inclusion` | Check a Merkle proof; returns `{valid}` |
 | `GET`  | `/anchor/authority-pubkey` | Authority Ed25519 public key |
-| `GET`  | `/.well-known/did.json` | Authority key as a DID document (JWK OKP) |
-| `GET`  | `/health` | Health + signing key source |
+| `GET`  | `/anchor/public-log/latest` | The latest external public-log receipt (404 when that rail is off or nothing is published yet) |
+| `GET`  | `/anchor/public-log/entries?since=` | External public-log receipts after a tree size (`[]` when the rail is off) |
+| `POST` | `/countersign/register` | Countersign an Evidence Bundle (only when countersign is on; see below) |
+
+---
+
+## Data: what is stored and what leaves
+
+**Stored** (SQLite or Postgres; `anchoring/store.py`): the log's leaf hashes;
+countersigned roots with their caller-chosen `tenant_id`; the capsule ids bound
+to log entries; the receipt cache; per-`log_id` checkpoint state and recorded
+equivocations; the tree heads; public-log receipts and failures; and a subject
+index for Signed Statements.
+
+**A Signed Statement's payload is kept as submitted.**
+`/transparency/register-statement` accepts any COSE_Sign1 up to 64 KB and does
+not verify its signature. When the statement's protected header carries a CWT
+`sub`, the service stores that subject and the embedded payload's bytes
+(hex-encoded) in the subject index, and `GET /transparency/statements`
+returns them (`anchoring/service.py:1229-1232`, `1366-1367`). Submit a digest
+as the payload, never content. The subject and a countersigned root's
+`tenant_id` are stored verbatim.
+
+**What leaves the service**, each only when the operator turns it on:
+
+- **External public log** (`CAPSULE_ANCHOR_PUBLIC_LOG=rekor`): the service's own
+  Signed Tree Heads, as below.
+- **RFC 3161 timestamps** (`CAPSULE_ANCHOR_TSA_ENABLED=1`): the SHA-256 of a
+  countersigned root, sent to the TSA from `/anchor/anchor` only.
+- **Countersign webhooks** (countersign on, and the request names a webhook):
+  the countersignature the request produced, sent to the URL in that request.
+
+Nothing else is sent anywhere; there is no telemetry.
+
+## Publishing tree heads to an external public log (optional)
+
+`packages/capsule_anchor/public_log/` publishes this service's own Signed Tree
+Heads to an external transparency log, so that anyone can see which tree heads
+it issued. It is **off unless `CAPSULE_ANCHOR_PUBLIC_LOG=rekor`** (the only other
+accepted value is `none`, the default; anything else stops startup), and with
+it on an ephemeral signing key is refused.
+
+- **What is published:** only the current tree head, as canonical JSON of
+  `{tree_size, root_hash, timestamp}`, in a DSSE envelope signed by the
+  service's authority key, to `CAPSULE_ANCHOR_REKOR_URL` (default
+  `https://rekor.sigstore.dev`). No record, digest or checkpoint is published.
+- **When:** a background thread wakes every `CAPSULE_ANCHOR_PUBLIC_LOG_INTERVAL`
+  seconds (default 300) and calls `publish_if_new`: nothing when the log is
+  empty or the current tree head is already published; otherwise it submits it
+  and stores the external receipt. Once more at shutdown. Never inline on a
+  registration request.
+- **Failures** are logged, counted and stored; after 12 in a row `/health`
+  reports `public_log: "degraded"` (without changing `ok`).
+- **Reading back:** `GET /anchor/public-log/latest` and
+  `GET /anchor/public-log/entries`. When a published receipt already covers a
+  `/checkpoints` response's tree size, the response names it (`public_log`),
+  and a copy of the receipt carries it in an unprotected header; the stored
+  receipt and its signature are unchanged.
+
+## Countersign (optional, off by default)
+
+`POST /countersign/register` is mounted only when both
+`CAPSULE_ANCHOR_COUNTERSIGN=1` and `CAPSULE_ANCHOR_REGISTRATION_POLICY=strict`
+are set (`countersign/config.py`). It countersigns an Agent Action Capsule
+Evidence Bundle v2 for a requester this service already knows:
+
+1. **The bundle** must be an Evidence Bundle v2 with no payloads
+   (`completeness.payloads_mode` is `"none"`, and no `disclosures`); its digest
+   is computed by `agent-action-capsule`'s neutral bundle library.
+2. **The requester** must be on the issuer allowlist,
+   `CAPSULE_ANCHOR_COUNTERSIGN_ISSUERS_FILE` (a JSON array of
+   `{ledger_id, pubkey_hex}`). With no file the allowlist is empty and every
+   request is refused; a malformed file stops startup. The requester's key must
+   be the pinned one, and its Ed25519 signature over the bundle digest must
+   verify. Any refusal is a 422.
+3. **Checks are recomputed** from the bundle (range membership through the
+   neutral library's `verify_bundle`, profile coverage, and others reported as
+   established, failed, not present, not checked or inconclusive).
+4. **The countersignature** (`countersign/v1`) is signed by the service's
+   authority key over the canonical statement of those results, says whether the
+   signer is independent of the requester, and is registered in the log; its
+   receipt comes back with it. `CAPSULE_ANCHOR_PUBLIC_HOST` must be set (503
+   otherwise).
+5. **A webhook**, when the request names both a `webhook_url` and a
+   `webhook_secret`: the countersignature is POSTed there after signing, HMAC-
+   SHA256-signed (`X-Countersign-Signature`). The URL must be https, resolve
+   only to public addresses (checked at admission and again at delivery, with
+   the connection pinned to the checked address and no redirects), and match
+   `CAPSULE_ANCHOR_COUNTERSIGN_WEBHOOK_ALLOWED_HOSTS` when that is set. Four
+   attempts, backing off 1, 4 and 16 seconds; nothing is stored about delivery.
+
+See [`COUNTERSIGN.md`](COUNTERSIGN.md).
+
+## Other modules
+
+- `cross_witness_conformance/`: checks an external CLL checkpoint submitter
+  (`trace-registry/v1` by default) against this witness: wire form and enrolled
+  identity and grade, the tie-back through `/v1/inclusion/{capsule_id}` with
+  offline receipt verification, and chain continuity.
+  `python -m capsule_anchor.cross_witness_conformance.watcher <checkpoint-file|-> [--witness-base-url URL]`.
+- `anchoring/retention.py`: optional pruning of the receipt cache only
+  (`CAPSULE_ANCHOR_ENTRY_RETENTION`, seconds; unset means never). Log entries,
+  tree heads and recorded equivocations are never pruned.
+- `attestation/`: the single Ed25519 signing root (tree heads, COSE receipts,
+  countersigned roots, countersignatures). It has no HTTP route: a public
+  sign-these-bytes endpoint would let anyone mint this service's signature.
+- `contracts/`: the shared data models (`types.py`) and protocols
+  (`protocols.py`), and a pure-Python crypto shim (`crypto_shim.py`).
+- `examples/cross-witness-checkpoint-smoke/`: build a COSE checkpoint, submit it
+  to `/checkpoints`, fetch it back through `/v1/inclusion/{digest}` and verify it
+  offline; with a walkthrough and a recorded transcript.
 
 ---
 
@@ -453,8 +581,23 @@ and a durable store. The `INSECURE_*` env vars below are dev-only escape hatches
 | `CAPSULE_ANCHOR_DATABASE_URL` | _(required)_ | Postgres connection URL. Absent → startup fails. |
 | `CAPSULE_ANCHOR_HOST` | `0.0.0.0` | Bind host. |
 | `CAPSULE_ANCHOR_PORT` | `8000` | Bind port. |
+| `CAPSULE_ANCHOR_PUBLIC_HOST` | _(required)_ | The hostname you serve from; the DID and countersign signer id derive from it. |
+| `CAPSULE_ANCHOR_OPERATOR` | — | Optional `operator` field in `/.well-known/did.json`. |
+| `CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF` | `warn` | `off`, `warn` or `enforce`, for native CLL checkpoints (above). |
+| `CAPSULE_ANCHOR_CHECKPOINT_SUBMITTERS_FILE` | packaged `config/checkpoint_submitters.json` | The enrolled-submitter allowlist. |
+| `CAPSULE_ANCHOR_STH_REFRESH_INTERVAL` | `60` | Seconds between tree-head refreshes. |
+| `CAPSULE_ANCHOR_ENTRY_RETENTION` | unlimited | Prune the receipt cache after this many seconds. |
+| `CAPSULE_ANCHOR_ENTRY_RETENTION_SWEEP_INTERVAL` | `3600` | Seconds between retention sweeps. |
 | `CAPSULE_ANCHOR_TSA_ENABLED` | `0` | Set `1` to add RFC 3161 TSA timestamps to anchors. |
 | `CAPSULE_ANCHOR_TSA_URL` | FreeTSA | Override the TSA endpoint. |
+| `CAPSULE_ANCHOR_PUBLIC_LOG` | `none` | `rekor` publishes this service's tree heads (see above). |
+| `CAPSULE_ANCHOR_REKOR_URL` | `https://rekor.sigstore.dev` | Where they go. |
+| `CAPSULE_ANCHOR_PUBLIC_LOG_INTERVAL` | `300` | Seconds between publish attempts. |
+| `CAPSULE_ANCHOR_PUBLIC_LOG_TIMEOUT` | `10` | HTTP timeout, seconds. |
+| `CAPSULE_ANCHOR_COUNTERSIGN` | — | `1`, with `CAPSULE_ANCHOR_REGISTRATION_POLICY=strict`, mounts countersign. |
+| `CAPSULE_ANCHOR_REGISTRATION_POLICY` | — | `strict` (needed for countersign). |
+| `CAPSULE_ANCHOR_COUNTERSIGN_ISSUERS_FILE` | — | The countersign issuer allowlist; unset refuses every request. |
+| `CAPSULE_ANCHOR_COUNTERSIGN_WEBHOOK_ALLOWED_HOSTS` | — | Optional comma list of webhook hosts. |
 | `AAC_ANCHOR_URL` | — | Consumed by `capsule-emit` to point at this instance. |
 | `CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY` | — | **Dev only.** Set `1` to allow startup without a signing key. |
 | `CAPSULE_ANCHOR_INSECURE_IN_MEMORY` | — | **Dev only.** Set `1` to allow startup without `CAPSULE_ANCHOR_DATABASE_URL`. |
@@ -473,7 +616,8 @@ producer library for the
 profile.
 
 ```
-capsule-emit  →  POST /v1/digest  →  capsule-anchor  →  COSE Receipt
+capsule-emit  →  POST /checkpoints  →  capsule-anchor  →  COSE Receipt
+                 (or the opt-in POST /register)
                                           ↓
                                   RFC 9162 CT log (append-only)
                                           ↓
@@ -484,8 +628,8 @@ The `AAC_ANCHOR_URL` environment variable or `anchor_url=` parameter in
 `capsule-emit` lets you repoint at any `capsule-anchor` instance — the free
 public one, a private self-hosted deployment, or a local instance for
 development. This is the per-capsule `anchor=`/`/register` path — since 0.5.0,
-`capsule-emit`'s **default** witnessing path is the per-stream CLL checkpoint
-(`CAPSULE_WITNESS_URL`, defaulting to `witness.agentactioncapsule.org/checkpoints`);
+`capsule-emit`'s witnessing path is the per-stream CLL checkpoint
+(`CAPSULE_WITNESS_URL`, which has no default: name the witness you use);
 see [Witness host: checkpoints vs. registration](#witness-host-checkpoints-vs-registration).
 
 **See [ADOPT.md](ADOPT.md) for the full adoption ladder** — no anchor, self-hosted,
