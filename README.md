@@ -34,7 +34,7 @@ is kept as submitted, so submit a digest as the payload, not content. See
 
 ---
 
-## Free public instance
+## Public instance
 
 ```
 https://witness.agentactioncapsule.org
@@ -54,7 +54,7 @@ key, same database, no server-side role flag — and keep answering the legacy r
 See [Witness host: checkpoints vs. registration](#witness-host-checkpoints-vs-registration)
 below for the full picture, and `deploy/DEPLOY.md` for the DNS mapping.
 
-- Free, public, unauthenticated — for every `log_id` NOT in the enrolled-submitter allowlist
+- Public, unauthenticated — for every `log_id` NOT in the enrolled-submitter allowlist
   below, which is every `log_id` today except two.
 - Stable Ed25519 authority key; resolve the current `key_id` at [`/.well-known/did.json`](https://witness.agentactioncapsule.org/.well-known/did.json)
 - Interactive API docs: [`/docs`](https://witness.agentactioncapsule.org/docs)
@@ -136,7 +136,7 @@ legacy opt-in: `AAC_ANCHOR_URL=https://your-host/v1/digest`, or
 
 ### Open registration policy (public instance)
 
-The free public instance at `anchor.agentactioncapsule.org` runs an **open registration
+The public instance at `anchor.agentactioncapsule.org` runs an **open registration
 policy**: any Signed Statement is accepted regardless of the issuer's identity or signing
 key. No authentication of the `iss` claim is enforced at registration time. This is
 intentional for a public neutral service — the log is append-only and the receipt
@@ -625,7 +625,7 @@ capsule-emit  →  POST /checkpoints  →  capsule-anchor  →  COSE Receipt
 ```
 
 The `AAC_ANCHOR_URL` environment variable or `anchor_url=` parameter in
-`capsule-emit` lets you repoint at any `capsule-anchor` instance — the free
+`capsule-emit` lets you repoint at any `capsule-anchor` instance — the
 public one, a private self-hosted deployment, or a local instance for
 development. This is the per-capsule `anchor=`/`/register` path — since 0.5.0,
 `capsule-emit`'s witnessing path is the per-stream CLL checkpoint

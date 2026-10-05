@@ -1361,8 +1361,14 @@ class AnchorerService:
             # 3b. Index by subject, when the statement claimed one -- lets a
             #     stranger later resolve "everything registered about
             #     <subject>" without knowing entry_hash in advance. The
-            #     witness stores the digest + subject + receipt, never
-            #     content -- see AnchorerService.get_statements_by_subject.
+            #     witness stores the subject, the entry_hash and the
+            #     statement's embedded payload AS SUBMITTED (hex of the raw
+            #     bytes, `payload_digest` above -- not a hash of them), and
+            #     GET /transparency/statements returns it. It is a digest only
+            #     when the submitter embedded one (an adjudication capsule's
+            #     capsule_id, as intended); nothing here enforces that, so a
+            #     statement that embeds content has that content stored. See
+            #     AnchorerService.get_statements_by_subject and the README.
             if subject is not None:
                 self._store.put_subject_index(subject, entry_hash, payload_digest)
 
@@ -1738,8 +1744,9 @@ class AnchorerService:
     def get_statements_by_subject(self, subject: str) -> list[dict]:
         """Discovery mechanism 2 (mesh-adjudication-witness-registration):
         resolve every statement registered under ``subject`` -- e.g. a
-        judged/cited mesh node's key -- to its receipt + claimed payload
-        digest. Purely a read, and purely a witness function: this NEVER
+        judged/cited mesh node's key -- to its receipt + the statement's
+        embedded payload as submitted (hex; a digest only when the submitter
+        embedded one). Purely a read, and purely a witness function: this NEVER
         verifies the subject claim or anything about the record it points
         at (see ``_peek_unauthenticated_subject``) -- a caller who queries
         by subject must independently verify every entry after pulling the
