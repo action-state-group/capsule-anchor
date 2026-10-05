@@ -78,7 +78,7 @@ just your own team — the receipt and inclusion proof come from a log you do no
 operate.
 
 ```bash
-# unset AAC_ANCHOR_URL, or point it at the free public instance explicitly:
+# unset AAC_ANCHOR_URL, or point it at the public instance explicitly:
 export AAC_ANCHOR_URL=https://anchor.agentactioncapsule.org/v1/digest
 ```
 

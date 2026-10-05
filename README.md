@@ -427,7 +427,7 @@ index for Signed Statements.
 not verify its signature. When the statement's protected header carries a CWT
 `sub`, the service stores that subject and the embedded payload's bytes
 (hex-encoded) in the subject index, and `GET /transparency/statements`
-returns them (`anchoring/service.py:1229-1232`, `1366-1367`). Submit a digest
+returns them (`anchoring/service.py:1229-1232`, `1372-1373`). Submit a digest
 as the payload, never content. The subject and a countersigned root's
 `tenant_id` are stored verbatim.
 

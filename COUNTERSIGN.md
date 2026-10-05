@@ -312,7 +312,7 @@ and resolved). This module does not check receipts.
 `resolve_entry_state` reads one state for the whole bundle. With no entries it is
 `self-attested` (the bundle's own checkpoint carries no independently-authenticated
 evidence) or `witnessed` (the bundle's checkpoint DOES carry an
-independently-authenticated COSE statement — the free, permissive-policy grade). With
+independently-authenticated COSE statement — the open, permissive-policy grade). With
 entries, every entry is verified and the best outcome wins (`countersigned` over
 `unresolved signer` over `self-countersigned` over `unverified` over `invalid`) — a real,
 independent countersignature is never hidden behind another entry, and a bundle whose
