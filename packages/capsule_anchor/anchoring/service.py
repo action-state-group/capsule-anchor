@@ -60,6 +60,7 @@ from capsule_anchor.contracts.types import (
 )
 
 from . import ct
+from .payload_policy import EmbeddedPayloadPolicy, stored_payload
 from .store import InMemoryLogStore, SqliteLogStore
 from .submitters import GRADE_COUNTERSIGNED_OBSERVED
 from .tsa import TsaError, timestamp_root_hash, tsa_enabled
@@ -225,6 +226,7 @@ def build_cose_receipt(
 # malleable, and no behavior change for that surface. Historical leaves
 # (append-only, immutable) keep whatever preimage they were minted with; only
 # NEW registrations of a parseable COSE_Sign1 move to the new scheme.
+
 ENTRY_HASH_SCHEME_SIG_STRUCTURE = "sig_structure"
 ENTRY_HASH_SCHEME_LEGACY = "legacy"
 
@@ -717,7 +719,12 @@ class AnchorerService:
         key_provider: KeyProvider | None = None,
         store=None,
         consistency_proof_policy: str = DEFAULT_CONSISTENCY_PROOF_POLICY,
+        payload_policy: EmbeddedPayloadPolicy | None = None,
     ) -> None:
+        #: What a registered statement's embedded payload is kept as (see
+        #: ``payload_policy``): by default a statement made over a hash keeps its
+        #: digest and any other embedded payload is stored detached (its SHA-256).
+        self.payload_policy = payload_policy or EmbeddedPayloadPolicy()
         if consistency_proof_policy not in CONSISTENCY_PROOF_POLICIES:
             raise ValueError(
                 f"consistency_proof_policy must be one of {CONSISTENCY_PROOF_POLICIES}, "
@@ -1219,6 +1226,7 @@ class AnchorerService:
         decoded = _decode_cose_sign1(statement_bytes)
         subject: str | None = None
         payload_digest: str | None = None
+        payload_form: str | None = None
         checkpoint_fields: dict | None = None
         if decoded is not None:
             protected_bstr, _unprotected, payload, _signature = decoded
@@ -1228,8 +1236,13 @@ class AnchorerService:
                 protected = {}
             if isinstance(protected, dict):
                 subject = _peek_unauthenticated_subject(protected)
-            if payload is not None:
-                payload_digest = payload.hex()
+            # What the subject index keeps of the payload: the payload itself
+            # when the statement was made over a hash, otherwise (by default)
+            # only its SHA-256 -- see payload_policy. The receipt is unaffected:
+            # entry_hash above already covers the payload.
+            payload_digest, payload_form = stored_payload(
+                protected if isinstance(protected, dict) else {}, payload, self.payload_policy
+            )
             if scheme == ENTRY_HASH_SCHEME_SIG_STRUCTURE:
                 checkpoint_fields = parse_checkpoint_payload(payload)  # may raise CheckpointPayloadError
 
@@ -1361,16 +1374,16 @@ class AnchorerService:
             # 3b. Index by subject, when the statement claimed one -- lets a
             #     stranger later resolve "everything registered about
             #     <subject>" without knowing entry_hash in advance. The
-            #     witness stores the subject, the entry_hash and the
-            #     statement's embedded payload AS SUBMITTED (hex of the raw
-            #     bytes, `payload_digest` above -- not a hash of them), and
-            #     GET /transparency/statements returns it. It is a digest only
-            #     when the submitter embedded one (an adjudication capsule's
-            #     capsule_id, as intended); nothing here enforces that, so a
-            #     statement that embeds content has that content stored. See
-            #     AnchorerService.get_statements_by_subject and the README.
+            #     witness stores the subject, the entry_hash and
+            #     `payload_digest` with its `payload_form` (payload_policy):
+            #     the payload as submitted when the statement was made over a
+            #     hash ("digest"), its SHA-256 when an embedded payload is
+            #     stored detached ("sha256", the default), or the payload as
+            #     submitted under the operator's opt-in cap ("embedded").
+            #     Rows written before this policy keep what they stored
+            #     (payload_form NULL). See get_statements_by_subject.
             if subject is not None:
-                self._store.put_subject_index(subject, entry_hash, payload_digest)
+                self._store.put_subject_index(subject, entry_hash, payload_digest, payload_form)
 
             # 4. Advance the persisted STH to cover the new entry.
             #    This keeps GET /anchor/sth always current after any registration;
@@ -1744,9 +1757,9 @@ class AnchorerService:
     def get_statements_by_subject(self, subject: str) -> list[dict]:
         """Discovery mechanism 2 (mesh-adjudication-witness-registration):
         resolve every statement registered under ``subject`` -- e.g. a
-        judged/cited mesh node's key -- to its receipt + the statement's
-        embedded payload as submitted (hex; a digest only when the submitter
-        embedded one). Purely a read, and purely a witness function: this NEVER
+        judged/cited mesh node's key -- to its receipt + what this service
+        kept of the statement's payload, with ``payload_form`` saying which
+        (see ``payload_policy``; ``None`` for a row stored before it). Purely a read, and purely a witness function: this NEVER
         verifies the subject claim or anything about the record it points
         at (see ``_peek_unauthenticated_subject``) -- a caller who queries
         by subject must independently verify every entry after pulling the
@@ -1756,7 +1769,7 @@ class AnchorerService:
         under (not an error -- an absent subject is a legitimate answer).
         """
         results: list[dict] = []
-        for entry_hash, capsule_id_digest in self._store.get_by_subject(subject):
+        for entry_hash, capsule_id_digest, payload_form in self._store.get_by_subject(subject):
             cached = self._store.get_statement(entry_hash)
             if cached is None:
                 continue  # defensive: index and statement store are written together
@@ -1765,6 +1778,7 @@ class AnchorerService:
                 {
                     "entry_hash": entry_hash,
                     "capsule_id_digest": capsule_id_digest,
+                    "payload_form": payload_form,
                     "receipt": receipt_bytes,
                     "leaf_index": leaf_index,
                     "tree_size": tree_size,

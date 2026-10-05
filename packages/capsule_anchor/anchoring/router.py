@@ -343,15 +343,29 @@ class RegisterStatementResponse(BaseModel):
 class WitnessSubjectEntry(BaseModel):
     """One statement registered under a queried ``subject``.
 
-    ``capsule_id_digest`` is the hex of the statement's raw COSE payload
-    bytes -- for an adjudication-witness registration this is the sealed
-    adjudication capsule's ``capsule_id``, letting the caller fetch the
-    actual record through a mesh evidence door. ``None`` if the statement
-    carried no payload (a detached-payload submission).
+    ``capsule_id_digest`` is what this service kept of the statement's
+    payload, and ``payload_form`` says which (``payload_policy``):
+
+    - ``"digest"``: the statement was made over a hash (RFC 9943 6.2
+      ``payload_hash_alg``, or a 32-byte ``capsule_id`` under the AAC
+      capsule-id content type), so this is the payload as submitted -- for an
+      adjudication-witness registration, the sealed adjudication capsule's
+      ``capsule_id``, letting the caller fetch the actual record through a
+      mesh evidence door.
+    - ``"sha256"`` (the default for any other payload): the payload was stored
+      detached; this is its SHA-256. Re-checking the statement's signature
+      needs the payload from its issuer.
+    - ``"embedded"``: the operator keeps embedded payloads up to a cap, and
+      this is the payload as submitted.
+    - ``None``: a row stored before this policy (the payload as submitted).
+
+    ``capsule_id_digest`` is ``None`` if the statement carried no payload (a
+    detached-payload submission).
     """
 
     entry_hash: str
     capsule_id_digest: str | None
+    payload_form: str | None = None
     receipt_b64: str
     leaf_index: int
     tree_size: int
@@ -768,6 +782,7 @@ def get_router() -> APIRouter:
                 WitnessSubjectEntry(
                     entry_hash=row["entry_hash"],
                     capsule_id_digest=row["capsule_id_digest"],
+                    payload_form=row["payload_form"],
                     receipt_b64=base64.b64encode(row["receipt"]).decode("ascii"),
                     leaf_index=row["leaf_index"],
                     tree_size=row["tree_size"],

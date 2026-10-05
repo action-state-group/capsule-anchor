@@ -72,7 +72,7 @@ class InMemoryLogStore:
         # Idempotent dedup: entry_hash -> (receipt_bytes, leaf_index, tree_size)
         self._statements: dict[str, tuple[bytes, int, int]] = {}
         # Discovery mechanism 2: subject -> [(entry_hash, capsule_id_digest), ...]
-        self._subject_index: dict[str, list[tuple[str, str | None]]] = {}
+        self._subject_index: dict[str, list[tuple[str, str | None, str | None]]] = {}
         # Checkpoint witness state: log_id -> last-witnessed checkpoint fields.
         self._checkpoint_witnesses: dict[str, dict] = {}
         # POST /checkpoints read surface: (log_id, mmr_size) -> full record,
@@ -159,13 +159,17 @@ class InMemoryLogStore:
 
     # --- subject index (discovery mechanism 2) ---
     def put_subject_index(
-        self, subject: str, entry_hash: str, capsule_id_digest: str | None
+        self,
+        subject: str,
+        entry_hash: str,
+        capsule_id_digest: str | None,
+        payload_form: str | None = None,
     ) -> None:
         entries = self._subject_index.setdefault(subject, [])
-        if not any(eh == entry_hash for eh, _ in entries):
-            entries.append((entry_hash, capsule_id_digest))
+        if not any(eh == entry_hash for eh, _, _ in entries):
+            entries.append((entry_hash, capsule_id_digest, payload_form))
 
-    def get_by_subject(self, subject: str) -> list[tuple[str, str | None]]:
+    def get_by_subject(self, subject: str) -> list[tuple[str, str | None, str | None]]:
         return list(self._subject_index.get(subject, []))
 
     # --- checkpoint witness state ---
@@ -382,6 +386,7 @@ class SqliteLogStore:
                     subject           TEXT NOT NULL,
                     entry_hash        TEXT NOT NULL,
                     capsule_id_digest TEXT,
+                    payload_form      TEXT,
                     PRIMARY KEY (subject, entry_hash)
                 )
                 """
@@ -389,6 +394,13 @@ class SqliteLogStore:
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_subject_index_subject ON subject_index(subject)"
             )
+            # payload_form (u480, payload_policy): a table created before it
+            # gets the column; its existing rows keep NULL, meaning "stored as
+            # submitted, before the policy". Forward only.
+            if "payload_form" not in {
+                row[1] for row in self._conn.execute("PRAGMA table_info(subject_index)")
+            }:
+                self._conn.execute("ALTER TABLE subject_index ADD COLUMN payload_form TEXT")
             # Singleton latest Signed Tree Head (id=1 enforced by CHECK).
             # tree_size / ts_epoch_us are the CAS ordering key put_sth's
             # UPSERT compares against -- see put_sth for why the comparison
@@ -707,24 +719,31 @@ class SqliteLogStore:
 
     # --- subject index (discovery mechanism 2) ---
     def put_subject_index(
-        self, subject: str, entry_hash: str, capsule_id_digest: str | None
+        self,
+        subject: str,
+        entry_hash: str,
+        capsule_id_digest: str | None,
+        payload_form: str | None = None,
     ) -> None:
         with self._lock, self._conn:
             self._conn.execute(
                 "INSERT OR IGNORE INTO subject_index "
-                "(subject, entry_hash, capsule_id_digest) VALUES (?, ?, ?)",
-                (subject, entry_hash, capsule_id_digest),
+                "(subject, entry_hash, capsule_id_digest, payload_form) VALUES (?, ?, ?, ?)",
+                (subject, entry_hash, capsule_id_digest, payload_form),
             )
 
-    def get_by_subject(self, subject: str) -> list[tuple[str, str | None]]:
+    def get_by_subject(self, subject: str) -> list[tuple[str, str | None, str | None]]:
         with self._lock:
             cur = self._conn.execute(
-                "SELECT entry_hash, capsule_id_digest FROM subject_index "
+                "SELECT entry_hash, capsule_id_digest, payload_form FROM subject_index "
                 "WHERE subject = ? ORDER BY entry_hash ASC",
                 (subject,),
             )
             rows = cur.fetchall()
-        return [(str(r[0]), None if r[1] is None else str(r[1])) for r in rows]
+        return [
+            (str(r[0]), None if r[1] is None else str(r[1]), None if r[2] is None else str(r[2]))
+            for r in rows
+        ]
 
     # --- checkpoint witness state ---
     def put_checkpoint_witness(
@@ -1111,11 +1130,16 @@ class PostgresLogStore:
                     subject           TEXT NOT NULL,
                     entry_hash        TEXT NOT NULL,
                     capsule_id_digest TEXT,
+                    payload_form      TEXT,
                     PRIMARY KEY (subject, entry_hash)
                 )
             """)
             self._conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_subject_index_subject ON subject_index(subject)"
+            )
+            # payload_form (u480): see the matching comment on SqliteLogStore.
+            self._conn.execute(
+                "ALTER TABLE subject_index ADD COLUMN IF NOT EXISTS payload_form TEXT"
             )
             # Singleton latest Signed Tree Head. tree_size / ts_epoch_us are
             # the CAS ordering key put_sth's UPSERT compares against.
@@ -1411,27 +1435,34 @@ class PostgresLogStore:
 
     # --- subject index (discovery mechanism 2) ---
     def put_subject_index(
-        self, subject: str, entry_hash: str, capsule_id_digest: str | None
+        self,
+        subject: str,
+        entry_hash: str,
+        capsule_id_digest: str | None,
+        payload_form: str | None = None,
     ) -> None:
-        params = (subject, entry_hash, capsule_id_digest)
+        params = (subject, entry_hash, capsule_id_digest, payload_form)
         with self._lock:
             self._transact(
                 lambda: self._conn.execute(
-                    "INSERT INTO subject_index (subject, entry_hash, capsule_id_digest) "
-                    "VALUES (%s, %s, %s) ON CONFLICT (subject, entry_hash) DO NOTHING",
+                    "INSERT INTO subject_index (subject, entry_hash, capsule_id_digest, payload_form) "
+                    "VALUES (%s, %s, %s, %s) ON CONFLICT (subject, entry_hash) DO NOTHING",
                     params,
                 )
             )
 
-    def get_by_subject(self, subject: str) -> list[tuple[str, str | None]]:
+    def get_by_subject(self, subject: str) -> list[tuple[str, str | None, str | None]]:
         with self._lock:
             cur = self._read(
-                "SELECT entry_hash, capsule_id_digest FROM subject_index "
+                "SELECT entry_hash, capsule_id_digest, payload_form FROM subject_index "
                 "WHERE subject = %s ORDER BY entry_hash ASC",
                 (subject,),
             )
             rows = cur.fetchall()
-        return [(str(r[0]), None if r[1] is None else str(r[1])) for r in rows]
+        return [
+            (str(r[0]), None if r[1] is None else str(r[1]), None if r[2] is None else str(r[2]))
+            for r in rows
+        ]
 
     # --- checkpoint witness state ---
     def put_checkpoint_witness(
