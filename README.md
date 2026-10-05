@@ -458,6 +458,9 @@ privacy posture (what it stores, what leaves it) so an issuer can decide what
 to submit: RFC 9943 §8.2 puts that check on issuers. `/health` carries
 `embedded_payloads` (`detached` or `as_submitted_up_to_cap`).
 
+Why receipts verify the same either way, and how that was checked:
+[`docs/architecture/19-embedded-payload-storage.md`](docs/architecture/19-embedded-payload-storage.md).
+
 **Statements registered before this policy** keep what was stored then (their
 payload as submitted; `payload_form` is `null`). The policy applies to new
 registrations only; nothing is rewritten.
