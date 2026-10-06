@@ -20,3 +20,6 @@ htmlcov/
 # throwaway Ed25519 test key here; it must never be committed to a public repo.
 examples/cross-witness-checkpoint-smoke/leg1-artifacts/test_key.pem
 examples/cross-witness-checkpoint-smoke/leg1-artifacts/*.pem
+
+# Local secrets: never commit an env file.
+.env.*
