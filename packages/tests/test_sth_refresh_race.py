@@ -4,8 +4,8 @@ PR #20 added a background daemon that re-signs and persists the Signed Tree
 Head (STH) into a SINGLETON ``signed_tree_heads`` row. With N Cloud Run
 instances (cap off, per DEPLOY.md's HA guidance), N independent processes
 write that row on independent, unsynchronized ~60s timers. This test answers
-the two questions from [anchor-instance-count-and-sth-refresh-race] with real
-cross-process concurrency, in the shape of [ldg-guardengine-caps-race]
+the two questions below with real cross-process concurrency, in the shape of
+[ldg-guardengine-caps-race]
 (subprocesses, not threads, coordinated via events to force a deterministic
 interleaving rather than hoping a real clock race reproduces):
 
