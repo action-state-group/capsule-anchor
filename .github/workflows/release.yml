@@ -1,0 +1,64 @@
+# SPDX-License-Identifier: Apache-2.0
+# PyPI release via OIDC Trusted Publishing. No API token lives in this repo --
+# pypa/gh-action-pypi-publish exchanges a short-lived GitHub Actions OIDC token
+# for a PyPI upload token at publish time. The one-time PyPI Trusted-Publisher
+# config (owner=action-state-group, repo=capsule-anchor, workflow=release.yml,
+# environment=pypi) is Steven's, not this workflow's.
+name: release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch: {}
+  # Path-scoped so every PR touching packaging exercises the same build +
+  # twine check the release will run -- catches packaging regressions before
+  # a tag exists. `publish` below stays gated to `release: published` only,
+  # so this job never uploads.
+  push:
+    branches: [main]
+    paths: ["pyproject.toml", "packages/**", ".github/workflows/release.yml"]
+  pull_request:
+    paths: ["pyproject.toml", "packages/**", ".github/workflows/release.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: install build + twine
+        run: python -m pip install build twine
+      - name: build sdist + wheel
+        run: python -m build
+      - name: twine check
+        run: python -m twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  # Only a `release` (tag) event publishes. `workflow_dispatch` and pushes/PRs
+  # run `build` above as a dry run and stop -- neither uploads, even run manually.
+  publish:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # OIDC -- no token stored
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      # Pinned to a full commit SHA, not the mutable release/v1 branch: this is the
+      # step that holds the OIDC-minted PyPI token, so a moved branch ref = supply-chain
+      # exposure. dc37677 == v1.14.2. Bump deliberately when upgrading.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: dist/

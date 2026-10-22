@@ -1,0 +1,72 @@
+# SPDX-License-Identifier: Apache-2.0
+# Guards the capsule-anchor-pypi-publish-workflow class of break: an editable
+# install (`pip install -e .`, what python.yml exercises) can pass while the
+# BUILT wheel is missing a file, an entry point, or a transitive dependency
+# -- and PyPI only ever ships the built artifact. This installs the wheel
+# into a fresh venv with no source checkout on the path and exercises the
+# `capsule-anchor` console script declared at pyproject.toml's
+# [project.scripts], not `python -m` or a direct module import.
+name: clean-room-install
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  from-nothing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: build the wheel
+        run: pip install build && python -m build
+
+      - name: install the wheel into a FRESH venv -- PyPI deps only (no source, no editable)
+        run: |
+          python -m venv /tmp/cleanroom
+          /tmp/cleanroom/bin/pip install --upgrade pip
+          /tmp/cleanroom/bin/pip install dist/*.whl
+
+      - name: console script resolves (guards a missing/renamed [project.scripts] entry point)
+        run: |
+          test -x /tmp/cleanroom/bin/capsule-anchor
+          echo "capsule-anchor console script present at $(/tmp/cleanroom/bin/which capsule-anchor 2>/dev/null || echo /tmp/cleanroom/bin/capsule-anchor)"
+
+      - name: console script runs -- serves /health on a fresh install (guards a missing transitive dep)
+        env:
+          CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY: "1"
+          CAPSULE_ANCHOR_INSECURE_IN_MEMORY: "1"
+          CAPSULE_ANCHOR_PUBLIC_HOST: "localhost"
+          CAPSULE_ANCHOR_HOST: "127.0.0.1"
+          CAPSULE_ANCHOR_PORT: "8123"
+        run: |
+          /tmp/cleanroom/bin/capsule-anchor &
+          PID=$!
+          trap 'kill "$PID" 2>/dev/null || true' EXIT
+
+          ok=""
+          for _ in $(seq 1 50); do
+            if curl -sf http://127.0.0.1:8123/health >/tmp/health.json; then
+              ok=1
+              break
+            fi
+            kill -0 "$PID" 2>/dev/null || { echo "::error::capsule-anchor console script exited before serving /health"; exit 1; }
+            sleep 0.3
+          done
+
+          if [ -z "$ok" ]; then
+            echo "::error::capsule-anchor console script never became healthy on a fresh install"
+            exit 1
+          fi
+
+          cat /tmp/health.json
+          /tmp/cleanroom/bin/python -c '
+          import json, sys
+          data = json.load(open("/tmp/health.json"))
+          sys.exit(0 if data.get("ok") is True else 1)
+          ' || { echo "::error::/health responded but did not report ok on a fresh install"; exit 1; }
+          echo "clean-room OK: fresh PyPI wheel install runs the capsule-anchor console script and serves /health"
