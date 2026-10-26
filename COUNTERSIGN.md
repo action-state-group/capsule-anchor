@@ -295,6 +295,7 @@ signing input always binds a type.
 `packages/tests/countersign/vectors/countersign-v1.json` is the golden vector for the
 signing input and the receipt, with negative cases (a rewritten result, a digest-only
 signature, a rewritten `signer.id`, a signature made without `signer`, a receipt for a different statement with and without its `entry_hash`);
+its bundle is a v2 Evidence Bundle that `parse_bundle` accepts;
 other implementations commit a byte-identical copy and pin its SHA-256. The generator
 is deterministic: regenerating reproduces the committed bytes.
 

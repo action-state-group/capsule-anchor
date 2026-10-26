@@ -1,29 +1,88 @@
 {
   "bundle": {
-    "checkpoints": [
-      {
-        "key_id": "k1",
-        "log_id": "ledger:golden-vector-001",
-        "mmr_root": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "mmr_size": 1,
-        "prev_size": 0,
-        "timestamp": "2026-09-01T00:00:00+00:00"
-      }
-    ],
-    "closure_depth": 2,
-    "ledger_id": "ledger:golden-vector-001",
-    "payloads": "none",
+    "bundle_kind": "evidence-bundle/v2",
+    "bundle_version": "2",
+    "checkpoint": {
+      "mmr_size": 1,
+      "root": "38506c17e78246b4cbcf551ef769810de8371e784f7193bbfd564a75da8fe617"
+    },
+    "completeness": {
+      "closure_depth": 2,
+      "missing": [],
+      "payloads_mode": "none",
+      "records_mode": "complete",
+      "suppressed_fields": []
+    },
+    "completeness_certificate": {
+      "body_digests": [
+        "13138a40b324c97f9e71b590c80479903ec5a528cc78cbee2e7121f916296030"
+      ],
+      "first_seq": 1,
+      "last_seq": 1,
+      "log_id": "ledger:test-001",
+      "memberships": {
+        "13138a40b324c97f9e71b590c80479903ec5a528cc78cbee2e7121f916296030": {
+          "inclusion_proof": {
+            "kind": "inclusion",
+            "leaf_index": 0,
+            "peaks_left": [],
+            "peaks_right": [],
+            "size": 1,
+            "v": 1,
+            "witness": []
+          },
+          "log_coordinates": {
+            "leaf_index": 0,
+            "log_id": "ledger:test-001",
+            "seq": 1
+          }
+        }
+      },
+      "range_proof": {
+        "from_index": 0,
+        "from_seq": 1,
+        "size": 1,
+        "to_index": 0,
+        "to_seq": 1,
+        "witness": []
+      },
+      "range_root": "38506c17e78246b4cbcf551ef769810de8371e784f7193bbfd564a75da8fe617"
+    },
     "records": [
       {
-        "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "kind": "action",
-        "seq": 1,
-        "timestamp": "2026-09-01T00:00:00+00:00"
+        "action_id": "countersign-test-1",
+        "action_type": "decide",
+        "assurance": {
+          "attestation_mode": "self_attested",
+          "effect_mode": "not_applicable",
+          "ledger_mode": "standalone"
+        },
+        "canonicalization_id": "jcs",
+        "capsule_id": "13138a40b324c97f9e71b590c80479903ec5a528cc78cbee2e7121f916296030",
+        "developer": "agent@v1",
+        "disposition": {
+          "approver": "policy",
+          "decision": "reject",
+          "human_disposed": false,
+          "verdict_class": "blocked"
+        },
+        "format_version": "4",
+        "operator": "TEST-OP",
+        "spec_version": "draft-mih-scitt-agent-action-capsule-04",
+        "timestamp": "2026-09-01T00:00:01Z"
       }
     ],
-    "schema": "evidence-bundle/v2"
+    "root": "13138a40b324c97f9e71b590c80479903ec5a528cc78cbee2e7121f916296030",
+    "verification": {
+      "checks": [
+        "graph_closure",
+        "interval_coverage",
+        "per_record_membership"
+      ],
+      "producer": "test-fixture"
+    }
   },
-  "bundle_digest": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+  "bundle_digest": "762020da0d7d4874861bc4efff625fc85e58e780b410cf412946a8d7932bd5d8",
   "description": "countersign/v1 golden vector. signature = Ed25519 over UTF8(JCS({\"over\": over, \"signer\": signer, \"statement\": statement, \"type\": type})), 128 lowercase hex. receipt registers SHA-256(JCS(statement)) in the signer's log (RFC 9162 COSE Receipt; log entry hash = SHA-256 of those 32 bytes). Keys are TEST-ONLY.",
   "directory": {
     "countersigners": [
@@ -41,14 +100,14 @@
   },
   "entry": {
     "independent": true,
-    "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+    "over": "762020da0d7d4874861bc4efff625fc85e58e780b410cf412946a8d7932bd5d8",
     "receipt": {
-      "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+      "entry_hash": "64c8666fe2876676d9b6f3ae7025667f5337c825fb3551b529bbb29fb9dea760",
       "leaf_index": 0,
-      "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+      "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhASWLYHmMBgQGYsLGkigzUJKJ3Z5wjyYqrXAkitpuEtgJXPf/5LVdy8aig2p3/ooBaEgffuRI6Pk/0AoKkyz6IBg==",
       "tree_size": 1
     },
-    "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+    "signature": "91e9a0a7d5fc99e49adf912bfc0c0e8540c615d7c3f51ef2f5e801ecfe461e4324deef801e1aa9c967e91fe35ab89ab659c67459f25adad45624e79bde56e606",
     "signer": {
       "id": "did:web:countersign.example",
       "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
@@ -79,7 +138,7 @@
       "recomputed_at": "2026-09-27T00:00:00Z",
       "scope": {
         "closure_depth": 2,
-        "ledger_id": "ledger:golden-vector-001"
+        "ledger_id": "ledger:test-001"
       }
     },
     "type": "countersign/v1"
@@ -88,14 +147,14 @@
     {
       "entry": {
         "independent": true,
-        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "over": "762020da0d7d4874861bc4efff625fc85e58e780b410cf412946a8d7932bd5d8",
         "receipt": {
-          "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+          "entry_hash": "64c8666fe2876676d9b6f3ae7025667f5337c825fb3551b529bbb29fb9dea760",
           "leaf_index": 0,
-          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhASWLYHmMBgQGYsLGkigzUJKJ3Z5wjyYqrXAkitpuEtgJXPf/5LVdy8aig2p3/ooBaEgffuRI6Pk/0AoKkyz6IBg==",
           "tree_size": 1
         },
-        "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+        "signature": "91e9a0a7d5fc99e49adf912bfc0c0e8540c615d7c3f51ef2f5e801ecfe461e4324deef801e1aa9c967e91fe35ab89ab659c67459f25adad45624e79bde56e606",
         "signer": {
           "id": "did:web:countersign.example",
           "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
@@ -126,7 +185,7 @@
           "recomputed_at": "2026-09-27T00:00:00Z",
           "scope": {
             "closure_depth": 2,
-            "ledger_id": "ledger:golden-vector-001"
+            "ledger_id": "ledger:test-001"
           }
         },
         "type": "countersign/v1"
@@ -140,14 +199,14 @@
     {
       "entry": {
         "independent": true,
-        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "over": "762020da0d7d4874861bc4efff625fc85e58e780b410cf412946a8d7932bd5d8",
         "receipt": {
-          "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+          "entry_hash": "64c8666fe2876676d9b6f3ae7025667f5337c825fb3551b529bbb29fb9dea760",
           "leaf_index": 0,
-          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhASWLYHmMBgQGYsLGkigzUJKJ3Z5wjyYqrXAkitpuEtgJXPf/5LVdy8aig2p3/ooBaEgffuRI6Pk/0AoKkyz6IBg==",
           "tree_size": 1
         },
-        "signature": "03dc97dbeb61d3b200b975e212bb9aaf59fc2ee2a8d7b81e4fedcb76a215264c2bc90da2278f4b8057cc6188f1b5884e09c0f20efbaa402a8c41a8ae4d2e4a0b",
+        "signature": "ff2cd121d3b2762d8eed34426f6b38f036fc7e6c54590ba647f1f40e242d3628aa087779c0632b9095b0e2829793a1d6498582cedf5eecc9af1d084f7e6f8400",
         "signer": {
           "id": "did:web:countersign.example",
           "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
@@ -178,7 +237,7 @@
           "recomputed_at": "2026-09-27T00:00:00Z",
           "scope": {
             "closure_depth": 2,
-            "ledger_id": "ledger:golden-vector-001"
+            "ledger_id": "ledger:test-001"
           }
         },
         "type": "countersign/v1"
@@ -192,14 +251,14 @@
     {
       "entry": {
         "independent": true,
-        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "over": "762020da0d7d4874861bc4efff625fc85e58e780b410cf412946a8d7932bd5d8",
         "receipt": {
-          "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+          "entry_hash": "64c8666fe2876676d9b6f3ae7025667f5337c825fb3551b529bbb29fb9dea760",
           "leaf_index": 0,
-          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhASWLYHmMBgQGYsLGkigzUJKJ3Z5wjyYqrXAkitpuEtgJXPf/5LVdy8aig2p3/ooBaEgffuRI6Pk/0AoKkyz6IBg==",
           "tree_size": 1
         },
-        "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+        "signature": "91e9a0a7d5fc99e49adf912bfc0c0e8540c615d7c3f51ef2f5e801ecfe461e4324deef801e1aa9c967e91fe35ab89ab659c67459f25adad45624e79bde56e606",
         "signer": {
           "id": "did:web:other-countersigner.example",
           "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
@@ -230,7 +289,7 @@
           "recomputed_at": "2026-09-27T00:00:00Z",
           "scope": {
             "closure_depth": 2,
-            "ledger_id": "ledger:golden-vector-001"
+            "ledger_id": "ledger:test-001"
           }
         },
         "type": "countersign/v1"
@@ -244,14 +303,14 @@
     {
       "entry": {
         "independent": true,
-        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "over": "762020da0d7d4874861bc4efff625fc85e58e780b410cf412946a8d7932bd5d8",
         "receipt": {
-          "entry_hash": "2f04c8dcc76ce97292dc6d0bce518531c3fd3abd96d6c2d57b5a2e034110d19f",
+          "entry_hash": "64c8666fe2876676d9b6f3ae7025667f5337c825fb3551b529bbb29fb9dea760",
           "leaf_index": 0,
-          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhAahHcr2B3eenldmxKmMU6kGGfKMxUyW0s7oUEOxcR9N/SOu4xxte9UlAv+QAeYLDGfJg7f9IqyouZ2MSq6+NTAw==",
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggUSDAQCA9lhASWLYHmMBgQGYsLGkigzUJKJ3Z5wjyYqrXAkitpuEtgJXPf/5LVdy8aig2p3/ooBaEgffuRI6Pk/0AoKkyz6IBg==",
           "tree_size": 1
         },
-        "signature": "99b2049070fe7a340ccf77e0eb877842f5ec3ea0d2a4b075f9762dfc9b0fdc1d2123bbb41bcdeb3836df71e894484b1b6096ea5152a4b7646caab62bcc4ee003",
+        "signature": "7319d9c1ee0e16f71f441bd2bc399bd5764369a7850e9ceb5cfd8753dfb8a3e2a0882815b0c3cd1c5844530df4cb7fbccd3e2418e8c0aeb58c0213da6fec910a",
         "signer": {
           "id": "did:web:countersign.example",
           "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
@@ -282,7 +341,7 @@
           "recomputed_at": "2026-09-27T00:00:00Z",
           "scope": {
             "closure_depth": 2,
-            "ledger_id": "ledger:golden-vector-001"
+            "ledger_id": "ledger:test-001"
           }
         },
         "type": "countersign/v1"
@@ -296,14 +355,14 @@
     {
       "entry": {
         "independent": true,
-        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "over": "762020da0d7d4874861bc4efff625fc85e58e780b410cf412946a8d7932bd5d8",
         "receipt": {
-          "entry_hash": "78303cb4e8a76588c63b74097849535d14ecae44ed015277aaa0d3b40954b056",
+          "entry_hash": "0c669d782b8eb5f6bcdf5297df553658a20c16529718f71b1e321646d4af3c08",
           "leaf_index": 1,
-          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggVgmgwIBgVggX5CQ5uVxC0gI2Mwr597xeFLA3i9J/Wldk1up2oqGZBr2WEAV+KgXFNIEdL/TUzoSOQ3xgdYFd4Qca+b7DZ+Kx74KmTEsfrMa3gMsuE6mmJ20ym/Z6NfJcPSmev4n1DHn1RcH",
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggVgmgwIBgVgglGJDOkv59gDvcYcvXjVbaDUNXP+n1ZFAiFxdrqB8Zrj2WECq17bDu9jLQpSLg6JZj5d3Mnv1WALAeWsMekfNR2hYWiDWhVlZ5InE/t2Tk8Gl2AzMaZ142mWnfeUy7JqSDlsC",
           "tree_size": 2
         },
-        "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+        "signature": "91e9a0a7d5fc99e49adf912bfc0c0e8540c615d7c3f51ef2f5e801ecfe461e4324deef801e1aa9c967e91fe35ab89ab659c67459f25adad45624e79bde56e606",
         "signer": {
           "id": "did:web:countersign.example",
           "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
@@ -334,7 +393,7 @@
           "recomputed_at": "2026-09-27T00:00:00Z",
           "scope": {
             "closure_depth": 2,
-            "ledger_id": "ledger:golden-vector-001"
+            "ledger_id": "ledger:test-001"
           }
         },
         "type": "countersign/v1"
@@ -349,13 +408,13 @@
     {
       "entry": {
         "independent": true,
-        "over": "d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b",
+        "over": "762020da0d7d4874861bc4efff625fc85e58e780b410cf412946a8d7932bd5d8",
         "receipt": {
           "leaf_index": 1,
-          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggVgmgwIBgVggX5CQ5uVxC0gI2Mwr597xeFLA3i9J/Wldk1up2oqGZBr2WEAV+KgXFNIEdL/TUzoSOQ3xgdYFd4Qca+b7DZ+Kx74KmTEsfrMa3gMsuE6mmJ20ym/Z6NfJcPSmev4n1DHn1RcH",
+          "receipt_b64": "0oRPowEnGQGLAQ+hBhpquFyAoRkBjKEggVgmgwIBgVgglGJDOkv59gDvcYcvXjVbaDUNXP+n1ZFAiFxdrqB8Zrj2WECq17bDu9jLQpSLg6JZj5d3Mnv1WALAeWsMekfNR2hYWiDWhVlZ5InE/t2Tk8Gl2AzMaZ142mWnfeUy7JqSDlsC",
           "tree_size": 2
         },
-        "signature": "f0cd53c7b006bdd48fa17b89f05ded667c397488705aaf473625c0d001130b95e3bf3a97d0081c0eec8234a4ca86082cace354cd0cbcf9991d624eb3c90b2609",
+        "signature": "91e9a0a7d5fc99e49adf912bfc0c0e8540c615d7c3f51ef2f5e801ecfe461e4324deef801e1aa9c967e91fe35ab89ab659c67459f25adad45624e79bde56e606",
         "signer": {
           "id": "did:web:countersign.example",
           "key_id": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12"
@@ -386,7 +445,7 @@
           "recomputed_at": "2026-09-27T00:00:00Z",
           "scope": {
             "closure_depth": 2,
-            "ledger_id": "ledger:golden-vector-001"
+            "ledger_id": "ledger:test-001"
           }
         },
         "type": "countersign/v1"
@@ -402,6 +461,6 @@
   "producer_public_key_hex": "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
   "signer_public_key_hex": "2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12",
   "signer_seed_hex": "4242424242424242424242424242424242424242424242424242424242424242",
-  "signing_input": "{\"over\":\"d0474c8b8673de4c3db24f20d686797ab44430d808564d7b6d28da1a6bf28d5b\",\"signer\":{\"id\":\"did:web:countersign.example\",\"key_id\":\"2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\"},\"statement\":{\"checks\":[{\"name\":\"chain consistency\",\"result\":\"not checked\"},{\"name\":\"range membership\",\"result\":\"failed\"},{\"name\":\"cadence\",\"result\":\"established\"},{\"name\":\"key hygiene\",\"result\":\"not present\"},{\"name\":\"profile conformance\",\"result\":\"inconclusive\"}],\"recomputed_at\":\"2026-09-27T00:00:00Z\",\"scope\":{\"closure_depth\":2,\"ledger_id\":\"ledger:golden-vector-001\"}},\"type\":\"countersign/v1\"}",
-  "statement_digest": "25517d12f50344e9f962f72c6a3d96f714c419847d62763d7bab3ee2de38abb5"
+  "signing_input": "{\"over\":\"762020da0d7d4874861bc4efff625fc85e58e780b410cf412946a8d7932bd5d8\",\"signer\":{\"id\":\"did:web:countersign.example\",\"key_id\":\"2152f8d19b791d24453242e15f2eab6cb7cffa7b6a5ed30097960e069881db12\"},\"statement\":{\"checks\":[{\"name\":\"chain consistency\",\"result\":\"not checked\"},{\"name\":\"range membership\",\"result\":\"failed\"},{\"name\":\"cadence\",\"result\":\"established\"},{\"name\":\"key hygiene\",\"result\":\"not present\"},{\"name\":\"profile conformance\",\"result\":\"inconclusive\"}],\"recomputed_at\":\"2026-09-27T00:00:00Z\",\"scope\":{\"closure_depth\":2,\"ledger_id\":\"ledger:test-001\"}},\"type\":\"countersign/v1\"}",
+  "statement_digest": "6ce44cfffce8d72936a83d75add27c4556dc00f5394307402623ce664b041201"
 }

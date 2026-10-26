@@ -2,9 +2,9 @@
 """Regenerate ``countersign-v1.json``, the shared golden vector for the
 ``countersign/v1`` signing input.
 
-Run from the repository root:
+Run from the ``packages`` directory:
 
-    python packages/tests/countersign/vectors/generate_countersign_v1.py
+    python -m tests.countersign.vectors.generate_countersign_v1
 
 The vector is produced by this repo's real signer (``sign_countersignature``)
 and its real log (``AnchorerService``), under a fixed TEST-ONLY Ed25519 seed,
@@ -39,6 +39,8 @@ from capsule_anchor.countersign.signer import countersign_signing_input, sign_co
 from capsule_anchor.countersign.statement import Scope, Statement
 from capsule_anchor.signing_key import LoadedSigningKey, StaticKeyProvider
 
+from ..conftest import TEST_LEDGER_ID, base_bundle_raw
+
 OUT = Path(__file__).with_name("countersign-v1.json")
 
 # The log's registration time for every receipt in the vector.
@@ -48,30 +50,11 @@ LOG_CLOCK = datetime(2026, 9, 27, 0, 0, 0, tzinfo=timezone.utc)
 SIGNER_SEED = bytes([0x42] * 32)
 PRODUCER_SEED = bytes([0x07] * 32)
 
-BUNDLE = {
-    "checkpoints": [
-        {
-            "key_id": "k1",
-            "log_id": "ledger:golden-vector-001",
-            "mmr_root": "b" * 64,
-            "mmr_size": 1,
-            "prev_size": 0,
-            "timestamp": "2026-09-01T00:00:00+00:00",
-        }
-    ],
-    "closure_depth": 2,
-    "ledger_id": "ledger:golden-vector-001",
-    "payloads": "none",
-    "records": [
-        {
-            "digest": "a" * 64,
-            "kind": "action",
-            "seq": 1,
-            "timestamp": "2026-09-01T00:00:00+00:00",
-        }
-    ],
-    "schema": "evidence-bundle/v2",
-}
+# A real, self-consistent v2 Evidence Bundle (what ``parse_bundle`` accepts),
+# built with the same helper this module's bundle tests use. It is
+# deterministic: the capsules are fixed and the checkpoint carries no COSE
+# signature, so regenerating reproduces the same bytes.
+BUNDLE = base_bundle_raw()
 
 STATEMENT = Statement(
     checks=[
@@ -82,7 +65,7 @@ STATEMENT = Statement(
         CheckResult(name="profile conformance", result="inconclusive"),
     ],
     exclusions=["capture coverage"],
-    scope=Scope(ledger_id="ledger:golden-vector-001", closure_depth=2),
+    scope=Scope(ledger_id=TEST_LEDGER_ID, closure_depth=2),
     recomputed_at=datetime(2026, 9, 27, 0, 0, 0, tzinfo=timezone.utc),
 )
 

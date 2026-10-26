@@ -21,7 +21,7 @@ from scitt_cose.receipt import verify_receipt
 
 from capsule_anchor.anchoring.service import AnchorerService
 from capsule_anchor.attestation.service import AttestorService
-from capsule_anchor.countersign.bundle import Bundle
+from capsule_anchor.countersign.bundle import Bundle, parse_bundle
 from capsule_anchor.countersign.signer import countersign_signing_input, sign_countersignature
 from capsule_anchor.signing_key import LoadedSigningKey, StaticKeyProvider
 
@@ -33,11 +33,17 @@ VECTOR = json.loads(VECTOR_PATH.read_text())
 
 # The committed vector's SHA-256. capsulectl pins the same value for its
 # byte-identical copy; regenerating must reproduce these bytes exactly.
-VECTOR_SHA256 = "d057691c3e20f92b815dc47780493f83b594424d8cfb9db13f3782049b3155fb"
+VECTOR_SHA256 = "8d4ccf3850325267c07bae3f82882185694a719ca822093ac129da11cccc0ca2"
 
 
 def test_vector_bytes_are_pinned():
     assert hashlib.sha256(VECTOR_PATH.read_bytes()).hexdigest() == VECTOR_SHA256
+
+
+def test_vector_bundle_is_a_v2_bundle_parse_bundle_accepts():
+    """The vector's bundle is the shape this module accepts, not a retired
+    one, so capsulectl and AAC pin a bundle a verifier would not refuse."""
+    assert parse_bundle(VECTOR["bundle"]).digest == VECTOR["bundle_digest"]
 
 
 def test_generator_reproduces_the_committed_vector_byte_for_byte():

@@ -8,6 +8,10 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Changed
 
+- **The countersign/v1 golden vector now carries a v2 Evidence Bundle.** Its bundle was a shape
+  `parse_bundle` refuses; it is regenerated from a real v2 bundle, so the entry, statement,
+  digests and the pinned SHA-256 changed. The entry and statement formats did not change.
+  Copies in other repositories are refreshed in their own PRs.
 - **A Signed Statement's embedded payload is stored detached by default.** On
   `/transparency/register-statement`, a statement naming a CWT `sub` used to keep its embedded
   payload as submitted in the subject index. Now the service keeps the payload only when the
