@@ -242,9 +242,13 @@ a request could be *made*. A submission's own `profile_id` is never lost:
 were/weren't covered.
 
 Signed, together with the bundle digest, the signer and the entry type, by this
-instance's signing key (§9), and registered in this instance's own log to attach a receipt: the log entry is
-`SHA-256(JCS(statement))`, the RFC 8785 canonical bytes of the statement exactly as it
-appears in the entry, so any implementation holding only the entry can recompute it.
+instance's signing key (§9), and registered in this instance's own log to attach a
+receipt. The registered bytes are the 32-byte `SHA-256(JCS(statement))`, over the RFC
+8785 canonical bytes of the statement exactly as it appears in the entry
+(`countersign/signer.py`, `sign_countersignature`). Those 32 bytes do not decode as a
+COSE_Sign1, so the log entry is the SHA-256 of them (`anchoring/service.py`,
+`_entry_hash_preimage`, the legacy scheme). Any implementation holding only the entry
+can recompute both.
 
 ## 9. The `countersignatures[]` entry
 
@@ -272,12 +276,28 @@ appears in the entry, so any implementation holding only the entry can recompute
                                   // own. A self-countersignature is
                                   // well-formed and never refused, only flagged.
                                   // Self-reported for this instance's own
-                                  // bookkeeping; a verifier must never trust it
-                                  // without recomputing independence itself
-                                  // against the bundle's trusted producer keys.
+                                  // bookkeeping and NOT signed (see below); a
+                                  // verifier must never trust it without
+                                  // recomputing independence itself against
+                                  // the bundle's trusted producer keys.
   receipt: { receipt_b64, entry_hash, leaf_index, tree_size },
+                                  // NOT signed by `signature`; it carries its
+                                  // own proof over the statement (see below)
 }
 ```
+
+**What `signature` covers.** Exactly `over`, `signer`, `statement` and `type`
+(`countersign/signer.py`, `countersign_signing_input`). `independent` and `receipt` are
+members of the entry `sign_countersignature` returns but are outside the signing input.
+Rewriting `independent` leaves the signature valid, which is why no verifier of ours acts
+on it: `countersign/verify.py` (`verify_entry`), capsule-cli's
+Go verifier (`cli/countersign.go`, `VerifyCountersignatures`) and agent-action-capsule's
+TypeScript stamp (`ts/src/countersignature-stamp.ts`, `classifyCountersignV1`) each
+compute independence from the producer keys they hold. The receipt binds only the
+statement: its log entry is recomputed from `statement`, so a receipt for a different
+statement fails the receipt check, never the signature check. The statement carries no
+bundle digest, so a receipt shows that the countersigner registered this statement, not
+which bundle it was made over; `over` and `signature` show that.
 
 Per the wire-shape reconciliation with `capsule-cli`'s Go verifier
 (action-state-ops [countersign-engine-in-capsule-anchor]): `key_id` is
@@ -308,7 +328,26 @@ entry is `invalid` (either check fails; nothing it says is used), `unverified` (
 this module does not verify), `self-countersigned` (the signer key is one of the
 producer's), `unresolved signer` (independent, but the signer's `key_id` is absent from
 whatever countersigner directory the verifier consults), or `countersigned` (independent
-and resolved). This module does not check receipts.
+and resolved).
+
+**This module does not check receipts.** `verify_entry` never reads `receipt`. Receipts
+are checked by:
+
+- capsule-cli's Go verifier, `verifyCountersignReceipt` (`cli/countersign_receipt.go`),
+  called for every `countersign/v1` entry whose signature verifies. It recomputes the log
+  entry from the statement (SHA-256 of `SHA-256(JCS(statement))`), never from the
+  receipt's own `entry_hash`, verifies the COSE Receipt under `signer.key_id` with
+  agent-action-capsule's `witness.VerifyCOSEReceipt`, and reports the receipt as
+  `verified`, `unverified` or `absent`, separately from the entry's state.
+- this repo's golden-vector test (`packages/tests/countersign/test_golden_vector.py`,
+  `_receipt_valid`), which recomputes the log entry from the statement the same way and
+  checks the vector's receipt with `scitt_cose.receipt.verify_receipt` under the vector's
+  own signer key. It does not compare `entry_hash`, `leaf_index` or `tree_size`, as
+  capsule-cli does. It is a test, not a verifier this module exposes.
+
+agent-action-capsule's TypeScript stamp does not verify receipts: it shows a present
+receipt as `unverified` and a missing one as `absent`
+(`ts/src/countersignature-stamp.ts`, `CountersignStatementView.receipt`).
 
 `resolve_entry_state` reads one state for the whole bundle. With no entries it is
 `self-attested` (the bundle's own checkpoint carries no independently-authenticated
@@ -319,29 +358,67 @@ entries, every entry is verified and the best outcome wins (`countersigned` over
 independent countersignature is never hidden behind another entry, and a bundle whose
 every entry fails verification reads `invalid`.
 
+**Report words.** agent-action-capsule's `spec/REGISTRY.md` §15, "Countersignature
+verification states", lists capsule-cli's spelling of each entry state
+(`cli/countersign.go`, `VerifyCountersignatures`). This module's words map onto it as
+follows; renaming them in code is separate work.
+
+| This module (`verify.py`) | Registry token |
+|---|---|
+| `invalid` | `invalid` |
+| `unverified` | `unverified` |
+| `self-countersigned` | `not_independent` |
+| `unresolved signer` | `unresolved_signer` |
+| `countersigned` | `resolved` |
+| `self-attested`, `witnessed` (no entries) | no token; capsule-cli prints `none` |
+
+The best-outcome order also differs: capsule-cli ranks `not_independent` above
+`unresolved_signer` (its `rank` map), and this module ranks `unresolved signer` above
+`self-countersigned` (`_ENTRY_RANK`). A bundle with a self-countersignature and an
+unresolved entry, and no resolved one, therefore summarizes differently in the two. The registry does not define an order.
+
 ## 10. Directory row (for a countersigner directory, if one is consulted)
 
 **Resolution is by `signer.key_id`, never `signer.id`** — reconciled here per
 [countersign-whole-bundle-shape]: this module previously resolved a directory by the
 signer's `did:web` identity, a divergence from `capsule-cli`'s Go verifier
 (`resolveSigner` matches a directory row's `key_ids[]`) that a real
-cross-implementation lookup would have silently mismatched. A verifier resolving
-`signer.key_id` against a public directory reads one row per enrolled signer,
-matching the field list the spec item
-`[bundle-countersignatures-entry-and-directory]` defines for `witnesses.json`'s
-`countersigners[]` extension — same discipline as the witness directory, alphabetical,
-one row per operator, a PR template for others:
+cross-implementation lookup would have silently mismatched.
+
+The row both of our other verifiers read has two fields:
 
 ```
-{ name, endpoint, key_ids, statement_types_issued, since, independent_of }
+{ name, key_ids }
 ```
 
-`key_ids` is a list of full 64-hex Ed25519 public keys (not a single value) so a
-directory row survives its operator's own key rotation without a stale entry, and so
-it directly matches `countersignatures[].signer.key_id` — the same full-hex
-convention the entry itself already uses. This module does not host or publish that
-directory — it only produces entries a directory (and the verifier that reads one)
-can resolve.
+`name` is the countersigner's display name and `key_ids` a list of full 64-hex Ed25519
+public keys (not a single value), so a row survives its operator's key rotation and
+matches `countersignatures[].signer.key_id` directly.
+
+- **capsule-cli** (`cli/countersign.go`, `decodeCountersignerDirectory` and
+  `countersignerDirectoryRow`) accepts the bare array, or a JSON object carrying the
+  array as `countersigners` beside other members. It decodes each row strictly
+  (`DisallowUnknownFields`, `cli/seal.go`, `DecodeJSONAs`): besides `name` and `key_ids`
+  it accepts only the optional `endpoint`, `statement_types_issued`, `since` and
+  `independent_of`. A row with any other field fails the decode of the whole directory,
+  and `countersign verify` then stops with an error. The directory is fetched only once an
+  independent entry with a valid signature needs a name. Only `key_ids` (matched
+  case-insensitively, `resolveSigner`) and `name` are used.
+- **agent-action-capsule's TypeScript stamp** (`ts/src/countersignature-stamp.ts`,
+  `indexCountersigners`; `pinnedCountersignerSource` additionally requires the bytes to
+  match a SHA-256 the caller pinned) accepts only the bare array, reads `name` and
+  `key_ids`, and ignores other fields. Anything that is not an array, such as a
+  `witnesses.json` object, resolves no signer. It matches only lowercase 64-hex keys, and
+  a key listed under two names resolves to neither.
+
+So the directory both accept is a bare array of `{name, key_ids}` rows with lowercase
+keys. Neither reads
+independence from a row: it is computed from the producer keys (§9).
+
+This module does not host or publish a directory. `verify_entry` and
+`resolve_entry_state` take `directory` as a mapping keyed by `signer.key_id` and only
+test the key's presence (`countersign/verify.py`), so building that mapping from the
+array above is the caller's job.
 
 ## 11. Delivery
 
