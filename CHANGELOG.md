@@ -8,6 +8,9 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Changed
 
+- **The checkpoint witness accepts the CLL -02 constant `sub`.** `POST /checkpoints` now accepts a CWT
+  `sub` equal to the log id (`iss`), as checkpointed-local-log -02 requires, and still accepts the
+  pre-02 `<iss>#<log_size>`; any other `sub` is refused as before. Closes #93.
 - **The countersign/v1 golden vector now carries a v2 Evidence Bundle.** Its bundle was a shape
   `parse_bundle` refuses; it is regenerated from a real v2 bundle, so the entry, statement,
   digests and the pinned SHA-256 changed. The entry and statement formats did not change.

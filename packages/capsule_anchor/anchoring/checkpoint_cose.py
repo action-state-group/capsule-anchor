@@ -361,10 +361,14 @@ def parse_and_verify_checkpoint_cose(
                 f"(claims size_a={consistency_proof.size_a}, size_b={consistency_proof.size_b})"
             )
 
-    expected_subject = f"{issuer}#{mmr_size}"
-    if parsed["subject"] != expected_subject:
+    # CLL -02: `sub` is the log id (== `iss`), constant across every checkpoint
+    # of a log. The pre-02 form `<iss>#<log_size>` is still accepted so stored
+    # and not-yet-upgraded writers' checkpoints keep verifying.
+    accepted_subjects = (issuer, f"{issuer}#{mmr_size}")
+    if parsed["subject"] not in accepted_subjects:
         raise NotACheckpointError(
-            f"CWT subject {parsed['subject']!r} does not match expected {expected_subject!r}"
+            f"CWT subject {parsed['subject']!r} is neither the log id {accepted_subjects[0]!r} "
+            f"(CLL -02) nor the pre-02 form {accepted_subjects[1]!r}"
         )
 
     return {
