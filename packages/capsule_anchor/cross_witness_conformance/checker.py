@@ -200,12 +200,13 @@ def check_checkpoint_wire(
             + ("its pinned enrolled key" if claims.get("grade") is not None else "its own self-asserted kid")
             + f" (key_id={claims['key_id']})",
         )
-        # parse_and_verify_checkpoint_cose already enforces sub == f"{iss}#{log_size}"
-        # before returning claims at all -- if we got here, it passed.
+        # parse_and_verify_checkpoint_cose already enforces sub in
+        # {iss (CLL -02), f"{iss}#{log_size}" (pre-02)} before returning claims
+        # at all -- if we got here, it passed.
         report.add(
             "sub_pattern",
             "PASS",
-            f"sub == '{claims['log_id']}#{claims['mmr_size']}'",
+            f"sub == '{claims['log_id']}' (CLL -02) or '{claims['log_id']}#{claims['mmr_size']}' (pre-02)",
         )
 
     if claims["log_id"] == expected_log_id:

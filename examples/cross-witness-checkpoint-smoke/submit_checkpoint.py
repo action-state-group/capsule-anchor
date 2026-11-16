@@ -105,7 +105,7 @@ def build_checkpoint_cose(
     }
     payload = cbor2.dumps(claims, canonical=True)
     kid = key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    subject = f"{log_id}#{mmr_size}"
+    subject = log_id  # CLL -02: sub is the constant log id
     private_key_pem = key.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption())
     return build_signed_statement(
         payload,
