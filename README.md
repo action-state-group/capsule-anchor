@@ -511,7 +511,8 @@ are set (`countersign/config.py`). It countersigns an Agent Action Capsule
 Evidence Bundle v2 for a requester this service already knows:
 
 1. **The bundle** must be an Evidence Bundle v2 with no payloads
-   (`completeness.payloads_mode` is `"none"`, and no `disclosures`); its digest
+   (`completeness.payloads_mode` is `"none"`; a `disclosures` overlay is accepted only for
+   a matching `declared_count` payload, at the holder's opt-in); its digest
    is computed by `agent-action-capsule`'s neutral bundle library.
 2. **The requester** must be on the issuer allowlist,
    `CAPSULE_ANCHOR_COUNTERSIGN_ISSUERS_FILE` (a JSON array of

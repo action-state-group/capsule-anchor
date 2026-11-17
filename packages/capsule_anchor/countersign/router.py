@@ -164,9 +164,17 @@ def get_router() -> APIRouter:
             )
         signer_id = f"did:web:{public_host}"
 
-        statement = recompute_statement(
-            bundle, policy_module=module, ledger_id=req.requester.id, profile_id=req.profile_id or ""
-        )
+        try:
+            statement = recompute_statement(
+                bundle, policy_module=module, ledger_id=req.requester.id, profile_id=req.profile_id or ""
+            )
+        except Exception as exc:
+            # A policy module refuses a disclosed payload it must not read
+            # (digest mismatch, non-closed shape) by raising DisclosureRefused.
+            # Matched by name: this package never imports a module's package.
+            if any(c.__name__ == "DisclosureRefused" for c in type(exc).__mro__):
+                raise HTTPException(status_code=422, detail=f"refused: {exc}") from exc
+            raise
         try:
             entry = sign_countersignature(
                 bundle,

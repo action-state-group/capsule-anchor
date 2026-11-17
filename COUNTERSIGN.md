@@ -9,7 +9,8 @@ what is defined here.
 **The bundle this module ingests is the donated spec's own shape**
 (`draft-mih-zhang-agent-action-capsule-evidence-bundle-00`, wire `bundle_version: "2"`
 / `bundle_kind: "evidence-bundle/v2"`) — the exact bytes `capsulectl bundle` produces,
-carrying `completeness.payloads_mode: "none"` and no `disclosures` overlay. This
+carrying `completeness.payloads_mode: "none"` and, at most, the holder's opt-in disclosure of
+`declared_count` payloads (§5). This
 module never invents its own bundle model: the digest (JCS-canonical,
 `sha256(JCS(bundle \ countersignatures))`) and the structural/completeness
 verification (graph closure, CLL #13 range proof, per-record inclusion proof) are
@@ -35,7 +36,7 @@ is open as to who may submit, and the witness never inspects the content of the 
 checkpoint commits to.
 
 Countersign answers a different, narrower question: *does a specific bundle of
-records — digests only, no payloads — hold together structurally, and does it satisfy
+records — digests only, no payloads beyond an opt-in `declared_count` disclosure — hold together structurally, and does it satisfy
 a named profile's own checks?* In RFC 9943 terms it plays the **Auditor** role. RFC
 9943 defines that role and leaves open how an Auditor checks; §3 and §5 state what
 this module checks. It is:
@@ -148,8 +149,16 @@ recompute in §3 ever runs:
 
 1. **Shape.** The submission's `bundle` parses as a well-formed v2 Evidence Bundle
    (`bundle_version: "2"`, `bundle_kind: "evidence-bundle/v2"`) carrying
-   `completeness.payloads_mode: "none"` and no `disclosures` overlay. Anything with a
-   payload present is refused by construction.
+   `completeness.payloads_mode: "none"`. Anything with a payload present is refused by
+   construction. The one exception is an optional, holder opt-in `disclosures` overlay
+   that discloses only the `agent_input` of records whose `action_type` is
+   `declared_count`, so a policy module can compare the declared count with the certified
+   sequence span. Each disclosed payload must hash (JSON-DIGEST) to the
+   `agent_input_digest` sealed in that record. A `disclosures` entry for any other record
+   kind, any other member, a record not in the bundle, or a payload that does not match
+   its sealed digest is refused, and so is a disclosed payload a policy module itself
+   refuses (HTTP 422). Disclosure is never the default, and the requester's signature
+   covers the overlay, because the bundle digest does.
 2. **Issuer check.** The countersign submission's own `requester.id` (never a bundle
    field — the v2 Evidence Bundle carries no issuer identity of its own) must be
    enrolled in this instance's own issuer allowlist (§6) — a trust anchor configured
@@ -358,7 +367,8 @@ three retries on a 1s/4s/16s backoff.
 `packages/tests/countersign/` builds genuinely self-consistent v2 Evidence Bundles
 (real AAC Capsule records, real CLL #13 range/inclusion proofs via
 `cll.checkpoint.core`) rather than hand-typed stand-ins, and exercises: a bundle with
-any payload present, or carrying a `disclosures` overlay, is refused; a bundle that
+any payload present, or carrying a `disclosures` overlay that discloses anything but a
+matching `declared_count` payload, is refused; a bundle that
 isn't a v2 Evidence Bundle is refused; an unenrolled issuer, a requester key mismatch,
 or a tampered signature is refused (content changed after signing fails to verify —
 there is no separate "declared vs. recomputed digest" step); a submission naming an

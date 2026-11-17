@@ -53,13 +53,12 @@ def test_payloads_present_mutant_red_then_green(valid_bundle_raw, issuer_allowli
     _accept(valid_bundle_raw, issuer_allowlist, requester_key)
 
 
-def test_disclosures_present_is_refused(valid_bundle_raw, issuer_allowlist, requester_key):
-    """A payloads_mode:none bundle that ALSO carries a disclosures overlay
-    is refused -- only a fully withheld bundle may be submitted."""
+def test_disclosure_naming_no_record_is_refused(valid_bundle_raw, issuer_allowlist, requester_key):
+    """A disclosures overlay may only name records in the bundle."""
 
     mutated = copy.deepcopy(valid_bundle_raw)
-    mutated["disclosures"] = {}
-    with pytest.raises(BundleRefused, match="disclosures"):
+    mutated["disclosures"] = {"nope": {"agent_input": {}}}
+    with pytest.raises(BundleRefused, match="not a record"):
         _accept(mutated, issuer_allowlist, requester_key)
 
 
@@ -129,3 +128,72 @@ def test_malformed_bundle_shape_is_refused():
         parse_bundle({"not": "a bundle"})
     with pytest.raises(BundleRefused):
         parse_bundle("not even a dict")  # type: ignore[arg-type]
+
+
+# --- opt-in disclosure of declared_count payloads (capsule-engine#160, ruling (b)) ---
+
+
+def test_declared_count_disclosure_is_accepted(issuer_allowlist, requester_key):
+    from .conftest import declared_count_bundle_raw
+
+    raw, cid = declared_count_bundle_raw()
+    bundle = _accept(raw, issuer_allowlist, requester_key)
+    assert bundle.raw["disclosures"][cid]["agent_input"] == {"declared_count": 2}
+    assert bundle.completeness["payloads_mode"] == "none"
+
+
+def test_empty_disclosures_overlay_is_accepted(valid_bundle_raw, issuer_allowlist, requester_key):
+    mutated = copy.deepcopy(valid_bundle_raw)
+    mutated["disclosures"] = {}
+    _accept(mutated, issuer_allowlist, requester_key)
+
+
+def test_disclosure_digest_mismatch_is_refused(issuer_allowlist, requester_key):
+    from .conftest import declared_count_bundle_raw
+
+    raw, cid = declared_count_bundle_raw()
+    raw["disclosures"][cid]["agent_input"] = {"declared_count": 3}
+    with pytest.raises(BundleRefused, match="does not match"):
+        _accept(raw, issuer_allowlist, requester_key)
+
+
+def test_disclosure_of_another_kind_is_refused(issuer_allowlist, requester_key):
+    """Only declared_count payloads may be disclosed: a ``decide`` record's
+    payload is refused even when it matches its sealed digest."""
+    from .conftest import bundle_with_records, make_capsule
+
+    payload = {"anything": 1}
+    records = [make_capsule(1, "decide", agent_input=payload)]
+    raw = bundle_with_records(records)
+    raw["disclosures"] = {records[0]["capsule_id"]: {"agent_input": payload}}
+    with pytest.raises(BundleRefused, match="only"):
+        _accept(raw, issuer_allowlist, requester_key)
+
+
+def test_disclosure_of_other_member_or_unknown_record_is_refused(issuer_allowlist, requester_key):
+    from .conftest import declared_count_bundle_raw
+
+    raw, cid = declared_count_bundle_raw()
+    mutated = copy.deepcopy(raw)
+    mutated["disclosures"][cid]["agent_output"] = {"x": 1}
+    with pytest.raises(BundleRefused, match="exactly"):
+        _accept(mutated, issuer_allowlist, requester_key)
+
+    mutated = copy.deepcopy(raw)
+    mutated["disclosures"]["deadbeef"] = {"agent_input": {}}
+    with pytest.raises(BundleRefused, match="not a record"):
+        _accept(mutated, issuer_allowlist, requester_key)
+
+    mutated = copy.deepcopy(raw)
+    mutated["disclosures"] = []
+    with pytest.raises(BundleRefused, match="object"):
+        _accept(mutated, issuer_allowlist, requester_key)
+
+
+def test_disclosure_with_payloads_mode_all_is_still_refused(issuer_allowlist, requester_key):
+    from .conftest import declared_count_bundle_raw
+
+    raw, _ = declared_count_bundle_raw()
+    raw["completeness"]["payloads_mode"] = "all"
+    with pytest.raises(BundleRefused, match="payloads present"):
+        _accept(raw, issuer_allowlist, requester_key)

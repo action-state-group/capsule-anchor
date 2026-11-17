@@ -6,6 +6,15 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Countersign accepts an opt-in disclosure of `declared_count` payloads.** A countersign
+  request's bundle may carry a `disclosures` overlay holding only the `agent_input` of
+  `declared_count` records, each matching the digest its record sealed, so a policy module can
+  compare the declared count with the certified sequence span (capsule-engine#160, ruling (b)).
+  Any other disclosure, or a mismatching one, is refused (422), as is a disclosure a policy
+  module refuses (`DisclosureRefused`). Bundles without the overlay behave as before. Closes #95.
+
 ### Changed
 
 - **The checkpoint witness accepts the CLL -02 constant `sub`.** `POST /checkpoints` now accepts a CWT
