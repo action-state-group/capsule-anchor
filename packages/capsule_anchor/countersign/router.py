@@ -101,7 +101,8 @@ class CountersignRequest(BaseModel):
     has no ``profile_id`` field at all (verified against a real
     ``capsulectl``-built submission, [countersign-whole-bundle-shape]). A
     submission that never names one gets the five generic checks only
-    (``NullPolicyModule`` -- no profile-specific coverage, never a refusal);
+    (``NullPolicyModule`` -- no profile-specific coverage, never a refusal,
+    except of a ``disclosures`` overlay, which no module then reads);
     a submission that DOES name one must have it registered, or the
     registration is refused (see ``register`` below)."""
 
@@ -122,7 +123,11 @@ def _refuse_unread_disclosures(bundle, module, profile_id: str | None) -> None:
     overlay = bundle.raw.get("disclosures")
     if not overlay:
         return
-    kinds_by_id = {r.get("capsule_id"): r.get("action_type") for r in bundle.raw.get("records", []) if isinstance(r, dict)}
+    kinds_by_id = {
+        r.get("capsule_id"): r.get("action_type")
+        for r in bundle.raw.get("records", [])
+        if isinstance(r, dict)
+    }
     disclosed = {kinds_by_id.get(cid) for cid in overlay}
     unread = sorted(str(k) for k in disclosed - reads_disclosed_kinds(module))
     if unread:
@@ -175,7 +180,7 @@ def get_router() -> APIRouter:
                 )
         else:
             # No profile named -- run the five generic checks only, never a
-            # refusal: capsulectl's current countersignSubmission wire shape
+            # refusal (bar a disclosures overlay): capsulectl's current countersignSubmission wire shape
             # has no profile_id field to send one with.
             module = NullPolicyModule()
 

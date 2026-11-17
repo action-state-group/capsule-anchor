@@ -187,7 +187,8 @@ recompute in §3 ever runs:
    submission that never names one (the v2 bundle carries no profile object of its
    own, and `capsulectl`'s current `countersignSubmission` wire shape has no
    `profile_id` field to send one with) still succeeds — the five generic checks
-   only, no profile-specific coverage, never a refusal.
+   only, no profile-specific coverage, never a refusal (unless it carries a `disclosures`
+   overlay, which no profile then reads and §1 refuses).
 
 The witness's other surfaces (`/checkpoints`, `/register`) make none of these four
 claims: they accept a self-asserted key for any unenrolled identity, by design, and

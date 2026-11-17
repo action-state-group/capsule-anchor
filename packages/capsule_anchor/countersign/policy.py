@@ -48,10 +48,9 @@ class PolicyModule(Protocol):
     A countersign request's ``disclosures`` overlay is refused unless every
     disclosed record's kind is named here (data minimisation: nothing is
     disclosed that the named profile does not read). A module that does not
-    define it reads no disclosure.
+    define it reads no disclosure. (A Protocol cannot express an optional
+    member, so it is not declared here; ``reads_disclosed_kinds()`` probes it.)
     """
-
-    reads_disclosed_kinds: frozenset[str]
 
     def check(self, bundle: "Bundle", profile_id: str) -> list[CheckResult]: ...
 
