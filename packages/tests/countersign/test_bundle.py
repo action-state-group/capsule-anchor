@@ -197,3 +197,22 @@ def test_disclosure_with_payloads_mode_all_is_still_refused(issuer_allowlist, re
     raw["completeness"]["payloads_mode"] = "all"
     with pytest.raises(BundleRefused, match="payloads present"):
         _accept(raw, issuer_allowlist, requester_key)
+
+
+@pytest.mark.parametrize("bad", [[], {}, 7])
+def test_malformed_record_ids_and_kinds_are_refused_not_a_crash(
+    bad, valid_bundle_raw, issuer_allowlist, requester_key
+):
+    """An unhashable or non-string capsule_id / action_type must be a clean
+    BundleRefused, never a TypeError (which the router would answer with 500)."""
+    mutated = copy.deepcopy(valid_bundle_raw)
+    mutated["disclosures"] = {}
+    mutated["records"].append({"capsule_id": bad})
+    _accept(mutated, issuer_allowlist, requester_key)  # unnamed malformed record is ignored here
+
+    mutated = copy.deepcopy(valid_bundle_raw)
+    cid = mutated["records"][0]["capsule_id"]
+    mutated["records"][0]["action_type"] = bad
+    mutated["disclosures"] = {cid: {"agent_input": {}}}
+    with pytest.raises(BundleRefused, match="only"):
+        _accept(mutated, issuer_allowlist, requester_key)

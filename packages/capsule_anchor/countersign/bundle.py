@@ -110,7 +110,9 @@ class Bundle:
 
 def parse_bundle(raw: dict) -> Bundle:
     """Parse ``raw`` into a :class:`Bundle`, refusing anything that isn't a
-    well-formed, payload-free v2 Evidence Bundle. Never verifies a
+    well-formed, withheld v2 Evidence Bundle (``payloads_mode`` ``none``, plus
+    at most an opt-in disclosure of ``declared_count`` ``agent_input``
+    payloads, see :data:`DISCLOSABLE_KINDS`). Never verifies a
     requester's signature -- see :func:`accept_bundle` for the full
     acceptance path."""
     if not isinstance(raw, dict):
@@ -152,14 +154,16 @@ def _check_disclosures(raw: dict) -> None:
         raise BundleRefused("disclosures must be an object keyed by capsule_id")
     records = raw.get("records")
     by_id = {
-        r.get("capsule_id"): r for r in records if isinstance(r, dict)
-    } if isinstance(records, list) else {}
+        r["capsule_id"]: r
+        for r in (records if isinstance(records, list) else [])
+        if isinstance(r, dict) and isinstance(r.get("capsule_id"), str)
+    }
     for capsule_id, members in overlay.items():
         record = by_id.get(capsule_id)
         if record is None:
             raise BundleRefused(f"disclosures names {capsule_id!r}, which is not a record in the bundle")
         kind = record.get("action_type")
-        if kind not in DISCLOSABLE_KINDS:
+        if not isinstance(kind, str) or kind not in DISCLOSABLE_KINDS:
             raise BundleRefused(
                 f"disclosures[{capsule_id}] discloses a {kind!r} record; only "
                 f"{sorted(DISCLOSABLE_KINDS)} payloads may be disclosed to a countersigner"
@@ -203,8 +207,8 @@ def accept_bundle(
 ) -> Bundle:
     """The full acceptance path -- this instance's registration policy:
 
-    1. Parse, refusing anything that isn't a well-formed, payload-free v2
-       Evidence Bundle.
+    1. Parse, refusing anything that isn't a well-formed, withheld v2
+       Evidence Bundle (see :func:`parse_bundle`).
     2. Resolve the issuer: ``requester_id`` (the countersign request's own
        ``requester.id``, never a bundle field -- the v2 bundle carries no
        issuer identity of its own) must be enrolled in ``issuers`` (see
