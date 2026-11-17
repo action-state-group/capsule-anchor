@@ -291,3 +291,79 @@ def test_statement_that_cannot_be_canonicalized_is_a_clean_400(monkeypatch, requ
     resp = safe_client.post("/countersign/register", json=_submission(base_bundle_raw(), requester_key))
     assert resp.status_code == 400, resp.text
     assert "statement" in resp.json()["detail"]
+
+
+class DisclosureRefused(ValueError):
+    """Stands in for capsule_engine.countersign.DisclosureRefused (matched by name)."""
+
+
+class _ReadsDisclosure:
+    def __init__(self, refuse: bool) -> None:
+        self.refuse = refuse
+        self.seen: list[dict] = []
+
+    def check(self, bundle, profile_id):
+        self.seen.append(bundle.raw.get("disclosures", {}))
+        if self.refuse:
+            raise DisclosureRefused("the disclosed declared_count payload is not closed")
+        return []
+
+
+def _registry_with(module):
+    from capsule_anchor.countersign.policy import PolicyRegistry
+
+    registry = PolicyRegistry()
+    registry.register("pack/v1", module)
+    router_module.configure_registry(registry)
+
+
+def test_declared_count_disclosure_reaches_the_module(monkeypatch, requester_key, issuer_allowlist):
+    from .conftest import declared_count_bundle_raw
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
+    module = _ReadsDisclosure(refuse=False)
+    _registry_with(module)
+    raw, cid = declared_count_bundle_raw()
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+    assert resp.status_code == 200, resp.text
+    assert module.seen and all(s == {cid: {"agent_input": {"declared_count": 2}}} for s in module.seen)
+
+
+def test_module_disclosure_refusal_is_a_422_not_a_500(monkeypatch, requester_key, issuer_allowlist):
+    from .conftest import declared_count_bundle_raw
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
+    _registry_with(_ReadsDisclosure(refuse=True))
+    raw, _ = declared_count_bundle_raw()
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+    assert resp.status_code == 422
+    assert "not closed" in resp.json()["detail"]
+
+
+def test_forged_disclosure_is_refused_over_http_before_any_module(monkeypatch, requester_key, issuer_allowlist):
+    from .conftest import declared_count_bundle_raw
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
+    module = _ReadsDisclosure(refuse=False)
+    _registry_with(module)
+    raw, cid = declared_count_bundle_raw()
+    raw["disclosures"][cid]["agent_input"] = {"declared_count": 99}
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+    assert resp.status_code == 422
+    assert module.seen == []
+
+
+def test_disclosure_is_refused_over_http_when_no_kind_is_configured(monkeypatch, requester_key, issuer_allowlist):
+    from .conftest import declared_count_bundle_raw
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.delenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", raising=False)
+    module = _ReadsDisclosure(refuse=False)
+    _registry_with(module)
+    raw, _ = declared_count_bundle_raw()
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+    assert resp.status_code == 422
+    assert module.seen == []

@@ -4,16 +4,18 @@
 The canonical AAC Evidence Bundle (``draft-mih-zhang-agent-action-capsule-
 evidence-bundle-00``, wire ``bundle_version: "2"`` / ``bundle_kind:
 "evidence-bundle/v2"``) -- the exact shape ``capsulectl bundle`` produces --
-carrying ``completeness.payloads_mode: "none"`` and no ``disclosures``
-overlay: every record's full content withheld to digests, checkpoints, and
-completeness proofs only. This module does not own that wire format -- it is
+carrying ``completeness.payloads_mode: "none"``: every record's full content
+withheld to digests, checkpoints, and completeness proofs only. The one
+exception is a holder's opt-in ``disclosures`` overlay of the ``agent_input``
+of the record kinds the deployer lists as disclosable (``config.disclosable_kinds``,
+empty by default), checked against the digest each record sealed. This module does not own that wire format -- it is
 the donated spec's own bundle shape, codec'd and verified by the neutral
 ``agent_action_capsule.bundle`` reference library (never reimplemented here:
 a second JCS/MMR implementation in this repo is exactly the divergence that
 made the prior ad-hoc bundle model reject 100% of ``capsulectl``'s real
 output -- see [countersign-whole-bundle-shape]). This module refuses
 (``BundleRefused``) anything that does not parse into a well-formed v2
-bundle -- INCLUDING, always, a bundle that is not payload-free.
+bundle -- INCLUDING, always, a bundle that is not payload-free apart from that overlay.
 """
 
 from __future__ import annotations
@@ -23,9 +25,14 @@ from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
 from agent_action_capsule.bundle import BundleVerificationResult, bundle_digest, verify_bundle
+from agent_action_capsule.canonical import json_digest
 
 if TYPE_CHECKING:
     from capsule_anchor.countersign.issuers import IssuerAllowlist
+
+
+_DISCLOSABLE_MEMBER = "agent_input"
+_SEALED_DIGEST_PATH = ("model_attestation", "compute_attestation", "agent_input_digest")
 
 
 class BundleRefused(ValueError):
@@ -36,7 +43,7 @@ class BundleRefused(ValueError):
 
 @dataclass(frozen=True)
 class Bundle:
-    """A parsed, payload-free v2 Evidence Bundle.
+    """A parsed, withheld v2 Evidence Bundle.
 
     Wraps the bundle exactly as received (``raw``) -- the neutral library's
     digest and verification functions operate on that dict directly, never
@@ -95,9 +102,11 @@ class Bundle:
         return verify_bundle(self.raw)
 
 
-def parse_bundle(raw: dict) -> Bundle:
+def parse_bundle(raw: dict, *, disclosable_kinds: frozenset[str] = frozenset()) -> Bundle:
     """Parse ``raw`` into a :class:`Bundle`, refusing anything that isn't a
-    well-formed, payload-free v2 Evidence Bundle. Never verifies a
+    well-formed, withheld v2 Evidence Bundle (``payloads_mode`` ``none``, plus
+    at most an opt-in disclosure of ``agent_input``
+    payloads of ``disclosable_kinds``, empty by default). Never verifies a
     requester's signature -- see :func:`accept_bundle` for the full
     acceptance path."""
     if not isinstance(raw, dict):
@@ -121,15 +130,55 @@ def parse_bundle(raw: dict) -> Bundle:
             "payloads present is refused by construction"
         )
     if "disclosures" in raw:
-        raise BundleRefused(
-            "bundle carries a disclosures overlay -- only a withheld (payloads_mode none) bundle "
-            "may be submitted for countersigning"
-        )
+        _check_disclosures(raw, disclosable_kinds)
     try:
         digest = bundle_digest(raw)
     except (TypeError, ValueError) as exc:
         raise BundleRefused(f"bundle digest could not be computed: {exc}") from exc
     return Bundle(raw=raw, digest=digest)
+
+
+def _check_disclosures(raw: dict, disclosable_kinds: frozenset[str]) -> None:
+    """Refuse any ``disclosures`` overlay that is not an opt-in disclosure of
+    the ``agent_input`` of records of a ``disclosable_kinds`` kind, each
+    matching the digest its record sealed. Nothing else may ride along, so a
+    policy module never receives any other payload."""
+    overlay = raw["disclosures"]
+    if not isinstance(overlay, dict):
+        raise BundleRefused("disclosures must be an object keyed by capsule_id")
+    records = raw.get("records")
+    by_id = {
+        r["capsule_id"]: r
+        for r in (records if isinstance(records, list) else [])
+        if isinstance(r, dict) and isinstance(r.get("capsule_id"), str)
+    }
+    for capsule_id, members in overlay.items():
+        record = by_id.get(capsule_id)
+        if record is None:
+            raise BundleRefused(f"disclosures names {capsule_id!r}, which is not a record in the bundle")
+        kind = record.get("action_type")
+        if not isinstance(kind, str) or kind not in disclosable_kinds:
+            raise BundleRefused(
+                f"disclosures[{capsule_id}] discloses a {kind!r} record; only "
+                f"{sorted(disclosable_kinds)} payloads may be disclosed to a countersigner"
+            )
+        if not isinstance(members, dict) or set(members) != {_DISCLOSABLE_MEMBER}:
+            raise BundleRefused(
+                f"disclosures[{capsule_id}] must carry exactly the {_DISCLOSABLE_MEMBER!r} member"
+            )
+        sealed: Any = record
+        for part in _SEALED_DIGEST_PATH:
+            sealed = sealed.get(part) if isinstance(sealed, dict) else None
+        if not isinstance(sealed, str):
+            raise BundleRefused(f"disclosures[{capsule_id}]: the record seals no agent_input_digest")
+        try:
+            disclosed = json_digest(members[_DISCLOSABLE_MEMBER])
+        except (TypeError, ValueError) as exc:
+            raise BundleRefused(f"disclosures[{capsule_id}] payload cannot be digested: {exc}") from exc
+        if disclosed != sealed:
+            raise BundleRefused(
+                f"disclosures[{capsule_id}] payload does not match the agent_input_digest sealed in the record"
+            )
 
 
 def compute_bundle_digest(bundle: Bundle) -> str:
@@ -149,11 +198,12 @@ def accept_bundle(
     requester_id: str,
     requester_key_hex: str,
     requester_signature_hex: str,
+    disclosable_kinds: frozenset[str] = frozenset(),
 ) -> Bundle:
     """The full acceptance path -- this instance's registration policy:
 
-    1. Parse, refusing anything that isn't a well-formed, payload-free v2
-       Evidence Bundle.
+    1. Parse, refusing anything that isn't a well-formed, withheld v2
+       Evidence Bundle (see :func:`parse_bundle`).
     2. Resolve the issuer: ``requester_id`` (the countersign request's own
        ``requester.id``, never a bundle field -- the v2 bundle carries no
        issuer identity of its own) must be enrolled in ``issuers`` (see
@@ -168,7 +218,7 @@ def accept_bundle(
     4. Verify ``requester_signature_hex`` over the (confirmed) digest under
        the pinned key.
     """
-    bundle = parse_bundle(raw)
+    bundle = parse_bundle(raw, disclosable_kinds=disclosable_kinds)
     entry = issuers.get(requester_id)
     if entry is None:
         raise BundleRefused(

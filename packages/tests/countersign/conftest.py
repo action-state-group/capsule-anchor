@@ -18,7 +18,7 @@ import base64
 
 import pytest
 from agent_action_capsule.bundle import bundle_digest
-from agent_action_capsule.canonical import compute_capsule_id
+from agent_action_capsule.canonical import compute_capsule_id, json_digest
 from cll.checkpoint.core import add_leaf, inclusion_proof, leaf_hash, peaks, range_proof, root_from_peaks
 from cll.checkpoint.cose_wire import checkpoint_to_cose
 from cll.checkpoint.emit import CheckpointRecord
@@ -61,7 +61,7 @@ def issuer_allowlist(requester_key: RequesterKey) -> IssuerAllowlist:
     return IssuerAllowlist.from_list([{"ledger_id": TEST_LEDGER_ID, "pubkey_hex": requester_key.pubkey_hex}])
 
 
-def make_capsule(number: int, action_type: str = "decide") -> dict:
+def make_capsule(number: int, action_type: str = "decide", agent_input: object | None = None) -> dict:
     """A minimal, genuinely self-verifying AAC Capsule record -- real enough
     to pass ``agent_action_capsule.verify.verify()``, the gate the neutral
     bundle verifier's own record ingestion requires before it will bind
@@ -87,8 +87,22 @@ def make_capsule(number: int, action_type: str = "decide") -> dict:
             "human_disposed": False,
         },
     }
+    if agent_input is not None:
+        capsule["model_attestation"] = {"compute_attestation": {"agent_input_digest": json_digest(agent_input)}}
     capsule["capsule_id"] = compute_capsule_id(capsule)
     return capsule
+
+
+def declared_count_bundle_raw(payload: object = None) -> tuple[dict, str]:
+    """A bundle with one ``decide`` and one ``declared_count`` record whose
+    ``agent_input`` payload is disclosed in the ``disclosures`` overlay.
+    Returns ``(bundle, declared_count_capsule_id)``."""
+    payload = {"declared_count": 2} if payload is None else payload
+    records = [make_capsule(1), make_capsule(2, "declared_count", agent_input=payload)]
+    raw = bundle_with_records(records)
+    cid = records[1]["capsule_id"]
+    raw["disclosures"] = {cid: {"agent_input": payload}}
+    return raw, cid
 
 
 def _proof(p) -> dict:

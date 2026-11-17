@@ -19,6 +19,19 @@ _ENV_POLICY = "CAPSULE_ANCHOR_REGISTRATION_POLICY"
 _ENV_ENABLED = "CAPSULE_ANCHOR_COUNTERSIGN"
 
 
+_ENV_DISCLOSABLE = "CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS"
+
+
+def disclosable_kinds() -> frozenset[str]:
+    """The record kinds (``action_type``) whose ``agent_input`` a requester may
+    opt in to disclosing to this countersigner: the comma-separated
+    ``CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS``. Empty by default, so a
+    bundle disclosing anything is refused unless the deployer names the kinds
+    (capsule-anchor stays generic and names no profile's record kind)."""
+    raw = os.environ.get(_ENV_DISCLOSABLE, "")
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
 def registration_policy() -> str | None:
     return os.environ.get(_ENV_POLICY) or None
 

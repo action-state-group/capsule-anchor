@@ -18,9 +18,19 @@ from capsule_anchor.countersign.issuers import IssuerAllowlist
 from .conftest import TEST_LEDGER_ID, sign_submission
 
 
-def _accept(raw, issuer_allowlist, requester_key):
+DC = frozenset({"declared_count"})
+
+
+def _accept(raw, issuer_allowlist, requester_key, disclosable_kinds=DC):
     rid, rkey, rsig = sign_submission(raw, requester_key)
-    return accept_bundle(raw, issuer_allowlist, requester_id=rid, requester_key_hex=rkey, requester_signature_hex=rsig)
+    return accept_bundle(
+        raw,
+        issuer_allowlist,
+        requester_id=rid,
+        requester_key_hex=rkey,
+        requester_signature_hex=rsig,
+        disclosable_kinds=disclosable_kinds,
+    )
 
 
 def test_valid_bundle_is_accepted(valid_bundle_raw, issuer_allowlist, requester_key):
@@ -53,13 +63,12 @@ def test_payloads_present_mutant_red_then_green(valid_bundle_raw, issuer_allowli
     _accept(valid_bundle_raw, issuer_allowlist, requester_key)
 
 
-def test_disclosures_present_is_refused(valid_bundle_raw, issuer_allowlist, requester_key):
-    """A payloads_mode:none bundle that ALSO carries a disclosures overlay
-    is refused -- only a fully withheld bundle may be submitted."""
+def test_disclosure_naming_no_record_is_refused(valid_bundle_raw, issuer_allowlist, requester_key):
+    """A disclosures overlay may only name records in the bundle."""
 
     mutated = copy.deepcopy(valid_bundle_raw)
-    mutated["disclosures"] = {}
-    with pytest.raises(BundleRefused, match="disclosures"):
+    mutated["disclosures"] = {"nope": {"agent_input": {}}}
+    with pytest.raises(BundleRefused, match="not a record"):
         _accept(mutated, issuer_allowlist, requester_key)
 
 
@@ -129,3 +138,105 @@ def test_malformed_bundle_shape_is_refused():
         parse_bundle({"not": "a bundle"})
     with pytest.raises(BundleRefused):
         parse_bundle("not even a dict")  # type: ignore[arg-type]
+
+
+# --- opt-in disclosure of declared_count payloads (capsule-engine#160, ruling (b)) ---
+
+
+def test_declared_count_disclosure_is_accepted(issuer_allowlist, requester_key):
+    from .conftest import declared_count_bundle_raw
+
+    raw, cid = declared_count_bundle_raw()
+    bundle = _accept(raw, issuer_allowlist, requester_key)
+    assert bundle.raw["disclosures"][cid]["agent_input"] == {"declared_count": 2}
+    assert bundle.completeness["payloads_mode"] == "none"
+
+
+def test_empty_disclosures_overlay_is_accepted(valid_bundle_raw, issuer_allowlist, requester_key):
+    mutated = copy.deepcopy(valid_bundle_raw)
+    mutated["disclosures"] = {}
+    _accept(mutated, issuer_allowlist, requester_key)
+
+
+def test_disclosure_digest_mismatch_is_refused(issuer_allowlist, requester_key):
+    from .conftest import declared_count_bundle_raw
+
+    raw, cid = declared_count_bundle_raw()
+    raw["disclosures"][cid]["agent_input"] = {"declared_count": 3}
+    with pytest.raises(BundleRefused, match="does not match"):
+        _accept(raw, issuer_allowlist, requester_key)
+
+
+def test_disclosure_of_another_kind_is_refused(issuer_allowlist, requester_key):
+    """Only declared_count payloads may be disclosed: a ``decide`` record's
+    payload is refused even when it matches its sealed digest."""
+    from .conftest import bundle_with_records, make_capsule
+
+    payload = {"anything": 1}
+    records = [make_capsule(1, "decide", agent_input=payload)]
+    raw = bundle_with_records(records)
+    raw["disclosures"] = {records[0]["capsule_id"]: {"agent_input": payload}}
+    with pytest.raises(BundleRefused, match="only"):
+        _accept(raw, issuer_allowlist, requester_key)
+
+
+def test_disclosure_of_other_member_or_unknown_record_is_refused(issuer_allowlist, requester_key):
+    from .conftest import declared_count_bundle_raw
+
+    raw, cid = declared_count_bundle_raw()
+    mutated = copy.deepcopy(raw)
+    mutated["disclosures"][cid]["agent_output"] = {"x": 1}
+    with pytest.raises(BundleRefused, match="exactly"):
+        _accept(mutated, issuer_allowlist, requester_key)
+
+    mutated = copy.deepcopy(raw)
+    mutated["disclosures"]["deadbeef"] = {"agent_input": {}}
+    with pytest.raises(BundleRefused, match="not a record"):
+        _accept(mutated, issuer_allowlist, requester_key)
+
+    mutated = copy.deepcopy(raw)
+    mutated["disclosures"] = []
+    with pytest.raises(BundleRefused, match="object"):
+        _accept(mutated, issuer_allowlist, requester_key)
+
+
+def test_disclosure_with_payloads_mode_all_is_still_refused(issuer_allowlist, requester_key):
+    from .conftest import declared_count_bundle_raw
+
+    raw, _ = declared_count_bundle_raw()
+    raw["completeness"]["payloads_mode"] = "all"
+    with pytest.raises(BundleRefused, match="payloads present"):
+        _accept(raw, issuer_allowlist, requester_key)
+
+
+@pytest.mark.parametrize("bad", [[], {}, 7])
+def test_malformed_record_ids_and_kinds_are_refused_not_a_crash(
+    bad, valid_bundle_raw, issuer_allowlist, requester_key
+):
+    """An unhashable or non-string capsule_id / action_type must be a clean
+    BundleRefused, never a TypeError (which the router would answer with 500)."""
+    mutated = copy.deepcopy(valid_bundle_raw)
+    mutated["disclosures"] = {}
+    mutated["records"].append({"capsule_id": bad})
+    _accept(mutated, issuer_allowlist, requester_key)  # unnamed malformed record is ignored here
+
+    mutated = copy.deepcopy(valid_bundle_raw)
+    cid = mutated["records"][0]["capsule_id"]
+    mutated["records"][0]["action_type"] = bad
+    mutated["disclosures"] = {cid: {"agent_input": {}}}
+    with pytest.raises(BundleRefused, match="only"):
+        _accept(mutated, issuer_allowlist, requester_key)
+
+
+def test_no_configured_kinds_refuses_any_disclosure(issuer_allowlist, requester_key):
+    """Default deployment: no disclosable kinds are configured, so even a
+    matching declared_count disclosure is refused."""
+    from .conftest import declared_count_bundle_raw
+
+    raw, _ = declared_count_bundle_raw()
+    with pytest.raises(BundleRefused, match="only"):
+        _accept(raw, issuer_allowlist, requester_key, disclosable_kinds=frozenset())
+    # and no overlay at all is unaffected
+    from .conftest import base_bundle_raw
+
+    _accept(base_bundle_raw(), issuer_allowlist, requester_key, disclosable_kinds=frozenset())
