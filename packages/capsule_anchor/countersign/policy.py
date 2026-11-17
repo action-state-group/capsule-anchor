@@ -27,6 +27,13 @@ if TYPE_CHECKING:
     from capsule_anchor.countersign.bundle import Bundle
 
 
+class DisclosureRefused(ValueError):
+    """Base of the refusal a policy module raises from ``check`` for a
+    disclosed payload it must not read (digest mismatch, non-closed shape).
+    The router answers it with a 422, never a 500. A module package defines
+    its own refusal as a subclass of this."""
+
+
 class PolicyModule(Protocol):
     """``check(bundle, profile_id) -> [{name, result, detail}]``.
 
@@ -35,9 +42,26 @@ class PolicyModule(Protocol):
     established/failed for THAT profile. This package calls ``check`` and
     folds the results into the statement unchanged -- it never inspects or
     reinterprets a module's verdicts.
+
+    ``reads_disclosed_kinds`` (optional, default: none) names the record
+    kinds (``action_type``) whose disclosed ``agent_input`` this module reads.
+    A countersign request's ``disclosures`` overlay is refused unless every
+    disclosed record's kind is named here (data minimisation: nothing is
+    disclosed that the named profile does not read). A module that does not
+    define it reads no disclosure. (A Protocol cannot express an optional
+    member, so it is not declared here; ``reads_disclosed_kinds()`` probes it.)
     """
 
     def check(self, bundle: "Bundle", profile_id: str) -> list[CheckResult]: ...
+
+
+def reads_disclosed_kinds(module: object) -> frozenset[str]:
+    """The kinds ``module`` declares it reads a disclosure of (none if it
+    declares nothing or something that is not a set of strings)."""
+    kinds = getattr(module, "reads_disclosed_kinds", None)
+    if isinstance(kinds, (set, frozenset)) and all(isinstance(k, str) for k in kinds):
+        return frozenset(kinds)
+    return frozenset()
 
 
 class NullPolicyModule:

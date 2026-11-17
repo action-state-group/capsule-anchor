@@ -25,7 +25,13 @@ from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES
 from capsule_anchor.countersign.bundle import BundleRefused, accept_bundle
 from capsule_anchor.countersign.config import disclosable_kinds
 from capsule_anchor.countersign.issuers import IssuerAllowlist
-from capsule_anchor.countersign.policy import NullPolicyModule, PolicyRegistry, default_registry
+from capsule_anchor.countersign.policy import (
+    DisclosureRefused,
+    NullPolicyModule,
+    PolicyRegistry,
+    default_registry,
+    reads_disclosed_kinds,
+)
 from capsule_anchor.countersign.recompute import recompute_statement
 from capsule_anchor.countersign.signer import Attestor, Registrar, StatementRefused, sign_countersignature
 from capsule_anchor.countersign.webhooks import (
@@ -95,7 +101,8 @@ class CountersignRequest(BaseModel):
     has no ``profile_id`` field at all (verified against a real
     ``capsulectl``-built submission, [countersign-whole-bundle-shape]). A
     submission that never names one gets the five generic checks only
-    (``NullPolicyModule`` -- no profile-specific coverage, never a refusal);
+    (``NullPolicyModule`` -- no profile-specific coverage, never a refusal,
+    except of a ``disclosures`` overlay, which no module then reads);
     a submission that DOES name one must have it registered, or the
     registration is refused (see ``register`` below)."""
 
@@ -106,6 +113,29 @@ class CountersignRequest(BaseModel):
     profile_id: str | None = None
     webhook_url: str | None = None
     webhook_secret: str | None = None
+
+
+def _refuse_unread_disclosures(bundle, module, profile_id: str | None) -> None:
+    """Data minimisation: a ``disclosures`` overlay is accepted only for the
+    record kinds the named profile's policy module declares it reads. An
+    overlay on a request naming no profile, or on a kind that module does not
+    read, is refused (422) -- nothing is disclosed that nothing reads."""
+    overlay = bundle.raw.get("disclosures")
+    if not overlay:
+        return
+    kinds_by_id = {
+        r.get("capsule_id"): r.get("action_type")
+        for r in bundle.raw.get("records", [])
+        if isinstance(r, dict)
+    }
+    disclosed = {kinds_by_id.get(cid) for cid in overlay}
+    unread = sorted(str(k) for k in disclosed - reads_disclosed_kinds(module))
+    if unread:
+        who = f"the policy module for profile {profile_id!r}" if profile_id else "a request naming no profile"
+        raise HTTPException(
+            status_code=422,
+            detail=f"refused: disclosures of {unread} records, which {who} does not read",
+        )
 
 
 def get_router() -> APIRouter:
@@ -150,9 +180,11 @@ def get_router() -> APIRouter:
                 )
         else:
             # No profile named -- run the five generic checks only, never a
-            # refusal: capsulectl's current countersignSubmission wire shape
+            # refusal (bar a disclosures overlay): capsulectl's current countersignSubmission wire shape
             # has no profile_id field to send one with.
             module = NullPolicyModule()
+
+        _refuse_unread_disclosures(bundle, module, req.profile_id)
 
         if _attestor is None or _registrar is None:
             raise HTTPException(status_code=503, detail="countersign module not configured")
@@ -173,9 +205,7 @@ def get_router() -> APIRouter:
         except Exception as exc:
             # A policy module refuses a disclosed payload it must not read
             # (digest mismatch, non-closed shape) by raising DisclosureRefused.
-            # Matched by name: this package never imports a module's package
-            # (capsule_engine.countersign.DisclosureRefused is the known one).
-            if any(c.__name__ == "DisclosureRefused" for c in type(exc).__mro__):
+            if isinstance(exc, DisclosureRefused):
                 raise HTTPException(status_code=422, detail=f"refused: {exc}") from exc
             raise
         try:

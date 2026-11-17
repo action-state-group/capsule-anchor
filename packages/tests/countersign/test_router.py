@@ -14,6 +14,7 @@ from capsule_anchor.countersign.issuers import IssuerAllowlist
 from capsule_anchor.countersign.router import configure_issuers
 
 from .conftest import base_bundle_raw, sign_submission
+from capsule_anchor.countersign.policy import DisclosureRefused as _BaseDisclosureRefused
 
 
 def _submission(raw, key, *, profile_id="test/v0", **extra):
@@ -293,11 +294,13 @@ def test_statement_that_cannot_be_canonicalized_is_a_clean_400(monkeypatch, requ
     assert "statement" in resp.json()["detail"]
 
 
-class DisclosureRefused(ValueError):
-    """Stands in for capsule_engine.countersign.DisclosureRefused (matched by name)."""
+class DisclosureRefused(_BaseDisclosureRefused):
+    """Stands in for a module package's own refusal, a subclass of the contract's base."""
 
 
 class _ReadsDisclosure:
+    reads_disclosed_kinds = frozenset({"declared_count"})
+
     def __init__(self, refuse: bool) -> None:
         self.refuse = refuse
         self.seen: list[dict] = []
@@ -367,3 +370,67 @@ def test_disclosure_is_refused_over_http_when_no_kind_is_configured(monkeypatch,
     resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
     assert resp.status_code == 422
     assert module.seen == []
+
+
+class _NoDisclosureModule:
+    """A module that declares no disclosure it reads."""
+
+    def check(self, bundle, profile_id):
+        return []
+
+
+def test_disclosure_with_no_profile_is_refused(monkeypatch, requester_key, issuer_allowlist):
+    from .conftest import declared_count_bundle_raw
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
+    raw, _ = declared_count_bundle_raw()
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id=None))
+    assert resp.status_code == 422
+    assert "naming no profile" in resp.json()["detail"]
+
+
+def test_disclosure_of_a_kind_the_module_does_not_read_is_refused(monkeypatch, requester_key, issuer_allowlist):
+    from .conftest import declared_count_bundle_raw
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
+    _registry_with(_NoDisclosureModule())
+    raw, _ = declared_count_bundle_raw()
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+    assert resp.status_code == 422
+    assert "does not read" in resp.json()["detail"]
+
+
+def test_a_module_naming_another_kind_does_not_read_this_one(monkeypatch, requester_key, issuer_allowlist):
+    from .conftest import declared_count_bundle_raw
+
+    class _Other(_NoDisclosureModule):
+        reads_disclosed_kinds = frozenset({"something_else"})
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
+    _registry_with(_Other())
+    raw, _ = declared_count_bundle_raw()
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+    assert resp.status_code == 422
+
+
+def test_a_same_named_refusal_outside_the_contract_is_not_a_422(monkeypatch, requester_key, issuer_allowlist):
+    """The router matches the contract's base class, not a class name."""
+    from .conftest import declared_count_bundle_raw
+
+    class DisclosureRefused(ValueError):  # not the contract's base
+        pass
+
+    class _Raises(_ReadsDisclosure):
+        def check(self, bundle, profile_id):
+            raise DisclosureRefused("x")
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
+    _registry_with(_Raises(refuse=False))
+    raw, _ = declared_count_bundle_raw()
+    safe = TestClient(client.app, raise_server_exceptions=False)
+    resp = safe.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+    assert resp.status_code == 500

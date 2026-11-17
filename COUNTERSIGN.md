@@ -145,7 +145,8 @@ different published policy, a consistency check with open submission
 
 Under `CAPSULE_ANCHOR_REGISTRATION_POLICY=strict`, every registration is checked
 against exactly this, in order — anything failing any step is refused before the
-recompute in §3 ever runs:
+recompute in §3 runs (a policy module's own refusal of a disclosed payload, below, is
+raised during it, and is also HTTP 422):
 
 1. **Shape.** The submission's `bundle` parses as a well-formed v2 Evidence Bundle
    (`bundle_version: "2"`, `bundle_kind: "evidence-bundle/v2"`) carrying
@@ -161,6 +162,11 @@ recompute in §3 ever runs:
    its sealed digest is refused, and so is a disclosed payload a policy module itself
    refuses (HTTP 422). Disclosure is never the default, and the requester's signature
    covers the overlay, because the bundle digest does.
+
+   `payloads_mode: "none"` describes the records embedded in the bundle; the `disclosures`
+   overlay is the only exception to it. A disclosed payload is read in memory for the
+   recompute only; this service stores neither the overlay nor the bundle. Which profile
+   may read a disclosed kind is checked at step 4.
 2. **Issuer check.** The countersign submission's own `requester.id` (never a bundle
    field — the v2 Evidence Bundle carries no issuer identity of its own) must be
    enrolled in this instance's own issuer allowlist (§6) — a trust anchor configured
@@ -178,7 +184,13 @@ recompute in §3 ever runs:
    submission that never names one (the v2 bundle carries no profile object of its
    own, and `capsulectl`'s current `countersignSubmission` wire shape has no
    `profile_id` field to send one with) still succeeds — the five generic checks
-   only, no profile-specific coverage, never a refusal.
+   only, no profile-specific coverage, never a refusal (unless it carries a `disclosures`
+   overlay, which no profile then reads and is refused).
+   A `disclosures` overlay is accepted only for record kinds the named profile's policy
+   module declares it reads (its `reads_disclosed_kinds`), so a request naming no profile,
+   or a kind that module does not read, is refused (HTTP 422): nothing is disclosed that
+   nothing reads. A module refuses a payload it must not read by raising a subclass of
+   `capsule_anchor.countersign.policy.DisclosureRefused`.
 
 The witness's other surfaces (`/checkpoints`, `/register`) make none of these four
 claims: they accept a self-asserted key for any unenrolled identity, by design, and
