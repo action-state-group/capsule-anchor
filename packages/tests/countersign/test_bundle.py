@@ -18,9 +18,19 @@ from capsule_anchor.countersign.issuers import IssuerAllowlist
 from .conftest import TEST_LEDGER_ID, sign_submission
 
 
-def _accept(raw, issuer_allowlist, requester_key):
+DC = frozenset({"declared_count"})
+
+
+def _accept(raw, issuer_allowlist, requester_key, disclosable_kinds=DC):
     rid, rkey, rsig = sign_submission(raw, requester_key)
-    return accept_bundle(raw, issuer_allowlist, requester_id=rid, requester_key_hex=rkey, requester_signature_hex=rsig)
+    return accept_bundle(
+        raw,
+        issuer_allowlist,
+        requester_id=rid,
+        requester_key_hex=rkey,
+        requester_signature_hex=rsig,
+        disclosable_kinds=disclosable_kinds,
+    )
 
 
 def test_valid_bundle_is_accepted(valid_bundle_raw, issuer_allowlist, requester_key):
@@ -216,3 +226,17 @@ def test_malformed_record_ids_and_kinds_are_refused_not_a_crash(
     mutated["disclosures"] = {cid: {"agent_input": {}}}
     with pytest.raises(BundleRefused, match="only"):
         _accept(mutated, issuer_allowlist, requester_key)
+
+
+def test_no_configured_kinds_refuses_any_disclosure(issuer_allowlist, requester_key):
+    """Default deployment: no disclosable kinds are configured, so even a
+    matching declared_count disclosure is refused."""
+    from .conftest import declared_count_bundle_raw
+
+    raw, _ = declared_count_bundle_raw()
+    with pytest.raises(BundleRefused, match="only"):
+        _accept(raw, issuer_allowlist, requester_key, disclosable_kinds=frozenset())
+    # and no overlay at all is unaffected
+    from .conftest import base_bundle_raw
+
+    _accept(base_bundle_raw(), issuer_allowlist, requester_key, disclosable_kinds=frozenset())

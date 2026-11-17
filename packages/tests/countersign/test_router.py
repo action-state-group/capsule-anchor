@@ -321,6 +321,7 @@ def test_declared_count_disclosure_reaches_the_module(monkeypatch, requester_key
     from .conftest import declared_count_bundle_raw
 
     client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
     module = _ReadsDisclosure(refuse=False)
     _registry_with(module)
     raw, cid = declared_count_bundle_raw()
@@ -333,6 +334,7 @@ def test_module_disclosure_refusal_is_a_422_not_a_500(monkeypatch, requester_key
     from .conftest import declared_count_bundle_raw
 
     client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
     _registry_with(_ReadsDisclosure(refuse=True))
     raw, _ = declared_count_bundle_raw()
     resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
@@ -344,10 +346,24 @@ def test_forged_disclosure_is_refused_over_http_before_any_module(monkeypatch, r
     from .conftest import declared_count_bundle_raw
 
     client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
     module = _ReadsDisclosure(refuse=False)
     _registry_with(module)
     raw, cid = declared_count_bundle_raw()
     raw["disclosures"][cid]["agent_input"] = {"declared_count": 99}
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+    assert resp.status_code == 422
+    assert module.seen == []
+
+
+def test_disclosure_is_refused_over_http_when_no_kind_is_configured(monkeypatch, requester_key, issuer_allowlist):
+    from .conftest import declared_count_bundle_raw
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.delenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", raising=False)
+    module = _ReadsDisclosure(refuse=False)
+    _registry_with(module)
+    raw, _ = declared_count_bundle_raw()
     resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
     assert resp.status_code == 422
     assert module.seen == []

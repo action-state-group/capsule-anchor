@@ -23,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 from capsule_anchor.anchoring.router import _SlidingWindowLimiter
 from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES
 from capsule_anchor.countersign.bundle import BundleRefused, accept_bundle
+from capsule_anchor.countersign.config import disclosable_kinds
 from capsule_anchor.countersign.issuers import IssuerAllowlist
 from capsule_anchor.countersign.policy import NullPolicyModule, PolicyRegistry, default_registry
 from capsule_anchor.countersign.recompute import recompute_statement
@@ -135,6 +136,7 @@ def get_router() -> APIRouter:
                 requester_id=req.requester.id,
                 requester_key_hex=req.requester.key_id,
                 requester_signature_hex=req.requester_signature,
+                disclosable_kinds=disclosable_kinds(),
             )
         except BundleRefused as exc:
             raise HTTPException(status_code=422, detail=f"refused: {exc}") from exc
@@ -171,7 +173,8 @@ def get_router() -> APIRouter:
         except Exception as exc:
             # A policy module refuses a disclosed payload it must not read
             # (digest mismatch, non-closed shape) by raising DisclosureRefused.
-            # Matched by name: this package never imports a module's package.
+            # Matched by name: this package never imports a module's package
+            # (capsule_engine.countersign.DisclosureRefused is the known one).
             if any(c.__name__ == "DisclosureRefused" for c in type(exc).__mro__):
                 raise HTTPException(status_code=422, detail=f"refused: {exc}") from exc
             raise

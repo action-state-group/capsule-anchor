@@ -8,11 +8,11 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Added
 
-- **Countersign accepts an opt-in disclosure of `declared_count` payloads.** A countersign
-  request's bundle may carry a `disclosures` overlay holding only the `agent_input` of
-  `declared_count` records, each matching the digest its record sealed, so a policy module can
-  compare the declared count with the certified sequence span (capsule-engine#160, ruling (b)).
-  Any other disclosure, or a mismatching one, is refused (422), as is a disclosure a policy
+- **Countersign accepts an opt-in disclosure of configured record kinds.** A countersign
+  request's bundle may carry a `disclosures` overlay holding only the `agent_input` of records
+  whose `action_type` is listed in the new `CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS`
+  (empty by default, so nothing is disclosable until the deployer sets it), each matching the
+  digest its record sealed (capsule-engine#160, ruling (b)). Any other disclosure, or a mismatching one, is refused (422), as is a disclosure a policy
   module refuses (`DisclosureRefused`). Bundles without the overlay behave as before. Closes #95.
 
 ### Changed
