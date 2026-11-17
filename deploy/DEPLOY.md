@@ -18,7 +18,7 @@
 | `CAPSULE_ANCHOR_PUBLIC_LOG_TIMEOUT` | env | HTTP timeout in seconds for the public-log backend (default `10`). |
 | `CAPSULE_ANCHOR_INSECURE_EPHEMERAL_KEY` | env | **Dev only.** Set `1` to allow startup without a configured signing key. Never set in production. |
 | `CAPSULE_ANCHOR_INSECURE_IN_MEMORY` | env | **Dev only.** Set `1` to allow startup without `CAPSULE_ANCHOR_DATABASE_URL`. Never set in production. |
-| `CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS` | env | Comma-separated `action_type`s whose `agent_input` a requester may disclose in a countersign submission's `disclosures` overlay (e.g. `declared_count`). Empty by default, which refuses every overlay. Set it only on a countersign instance (it has no effect on the witness) and only with a policy module registered that reads the disclosed kind. See [COUNTERSIGN.md](../COUNTERSIGN.md) §5. |
+| `CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS` | env | Comma-separated `action_type`s whose `agent_input` a requester may disclose in a countersign submission's `disclosures` overlay. Empty by default, which refuses any overlay that discloses a payload. Read only when the countersign router is mounted (`CAPSULE_ANCHOR_COUNTERSIGN=1` with strict registration), so it has no effect on a witness instance. The instance does not check that a policy module reads the kind: set it only for kinds a registered policy module reads. See [COUNTERSIGN.md](../COUNTERSIGN.md) §5. |
 
 **Fail-closed defaults:** the service refuses to start without both `CAPSULE_ANCHOR_SIGNING_KEY` and
 `CAPSULE_ANCHOR_DATABASE_URL`. Silent in-memory storage would lose the CT log on restart (prior receipts
