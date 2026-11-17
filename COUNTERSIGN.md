@@ -161,6 +161,15 @@ recompute in §3 ever runs:
    its sealed digest is refused, and so is a disclosed payload a policy module itself
    refuses (HTTP 422). Disclosure is never the default, and the requester's signature
    covers the overlay, because the bundle digest does.
+
+   `payloads_mode: "none"` describes the records embedded in the bundle; the `disclosures`
+   overlay is the only exception to it. The overlay is accepted only for record kinds the
+   named profile's policy module declares it reads (its `reads_disclosed_kinds`), so a
+   request naming no profile, or a kind that module does not read, is refused (HTTP 422):
+   nothing is disclosed that nothing reads. A module refuses a payload it must not read by
+   raising a subclass of `capsule_anchor.countersign.policy.DisclosureRefused`. A disclosed
+   payload is read in memory for the recompute only; this service stores neither the
+   overlay nor the bundle.
 2. **Issuer check.** The countersign submission's own `requester.id` (never a bundle
    field — the v2 Evidence Bundle carries no issuer identity of its own) must be
    enrolled in this instance's own issuer allowlist (§6) — a trust anchor configured

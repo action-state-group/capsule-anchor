@@ -17,6 +17,12 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Changed
 
+- **A countersign disclosure is accepted only for kinds the named profile's module reads.** A
+  `disclosures` overlay on a request naming no profile, or on a record kind the profile's
+  policy module does not list in its new optional `reads_disclosed_kinds`, is refused (422).
+  `capsule_anchor.countersign.policy.DisclosureRefused` is now the base of a module's refusal
+  and the router catches it, instead of matching a class by name; a module package's own
+  refusal must subclass it. A module that declares nothing reads no disclosure. Closes #97.
 - **The checkpoint witness accepts the CLL -02 constant `sub`.** `POST /checkpoints` now accepts a CWT
   `sub` equal to the log id (`iss`), as checkpointed-local-log -02 requires, and still accepts the
   pre-02 `<iss>#<log_size>`; any other `sub` is refused as before. Closes #93.
