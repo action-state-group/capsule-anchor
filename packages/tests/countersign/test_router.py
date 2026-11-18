@@ -434,3 +434,56 @@ def test_a_same_named_refusal_outside_the_contract_is_not_a_422(monkeypatch, req
     safe = TestClient(client.app, raise_server_exceptions=False)
     resp = safe.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
     assert resp.status_code == 500
+
+
+class _Returns(_ReadsDisclosure):
+    def __init__(self, results) -> None:
+        super().__init__(refuse=False)
+        self.results = results
+
+    def check(self, bundle, profile_id):
+        return self.results
+
+
+from capsule_anchor.countersign.results import CheckResult  # noqa: E402
+
+
+def _post_with_module_result(monkeypatch, requester_key, issuer_allowlist, results):
+    from .conftest import declared_count_bundle_raw
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
+    _registry_with(_Returns(results))
+    raw, _ = declared_count_bundle_raw()
+    return client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+
+
+def test_a_module_result_word_outside_the_vocabulary_is_a_502_naming_it(monkeypatch, requester_key, issuer_allowlist):
+    resp = _post_with_module_result(
+        monkeypatch, requester_key, issuer_allowlist, [CheckResult.model_construct(name="pack.shape", result="match", detail="")]
+    )
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert "pack/v1" in detail and "pack.shape" in detail and "'match'" in detail
+    assert "established" in detail  # names the allowed words
+
+
+def test_a_foreign_module_result_type_is_a_502(monkeypatch, requester_key, issuer_allowlist):
+    from dataclasses import dataclass
+
+    @dataclass
+    class Foreign:
+        name: str = "pack.other"
+        result: str = "match"
+
+    resp = _post_with_module_result(monkeypatch, requester_key, issuer_allowlist, [Foreign()])
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert "pack.other" in detail and "'match'" in detail
+
+
+def test_a_valid_module_result_still_signs(monkeypatch, requester_key, issuer_allowlist):
+    resp = _post_with_module_result(
+        monkeypatch, requester_key, issuer_allowlist, [CheckResult(name="pack.shape", result="established")]
+    )
+    assert resp.status_code == 200, resp.text

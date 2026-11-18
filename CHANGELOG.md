@@ -17,6 +17,10 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Changed
 
+- **A policy-module result outside the five-word vocabulary now answers 502, not 500.** A module
+  result that is not a valid `CheckResult` (a word such as `match`, or a foreign type) is refused
+  with HTTP 502 naming the profile, the check and the offending word. The vocabulary and the
+  Statement model are unchanged. Closes #99.
 - **A countersign disclosure is accepted only for kinds the named profile's module reads.** A
   `disclosures` overlay on a request naming no profile, or on a record kind the profile's
   policy module does not list in its new optional `reads_disclosed_kinds`, is refused (422).

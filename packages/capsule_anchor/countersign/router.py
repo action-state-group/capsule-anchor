@@ -32,7 +32,7 @@ from capsule_anchor.countersign.policy import (
     default_registry,
     reads_disclosed_kinds,
 )
-from capsule_anchor.countersign.recompute import recompute_statement
+from capsule_anchor.countersign.recompute import ModuleResultInvalid, recompute_statement
 from capsule_anchor.countersign.signer import Attestor, Registrar, StatementRefused, sign_countersignature
 from capsule_anchor.countersign.webhooks import (
     WebhookSubscription,
@@ -207,6 +207,8 @@ def get_router() -> APIRouter:
             # (digest mismatch, non-closed shape) by raising DisclosureRefused.
             if isinstance(exc, DisclosureRefused):
                 raise HTTPException(status_code=422, detail=f"refused: {exc}") from exc
+            if isinstance(exc, ModuleResultInvalid):
+                raise HTTPException(status_code=502, detail=f"policy module fault: {exc}") from exc
             raise
         try:
             entry = sign_countersignature(

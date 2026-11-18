@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from pydantic import ValidationError
+
 from capsule_anchor.countersign.bundle import Bundle
 from capsule_anchor.countersign.checks import (
     cadence,
@@ -21,7 +23,7 @@ from capsule_anchor.countersign.checks import (
     range_membership,
 )
 from capsule_anchor.countersign.policy import PolicyModule
-from capsule_anchor.countersign.results import CheckResult
+from capsule_anchor.countersign.results import RESULTS, CheckResult
 from capsule_anchor.countersign.statement import Scope, Statement
 
 #: Always present on a statement -- named every time, never implied by
@@ -40,6 +42,32 @@ EXCLUSIONS: tuple[str, ...] = (
 )
 
 
+class ModuleResultInvalid(ValueError):
+    """A policy module returned a check result that is not a valid
+    ``CheckResult`` (a result word outside the five-word vocabulary, a foreign
+    type). The fault is the module's, not the request's: the router answers
+    it with a 502 naming the check and the offending value, never a bare 500."""
+
+
+def _module_results(policy_module: PolicyModule, bundle: Bundle, profile_id: str) -> list[CheckResult]:
+    """The module's results, each a valid ``CheckResult`` (the contract the
+    rest of the engine reads by attribute), or ``ModuleResultInvalid``."""
+    out: list[CheckResult] = []
+    for item in policy_module.check(bundle, profile_id):
+        try:
+            if not isinstance(item, CheckResult):
+                raise TypeError(type(item).__name__)
+            out.append(CheckResult.model_validate(item.model_dump()))
+        except (TypeError, ValidationError) as exc:
+            raise ModuleResultInvalid(
+                f"the policy module for profile {profile_id!r} returned an invalid result for "
+                f"check {getattr(item, 'name', None)!r}: result {getattr(item, 'result', None)!r} "
+                f"(a {type(item).__name__}) is not a CheckResult with one of "
+                f"{', '.join(repr(r) for r in RESULTS)}"
+            ) from exc
+    return out
+
+
 def recompute_statement(
     bundle: Bundle, *, policy_module: PolicyModule, ledger_id: str, profile_id: str
 ) -> Statement:
@@ -53,13 +81,14 @@ def recompute_statement(
     v2 Evidence Bundle carries no issuer identity and no profile object of
     its own.
     """
+    module_results = _module_results(policy_module, bundle, profile_id)
     checks: list[CheckResult] = []
     checks.append(chain_consistency(bundle))
     checks.append(range_membership(bundle))
     checks.append(cadence(bundle))
     checks.append(key_hygiene(bundle))
     checks.append(profile_conformance(bundle, profile_id, policy_module))
-    checks.extend(policy_module.check(bundle, profile_id))
+    checks.extend(module_results)
 
     return Statement(
         checks=checks,
