@@ -178,6 +178,20 @@ gcloud run services delete capsule-anchor --region=us-central1 --project=PROJECT
 should default to `witness.aac`, with the old names honored via DNS mapping, not code branches.)
 
 
+## CI deploy (Steven approves each run)
+
+`.github/workflows/deploy.yml` deploys `capsule-witness` from a release tag. It never runs on push.
+
+1. Actions > deploy > Run workflow, from `main`, with the tag (`v0.1.4`).
+2. `resolve` turns the tag into a commit, refuses one that is not on `main`, and prints the commit in the run summary.
+3. The `deploy` job waits in the `production` environment until Steven approves. His approve click is the gate.
+4. It checks out exactly that commit (and stops if the tag moved meanwhile), notes the live DID document, and deploys with `gcloud run deploy capsule-witness --source . --labels git-sha=<12 chars>` (only a commit label besides the source, so env, secrets, Cloud SQL and public access stay as they are).
+5. It fails unless the latest revision carries the commit label and takes all traffic (a service pinned to an older revision by a rollback must be moved with `update-traffic --to-latest` first), `/health` says `"ok": true` and the DID document is unchanged.
+
+CI refuses to deploy while `did.json` is unreachable (it needs the identity from before); use the manual deploy above then. Rollback is the command in the section below. Google sign-in is workload identity federation; no key exists.
+
+**One-time setup, by a `fluxxom` Owner.** Run `deploy/wif-setup.sh` (it prints the commands), then `deploy/wif-setup.sh --apply`, then set the two repository variables it prints. Until then the job is skipped. The `production` environment must keep Steven as required reviewer and accept the `main` branch only (runs start from `main`), and "Allow administrators to bypass" must be off (`can_admins_bypass: false`), or an admin can skip his click. The first dispatch is the check of the role set.
+
 ## High-availability (HA)
 
 With Postgres as the backing store, multiple Cloud Run instances are safe:
