@@ -39,6 +39,13 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   `embedded`; `null` for rows stored before). Receipts are unchanged. Existing rows are not
   rewritten: new registrations only.
 
+### Fixed
+
+- **A policy-module result outside the five-word vocabulary now answers 502, not 500.** A module
+  result that is not a valid `CheckResult` (a word such as `match`, a foreign type, or a non-iterable return) is refused
+  with HTTP 502 naming the profile, the check and the offending word. The vocabulary and the
+  Statement model are unchanged. Closes #99.
+
 ### Added
 
 - **`CAPSULE_ANCHOR_STORE_EMBEDDED_PAYLOADS` (`off` | `on`) and
