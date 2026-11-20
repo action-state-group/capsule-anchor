@@ -183,8 +183,10 @@ should default to `witness.aac`, with the old names honored via DNS mapping, not
 `.github/workflows/deploy.yml` deploys `capsule-witness` from a release tag. It never runs on push.
 
 1. Actions > deploy > Run workflow, from `main`, with the tag (`v0.1.4`).
-2. The job waits in the `production` environment until Steven approves. His approve click is the gate.
-3. The job checks out the tag, notes the live DID document, deploys with `gcloud run deploy capsule-witness --source . --labels git-sha=<12 chars>` (no other flag, so env, secrets, Cloud SQL and public access stay as they are), then fails unless the service label is the tag's commit, `/health` says `"ok": true` and `/.well-known/did.json` is byte-identical to before.
+2. `resolve` turns the tag into a commit, refuses one that is not on `main`, and prints the commit in the run summary.
+3. The `deploy` job waits in the `production` environment until Steven approves. His approve click is the gate.
+4. It checks out exactly that commit (and stops if the tag moved meanwhile), notes the live DID document, and deploys with `gcloud run deploy capsule-witness --source . --labels git-sha=<12 chars>` (no other flag, so env, secrets, Cloud SQL and public access stay as they are).
+5. It fails unless the latest revision carries the commit label and takes all traffic (a service pinned to an older revision by a rollback must be moved with `update-traffic --to-latest` first), `/health` says `"ok": true` and the DID document is unchanged.
 
 Rollback is the command in the section below. Google sign-in is workload identity federation; no key exists.
 
