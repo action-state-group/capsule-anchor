@@ -178,6 +178,18 @@ gcloud run services delete capsule-anchor --region=us-central1 --project=PROJECT
 should default to `witness.aac`, with the old names honored via DNS mapping, not code branches.)
 
 
+## CI deploy (Steven approves each run)
+
+`.github/workflows/deploy.yml` deploys `capsule-witness` from a release tag. It never runs on push.
+
+1. Actions > deploy > Run workflow, from `main`, with the tag (`v0.1.4`).
+2. The job waits in the `production` environment until Steven approves. His approve click is the gate.
+3. The job checks out the tag, notes the live DID document, deploys with `gcloud run deploy capsule-witness --source . --labels git-sha=<12 chars>` (no other flag, so env, secrets, Cloud SQL and public access stay as they are), then fails unless the service label is the tag's commit, `/health` says `"ok": true` and `/.well-known/did.json` is byte-identical to before.
+
+Rollback is the command in the section below. Google sign-in is workload identity federation; no key exists.
+
+**One-time setup, by a `fluxxom` Owner.** Run `deploy/wif-setup.sh` (it prints the commands), then `deploy/wif-setup.sh --apply`, then set the two repository variables it prints. Until then the job is skipped. The `production` environment must keep Steven as required reviewer and accept `main` and `v[0-9]*` tags only. The first dispatch is the check of the role set.
+
 ## High-availability (HA)
 
 With Postgres as the backing store, multiple Cloud Run instances are safe:

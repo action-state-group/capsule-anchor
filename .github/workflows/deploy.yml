@@ -1,0 +1,87 @@
+# SPDX-License-Identifier: Apache-2.0
+# Deploys capsule-witness (witness.agentactioncapsule.org) to Cloud Run when a
+# release tag is chosen and Steven approves the run (deploy/DEPLOY.md, "CI
+# deploy"). Nothing here deploys on push.
+#
+#   - Run by hand: Actions > deploy > Run workflow, with the tag to deploy
+#     (v0.1.4, never a branch or a bare commit).
+#   - The job runs in the `production` environment, whose required reviewer is
+#     Steven. The job starts only after his approve click.
+#   - Google trusts the job through workload identity federation: the provider
+#     (deploy/wif-setup.sh) accepts only this repository, only `main`'s copy of
+#     this workflow and only the `production` environment, so the approval is
+#     what unlocks the deploy. No service-account key exists.
+#   - The deploy is `gcloud run deploy --source .` with no other flag, so the
+#     service keeps its env, secrets and Cloud SQL attachment, and the deploy
+#     leaves IAM (public access) alone.
+#   - Afterwards the job asserts the service runs the tag's commit and that
+#     /health and the DID document answer with the same identity as before.
+# Until an owner has run deploy/wif-setup.sh and set the two repository
+# variables it prints, the job is skipped.
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to deploy (for example v0.1.4)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: deploy-capsule-witness
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && vars.GCP_DEPLOY_SERVICE_ACCOUNT != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      id-token: write # the OIDC token workload identity federation exchanges
+    env:
+      TAG: ${{ inputs.tag }}
+      SERVICE: capsule-witness
+      HOST: witness.agentactioncapsule.org
+    steps:
+      - name: Refuse anything but a release tag
+        run: |
+          case "$TAG" in
+            v[0-9]*) ;;
+            *) echo "::error::tag must look like v0.1.4, got '$TAG'"; exit 1 ;;
+          esac
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - name: Record the commit being deployed
+        run: |
+          echo "SHA=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "Deploying $TAG = $(git rev-parse HEAD)"
+      - name: Record the identity the service serves now
+        run: |
+          curl -fsS "https://$HOST/.well-known/did.json" > "$RUNNER_TEMP/did-before.json"
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+      - name: Note the revision to roll back to
+        run: |
+          gcloud run revisions list --service "$SERVICE" --region us-central1 --project fluxxom --limit 3
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE" --source . --project fluxxom --region us-central1 \
+            --labels "git-sha=${SHA:0:12}" --quiet
+      - name: Assert the service runs this commit with the same identity
+        run: |
+          live="$(gcloud run services describe "$SERVICE" --project fluxxom --region us-central1 \
+            --format 'value(metadata.labels.git-sha)')"
+          test "$live" = "${SHA:0:12}" || { echo "::error::service label is '$live', expected ${SHA:0:12}"; exit 1; }
+          curl -fsS "https://$HOST/health" | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin).get("ok") is True else 1)'
+          curl -fsS "https://$HOST/.well-known/did.json" > "$RUNNER_TEMP/did-after.json"
+          diff "$RUNNER_TEMP/did-before.json" "$RUNNER_TEMP/did-after.json"
