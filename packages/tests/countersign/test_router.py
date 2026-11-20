@@ -15,6 +15,7 @@ from capsule_anchor.countersign.router import configure_issuers
 
 from .conftest import base_bundle_raw, sign_submission
 from capsule_anchor.countersign.policy import DisclosureRefused as _BaseDisclosureRefused
+from capsule_anchor.countersign.results import CheckResult
 
 
 def _submission(raw, key, *, profile_id="test/v0", **extra):
@@ -445,9 +446,6 @@ class _Returns(_ReadsDisclosure):
         return self.results
 
 
-from capsule_anchor.countersign.results import CheckResult  # noqa: E402
-
-
 def _post_with_module_result(monkeypatch, requester_key, issuer_allowlist, results):
     from .conftest import declared_count_bundle_raw
 
@@ -487,3 +485,29 @@ def test_a_valid_module_result_still_signs(monkeypatch, requester_key, issuer_al
         monkeypatch, requester_key, issuer_allowlist, [CheckResult(name="pack.shape", result="established")]
     )
     assert resp.status_code == 200, resp.text
+
+
+def test_a_non_iterable_module_return_is_a_502(monkeypatch, requester_key, issuer_allowlist):
+    resp = _post_with_module_result(monkeypatch, requester_key, issuer_allowlist, None)
+    assert resp.status_code == 502, resp.text
+    assert "pack/v1" in resp.json()["detail"]
+
+
+def test_the_module_is_called_once_so_a_later_call_cannot_bypass_validation(monkeypatch, requester_key, issuer_allowlist):
+    calls = []
+    good = [CheckResult(name="pack.shape", result="established")]
+
+    class _Flaky(_Returns):
+        def check(self, bundle, profile_id):
+            calls.append(1)
+            return good if len(calls) == 1 else [None]
+
+    from .conftest import declared_count_bundle_raw
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    monkeypatch.setenv("CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS", "declared_count")
+    _registry_with(_Flaky(good))
+    raw, _ = declared_count_bundle_raw()
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
+    assert resp.status_code == 200, resp.text
+    assert len(calls) == 1

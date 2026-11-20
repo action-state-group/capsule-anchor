@@ -53,16 +53,26 @@ def _module_results(policy_module: PolicyModule, bundle: Bundle, profile_id: str
     """The module's results, each a valid ``CheckResult`` (the contract the
     rest of the engine reads by attribute), or ``ModuleResultInvalid``."""
     out: list[CheckResult] = []
-    for item in policy_module.check(bundle, profile_id):
+    returned = policy_module.check(bundle, profile_id)
+    try:
+        items = list(returned)
+    except TypeError as exc:  # not iterable, e.g. a missing ``return`` gave None
+        raise ModuleResultInvalid(
+            f"the policy module for profile {profile_id!r} returned a non-iterable check result"
+        ) from exc
+    for item in items:
         try:
             if not isinstance(item, CheckResult):
                 raise TypeError(type(item).__name__)
             out.append(CheckResult.model_validate(item.model_dump()))
         except (TypeError, ValidationError) as exc:
+            # Bounded: a module may build these values from requester-supplied data.
+            name = repr(getattr(item, "name", None))[:80]
+            result = repr(getattr(item, "result", None))[:80]
             raise ModuleResultInvalid(
                 f"the policy module for profile {profile_id!r} returned an invalid result for "
-                f"check {getattr(item, 'name', None)!r}: result {getattr(item, 'result', None)!r} "
-                f"(a {type(item).__name__}) is not a CheckResult with one of "
+                f"check {name}: {type(item).__name__} with result {result} "
+                f"is not a CheckResult with a string name and one of "
                 f"{', '.join(repr(r) for r in RESULTS)}"
             ) from exc
     return out
@@ -87,7 +97,7 @@ def recompute_statement(
     checks.append(range_membership(bundle))
     checks.append(cadence(bundle))
     checks.append(key_hygiene(bundle))
-    checks.append(profile_conformance(bundle, profile_id, policy_module))
+    checks.append(profile_conformance(bundle, profile_id, policy_module, module_results))
     checks.extend(module_results)
 
     return Statement(

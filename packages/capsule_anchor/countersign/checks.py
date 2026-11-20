@@ -92,16 +92,24 @@ def key_hygiene(bundle: Bundle) -> CheckResult:
     )
 
 
-def profile_conformance(bundle: Bundle, profile_id: str, policy_module: PolicyModule) -> CheckResult:
+def profile_conformance(
+    bundle: Bundle,
+    profile_id: str,
+    policy_module: PolicyModule,
+    module_results: list[CheckResult] | None = None,
+) -> CheckResult:
     """Every ``action_type`` present in the bundle's records has a
-    policy-module check named after it, or reads ``not checked``. Calls
-    ``policy_module.check`` once; never interprets what a covered kind's own
+    policy-module check named after it, or reads ``not checked``. Reads
+    ``module_results`` (the module's already-validated results) when given,
+    else calls ``policy_module.check`` once; never interprets what a covered kind's own
     result says -- only whether the kind was covered at all.
     """
     kinds = sorted({r["action_type"] for r in bundle.records if isinstance(r.get("action_type"), str)})
     if not kinds:
         return CheckResult(name="profile conformance", result="not present", detail="no records in the bundle")
-    covered = {cr.name for cr in policy_module.check(bundle, profile_id)}
+    if module_results is None:
+        module_results = list(policy_module.check(bundle, profile_id))
+    covered = {cr.name for cr in module_results}
     missing = [k for k in kinds if k not in covered]
     if not missing:
         return CheckResult(
