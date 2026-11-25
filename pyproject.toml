@@ -33,7 +33,8 @@ dependencies = [
     # Signed Statement machinery only; capsule-anchor never imports
     # capsule-emit (boundary rule: the witness verifies what a stranger's
     # bytes claim, not what a trusted co-deployed library says about them).
-    "scitt-cose>=0.2.2",
+    # 0.4.0: ReceiptResult surfaces issuer/subject, which the receipt-header tests read.
+    "scitt-cose>=0.4.0",
     # Checkpoint-aware witness (stage 2, [capsule-anchor-checkpoint-aware-witness]):
     # the neutral CLL core's PURE consistency-proof verification math
     # (cll.checkpoint.core.verify_consistency) -- imported, never
