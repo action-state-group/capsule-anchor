@@ -41,6 +41,12 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Fixed
 
+- **A policy module may return its results as mappings again.** `PolicyModule.check` returns
+  `[{name, result, detail}]`; since #101 the router accepted only this package's `CheckResult`
+  model and answered a module's `dict` results with a 502, which broke capsule-engine's countersign
+  module (its results are a `dict` subclass). A mapping is now validated the same way as a
+  `CheckResult`: a result word outside the five, a missing or non-string name, or any other type
+  is still a 502 naming the check.
 - **Every COSE Receipt now carries `iss`, `sub` and `kid` (RFC 9943 Section 6).** The protected
   CWT claims gain `iss` (`did:web:<CAPSULE_ANCHOR_PUBLIC_HOST>`, the DID the instance publishes) and
   `sub` (the registered statement's own CWT subject, else its `entry_hash`) beside `iat`, and the

@@ -10,6 +10,7 @@ withheld bundle instead.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 
 from pydantic import ValidationError
@@ -51,7 +52,12 @@ class ModuleResultInvalid(ValueError):
 
 def _module_results(policy_module: PolicyModule, bundle: Bundle, profile_id: str) -> list[CheckResult]:
     """The module's results, each a valid ``CheckResult`` (the contract the
-    rest of the engine reads by attribute), or ``ModuleResultInvalid``."""
+    rest of the engine reads by attribute), or ``ModuleResultInvalid``.
+
+    ``PolicyModule.check`` returns ``[{name, result, detail}]``: each item is a
+    ``CheckResult`` or a mapping with those keys (a module package need not
+    import this one's model; capsule-engine's countersign module returns a
+    ``dict`` subclass). Either form is validated the same way."""
     out: list[CheckResult] = []
     returned = policy_module.check(bundle, profile_id)
     try:
@@ -62,13 +68,20 @@ def _module_results(policy_module: PolicyModule, bundle: Bundle, profile_id: str
         ) from exc
     for item in items:
         try:
-            if not isinstance(item, CheckResult):
+            if isinstance(item, CheckResult):
+                fields = item.model_dump()
+            elif isinstance(item, Mapping):
+                fields = dict(item)
+            else:
                 raise TypeError(type(item).__name__)
-            out.append(CheckResult.model_validate(item.model_dump()))
+            out.append(CheckResult.model_validate(fields))
         except (TypeError, ValidationError) as exc:
             # Bounded: a module may build these values from requester-supplied data.
-            name = repr(getattr(item, "name", None))[:80]
-            result = repr(getattr(item, "result", None))[:80]
+            if isinstance(item, Mapping):
+                name, result = repr(item.get("name"))[:80], repr(item.get("result"))[:80]
+            else:
+                name = repr(getattr(item, "name", None))[:80]
+                result = repr(getattr(item, "result", None))[:80]
             raise ModuleResultInvalid(
                 f"the policy module for profile {profile_id!r} returned an invalid result for "
                 f"check {name}: {type(item).__name__} with result {result} "
