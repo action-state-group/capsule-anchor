@@ -111,17 +111,25 @@ def test_first_checkpoint_for_unknown_log_id_is_first_seen(client, key):
     assert w["mmr_size"] == 100
 
 
-def test_second_checkpoint_that_extends_first_is_witnessed(client, key):
+def test_second_checkpoint_for_a_known_log_is_refused_without_naming_the_tip(client, key):
+    """capsule-anchor#110: this path's key_id is a label nothing verifies, so
+    it takes only a log's FIRST checkpoint; a later one goes to POST
+    /checkpoints. The refusal names no size or root (anyone can send this
+    payload under any log_id)."""
     cp1 = _checkpoint("log-B", mmr_size=100, prev_size=0)
     s1, b1 = _register(client, _build_statement(cp1, key))
     assert s1 == 200, b1
     assert b1["checkpoint_witness"]["status"] == "first-seen"
 
+    sth_before = client.get("/anchor/sth").json()
     cp2 = _checkpoint("log-B", mmr_size=250, prev_size=100)
     s2, b2 = _register(client, _build_statement(cp2, key))
-    assert s2 == 200, b2
-    assert b2["checkpoint_witness"]["status"] == "witnessed"
-    assert b2["leaf_index"] > b1["leaf_index"]
+    assert s2 == 409, b2
+    assert "POST /checkpoints" in b2["detail"]
+    assert "100" not in b2["detail"]
+    assert client.get("/anchor/sth").json()["tree_size"] == sth_before["tree_size"], (
+        "a refused checkpoint must NEVER be co-signed / appended to the log"
+    )
 
 
 def test_resubmitting_the_same_checkpoint_is_idempotent(client, key):
@@ -138,64 +146,13 @@ def test_resubmitting_the_same_checkpoint_is_idempotent(client, key):
 # --- rollback rejection (never co-signed) -----------------------------------
 
 
-def test_rollback_behind_the_witnessed_tip_rejected(client, key):
-    """A (self-consistent) checkpoint that re-derives from an earlier point
-    than the log's current witnessed tip -- e.g. a rolled-back/forked log
-    replaying stale state -- must be refused, not co-signed, even though the
-    checkpoint's own prev_size < mmr_size."""
-    cp1 = _checkpoint("log-D", mmr_size=100, prev_size=0)
-    s1, b1 = _register(client, _build_statement(cp1, key))
-    assert s1 == 200, b1
-    cp2 = _checkpoint("log-D", mmr_size=250, prev_size=100)
-    s2, b2 = _register(client, _build_statement(cp2, key))
-    assert s2 == 200, b2  # witnessed tip is now mmr_size=250
-
-    # sth() before the rollback attempt, to prove the log did NOT grow.
-    sth_before = client.get("/anchor/sth").json()
-
-    # Self-consistent (0 < 100) but re-derives from genesis, ignoring the
-    # already-witnessed tip at 250 -- a rollback/fork, not a valid extension.
-    # A different key_id makes this a genuinely different signing act (not a
-    # cache-hit resubmission of cp1).
-    cp_rollback = _checkpoint("log-D", mmr_size=100, prev_size=0, key_id="peer-2")
-    status, body = _register(client, _build_statement(cp_rollback, key))
-    assert status == 409, body
-    assert "rollback" in body["detail"].lower() or "extend" in body["detail"].lower()
-
-    sth_after = client.get("/anchor/sth").json()
-    assert sth_after["tree_size"] == sth_before["tree_size"], (
-        "a rejected rollback must NEVER be co-signed / appended to the log"
-    )
-
-
-def test_rollback_fork_prev_size_mismatch_rejected(client, key):
-    """A checkpoint that doesn't chain from the last witnessed state (a fork
-    or a skipped checkpoint) must be refused."""
-    cp1 = _checkpoint("log-E", mmr_size=100, prev_size=0)
-    s1, b1 = _register(client, _build_statement(cp1, key))
-    assert s1 == 200, b1
-
-    cp_fork = _checkpoint("log-E", mmr_size=300, prev_size=50)  # doesn't match witnessed 100
-    status, body = _register(client, _build_statement(cp_fork, key))
-    assert status == 409, body
-
-
-def test_rollback_check_actually_distinguishes_valid_from_invalid(client, key):
-    """Mutation-style control: the SAME log_id chain accepts a valid extension
-    but rejects an invalid one built from the same prior state -- proves the
-    409 above is caused by the consistency check, not some unrelated failure."""
-    cp1 = _checkpoint("log-F", mmr_size=10, prev_size=0)
-    s1, _ = _register(client, _build_statement(cp1, key))
-    assert s1 == 200
-
-    valid_cp2 = _checkpoint("log-F", mmr_size=20, prev_size=10)
-    s2, b2 = _register(client, _build_statement(valid_cp2, key))
-    assert s2 == 200, b2
-    assert b2["checkpoint_witness"]["status"] == "witnessed"
-
-    invalid_cp2 = _checkpoint("log-F", mmr_size=15, prev_size=0)  # stale prev_size
-    s3, b3 = _register(client, _build_statement(invalid_cp2, key))
-    assert s3 == 409, b3
+def test_first_checkpoint_of_another_log_is_still_accepted(client, key):
+    """Control for the refusal above: a log this witness does not hold yet
+    still registers, so the 409 is the known-log rule, not another failure."""
+    assert _register(client, _build_statement(_checkpoint("log-F", mmr_size=10, prev_size=0), key))[0] == 200
+    status, body = _register(client, _build_statement(_checkpoint("log-F2", mmr_size=10, prev_size=0), key))
+    assert status == 200, body
+    assert body["checkpoint_witness"]["status"] == "first-seen"
 
 
 # --- malformed self-declared checkpoints ------------------------------------

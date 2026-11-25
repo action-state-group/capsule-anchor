@@ -41,6 +41,8 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from fastapi.testclient import TestClient
 from scitt_cose.statement import build_signed_statement
 
+from .signed_read import signed_read_headers
+
 _CLL_CONTENT_TYPE = "application/cll-checkpoint+cbor"
 _WIRE_KIND = "cll-checkpoint"
 
@@ -397,6 +399,6 @@ def test_readback_exposes_continuity_grade(client, key):
     cose1 = log.checkpoint_cose(key, size=size1, prev_size=0, issued_at="2026-09-06T00:00:00Z")
     _post_checkpoint(client, cose1)
 
-    resp = client.get(f"/checkpoints/{log.log_id}")
+    resp = client.get(f"/checkpoints/{log.log_id}", headers=signed_read_headers(key, log.log_id))
     assert resp.status_code == 200, resp.text
     assert resp.json()["continuity_grade"] == CONTINUITY_GRADE_FIRST_SEEN

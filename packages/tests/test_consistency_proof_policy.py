@@ -336,31 +336,21 @@ def _legacy_first_then_second(client, key, log_id):
     return _legacy_register(client, _build_statement(_legacy_checkpoint(log_id, mmr_size=250, prev_size=100), key))
 
 
-def test_legacy_path_enforce_refuses_a_later_checkpoint_and_points_to_checkpoints(monkeypatch, key):
-    client = _client(monkeypatch, "enforce")
-    status, body = _legacy_first_then_second(client, key, "legacy-enforce")
+@pytest.mark.parametrize("policy", ["enforce", "warn", "off"])
+def test_legacy_path_refuses_a_later_checkpoint_without_naming_the_tip(monkeypatch, key, policy):
+    """capsule-anchor#110: the mmr-checkpoint statement path takes only a
+    log's first checkpoint under every policy, and its refusal names no size
+    or root -- anyone can send this payload under any log_id, so the tip
+    would show the log's cadence."""
+    client = _client(monkeypatch, policy)
+    status, body = _legacy_first_then_second(client, key, f"legacy-{policy}")
     assert status == 409, body
     detail = body["detail"]
-    assert detail["code"] == "consistency_proof_required"
-    assert detail["last_accepted_mmr_size"] == 100
-    assert "POST /checkpoints" in detail["error"]
-    assert "NEW log_id" in detail["error"]
-
-
-def test_legacy_path_warn_registers_but_logs_and_counts(monkeypatch, key, caplog):
-    client = _client(monkeypatch, "warn")
-    with caplog.at_level(logging.WARNING, logger="capsule_anchor"):
-        status, body = _legacy_first_then_second(client, key, "legacy-warn")
-    assert status == 200, body
-    assert body["checkpoint_witness"]["status"] == "witnessed"
-    assert get_service().consistency_proof_would_refuse == {"legacy-warn": 1}
-    assert "consistency_proof_required would-refuse" in caplog.text
-
-
-def test_legacy_path_off_registers_without_counting(monkeypatch, key):
-    client = _client(monkeypatch, "off")
-    status, body = _legacy_first_then_second(client, key, "legacy-off")
-    assert status == 200, body
+    assert isinstance(detail, str)
+    assert "POST /checkpoints" in detail
+    assert "100" not in detail  # the first checkpoint's mmr_size
+    assert "a" * 64 not in detail  # its root
+    assert "2026-08-22" not in detail  # its time
     assert get_service().consistency_proof_would_refuse == {}
 
 
@@ -395,4 +385,5 @@ def test_enforce_closes_the_bypass_through_the_legacy_path(monkeypatch, key):
     )
     status, body = _legacy_register(client, _build_statement(legacy, key))
     assert status == 409, body
-    assert body["detail"]["code"] == "consistency_proof_required"
+    assert "only a log's first checkpoint" in body["detail"]
+    assert str(size1) not in body["detail"]

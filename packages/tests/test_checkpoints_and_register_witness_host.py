@@ -61,6 +61,8 @@ from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption,
 from fastapi.testclient import TestClient
 from scitt_cose.statement import HDR_CWT_CLAIMS, build_signed_statement
 
+from .signed_read import signed_read_headers
+
 #: Must match capsule_anchor.anchoring.checkpoint_cose.CLL_CHECKPOINT_CONTENT_TYPE
 #: (== capsule_emit.checkpoint.cose_wire.CLL_CHECKPOINT_CONTENT_TYPE) exactly.
 _CLL_CONTENT_TYPE = "application/cll-checkpoint+cbor"
@@ -816,7 +818,7 @@ def test_readback_returns_last_checkpoint_claims_and_receipt(client, key):
     post_status, post_body = _post_checkpoint(client, cose)
     assert post_status == 200, post_body
 
-    resp = client.get("/checkpoints/log-RB")
+    resp = client.get("/checkpoints/log-RB", headers=signed_read_headers(key, "log-RB"))
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["log_id"] == "log-RB"
@@ -843,7 +845,10 @@ def test_readback_reflects_enrolled_submitters_grade(client, agentrust_key):
     assert post_status == 200, post_body
     assert post_body["grade"] == GRADE_COUNTERSIGNED_OBSERVED
 
-    resp = client.get(f"/checkpoints/{_TRACE_REGISTRY_LOG_ID}")
+    resp = client.get(
+        f"/checkpoints/{_TRACE_REGISTRY_LOG_ID}",
+        headers=signed_read_headers(agentrust_key, _TRACE_REGISTRY_LOG_ID),
+    )
     assert resp.status_code == 200, resp.text
     assert resp.json()["grade"] == GRADE_COUNTERSIGNED_OBSERVED
 
@@ -858,7 +863,7 @@ def test_readback_tracks_the_most_recently_witnessed_position(client, key):
     assert _post_checkpoint(client, cose1)[0] == 200
     assert _post_checkpoint(client, cose2)[0] == 200
 
-    body = client.get("/checkpoints/log-RB2").json()
+    body = client.get("/checkpoints/log-RB2", headers=signed_read_headers(key, "log-RB2")).json()
     assert body["mmr_size"] == 20
     assert body["equivocations"] == []
 
@@ -881,7 +886,7 @@ def test_two_checkpoints_same_position_different_root_flag_equivocation(client, 
     assert status_b == 200, body_b  # write boundary does NOT refuse (scope line)
     assert body_a["entry_hash"] != body_b["entry_hash"]
 
-    body = client.get("/checkpoints/log-EQ").json()
+    body = client.get("/checkpoints/log-EQ", headers=signed_read_headers(key, "log-EQ")).json()
     # the FIRST-seen root is preserved as "last" -- never silently
     # overwritten by a later conflicting submission
     assert body["root"] == _root_from_peaks(peaks_a).hex()
@@ -925,7 +930,7 @@ def test_equivocation_at_an_older_position_does_not_shadow_the_latest_checkpoint
     assert _post_checkpoint(client, cose_10b)[0] == 200
     assert _post_checkpoint(client, cose_20)[0] == 200
 
-    body = client.get("/checkpoints/log-EQ3").json()
+    body = client.get("/checkpoints/log-EQ3", headers=signed_read_headers(key, "log-EQ3")).json()
     assert body["mmr_size"] == 20
     assert len(body["equivocations"]) == 1
     assert body["equivocations"][0]["mmr_size"] == 10

@@ -408,6 +408,27 @@ class ConsistencyProofRequiredError(ContinuityMismatchError):
     code = "consistency_proof_required"
 
 
+def _is_raw_key_hex(value: str) -> bool:
+    """A stored ``key_id`` that is a raw 32-byte Ed25519 key in hex, as the COSE
+    path stores it, not a self-asserted label."""
+    return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
+class LogKeyMismatchError(RollbackError):
+    """A ``POST /checkpoints`` checkpoint for an UNENROLLED ``log_id`` this
+    witness already holds, signed by a key other than the one that signed
+    that log's first accepted checkpoint (capsule-anchor#110, ruling u226:
+    a log's checkpoints answer only the log's own key). Refused before any
+    continuity check, so the refusal never names the log's size, root or
+    time, and a stranger can neither read the log's tip from a 409 body nor
+    plant an equivocation or a newer record under another key's log id.
+
+    An enrolled ``log_id`` never raises this: its pinned key already
+    decides (``submitters.py``), and rotating the pin is operator config."""
+
+    code = "log_key_mismatch"
+
+
 #: ``AnchorerService(consistency_proof_policy=...)`` / env
 #: ``CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF``: what this witness does with a
 #: NATIVE log's later checkpoint (its ``log_id`` already accepted) that
@@ -1215,9 +1236,9 @@ class AnchorerService:
         never spuriously re-evaluated on a resubmission.
 
         A statement that self-declares ``artifact_type: mmr-checkpoint`` in its
-        payload additionally runs the checkpoint witness check (monotonic size +
-        chain-linkage vs. the log's last witnessed checkpoint for that ``log_id``)
-        BEFORE being appended -- a rollback/fork raises ``RollbackError`` and is
+        payload additionally runs the checkpoint witness check BEFORE being
+        appended: it takes only a log's first checkpoint, and one for a
+        ``log_id`` this witness already holds raises ``RollbackError`` and is
         never co-signed. Any other type registers exactly as before.
 
         ``checkpoint_continuity`` (only ``witness_checkpoint`` passes this):
@@ -1277,6 +1298,8 @@ class AnchorerService:
 
         logged_at = _now()
         with self._lock:
+            if checkpoint_continuity is not None:
+                self._check_log_key(checkpoint_continuity)
             # Atomic dedup + append. The get_statement check MUST be inside the
             # same lock as the append: otherwise two concurrent submissions of
             # the same NEW statement both see "not present" and both append,
@@ -1314,6 +1337,19 @@ class AnchorerService:
                     )
                     if stored is not None:
                         cached_continuity_grade = stored.get("continuity_grade")
+                    elif self._bound_tip(checkpoint_continuity) is None:
+                        # A log's FIRST checkpoint whose digest was already
+                        # registered (on /register): it still binds the log
+                        # to its key, or the log would stay open to any key
+                        # (capsule-anchor#110).
+                        self._store.put_checkpoint_witness(
+                            checkpoint_continuity["log_id"],
+                            mmr_size=checkpoint_continuity["mmr_size"],
+                            mmr_root=checkpoint_continuity["root"],
+                            key_id=checkpoint_continuity["key_id"],
+                            timestamp=checkpoint_continuity["timestamp"],
+                        )
+                        cached_continuity_grade = CONTINUITY_GRADE_FIRST_SEEN
                 return StatementRegistration(
                     receipt=receipt_bytes,
                     entry_hash=returned_hash,
@@ -1475,33 +1511,58 @@ class AnchorerService:
     def _check_checkpoint_consistency(self, cp: dict) -> str:
         """Validate ``cp`` against the log's last witnessed checkpoint for
         ``cp['log_id']``. Returns ``"first-seen"`` (nothing to be consistent
-        with -- honestly graded, no continuity implied) or ``"witnessed"``.
-        Raises ``RollbackError`` -- caller must not append/countersign on that
-        path. Caller holds ``self._lock``.
+        with -- honestly graded, no continuity implied); a ``log_id`` this
+        witness already holds raises ``RollbackError`` -- caller must not
+        append/countersign on that path. Caller holds ``self._lock``.
         """
         prev = self._store.get_checkpoint_witness(cp["log_id"])
         if prev is None:
             return "first-seen"
-        # This path carries no consistency proof at all, so under the
-        # consistency-proof policy it can take only a log's FIRST checkpoint.
-        # It shares the per-log_id tip with POST /checkpoints: without this a
-        # checkpoint refused there could be registered here instead.
-        self._apply_consistency_proof_policy_legacy(cp, prev)
-        # Peak-consistency, given the accepted wire shape (no prev_root is
-        # transmitted): the new checkpoint's prev_size must chain exactly from
-        # the size we last witnessed, and mmr_size must strictly increase.
-        # This is the strongest check available without re-deriving peaks
-        # ourselves -- it rejects both a rollback (mmr_size not increasing)
-        # and a fork/gap (prev_size pointing anywhere other than our last
-        # witnessed state).
-        if cp["prev_size"] != prev["mmr_size"] or cp["mmr_size"] <= prev["mmr_size"]:
-            raise RollbackError(
-                f"checkpoint for log_id={cp['log_id']!r} does not extend the last "
-                f"witnessed checkpoint (witnessed mmr_size={prev['mmr_size']}, "
-                f"submitted prev_size={cp['prev_size']}, mmr_size={cp['mmr_size']}) "
-                "-- refusing to co-sign a rollback or fork"
+        # This path carries no consistency proof and its key_id is a
+        # self-asserted label nothing verifies, so it takes only a log's
+        # FIRST checkpoint. Its refusal names no size or root: anyone can
+        # send this payload under any log_id, and the tip would show the
+        # log's cadence (capsule-anchor#110, ruling u226).
+        raise RollbackError(
+            f"this witness already holds a checkpoint for log_id={cp['log_id']!r}; the "
+            "mmr-checkpoint statement path takes only a log's first checkpoint. Submit later "
+            "checkpoints to POST /checkpoints, signed by the log's own key"
+        )
+
+    def _bound_tip(self, cp: dict) -> dict | None:
+        """The continuity tip ``cp`` is checked against. For an UNENROLLED
+        ``log_id``, a tip whose ``key_id`` is a legacy self-asserted label (not
+        a 32-byte key) counts as none: it binds no key and proves nothing, so
+        the next verified checkpoint is graded first-seen and binds its own
+        key. Caller holds ``self._lock``."""
+        tip = self._store.get_checkpoint_witness(cp["log_id"])
+        if tip is not None and cp.get("grade") is None and not _is_raw_key_hex(tip["key_id"]):
+            return None
+        return tip
+
+    def _check_log_key(self, cp: dict) -> None:
+        """Ownership before anything else about ``cp``'s log (capsule-anchor#110):
+        an UNENROLLED ``log_id`` belongs to the key of its stored continuity
+        tip, the first key this witness accepted for it. Raises
+        ``LogKeyMismatchError`` for any other key. Runs before the receipt
+        cache too, so a digest pre-registered on ``/register`` cannot carry a
+        stranger's checkpoint onto the read surface.
+
+        Enrolled submitters carry a grade and are verified under their
+        pinned key, which may be rotated, so they skip this. A tip whose
+        ``key_id`` is not a 32-byte key (the legacy ``mmr-checkpoint`` path
+        stores a self-asserted label) binds nothing. Caller holds
+        ``self._lock``."""
+        if cp.get("grade") is not None:
+            return
+        tip = self._bound_tip(cp)
+        if tip is None:
+            return
+        if cp["key_id"] != tip["key_id"]:
+            raise LogKeyMismatchError(
+                f"log_id {cp['log_id']!r} belongs to another checkpoint key; a log that "
+                "changes its key must start a NEW log_id"
             )
-        return "witnessed"
 
     def _check_checkpoint_continuity(self, cp: dict) -> str:
         """Stage-2 continuity gate for ``POST /checkpoints``
@@ -1560,7 +1621,7 @@ class AnchorerService:
             the PURE, imported ``cll.checkpoint.core.verify_consistency``
             function, never a capsule-anchor reimplementation of MMR math.
         """
-        prev = self._store.get_checkpoint_witness(cp["log_id"])
+        prev = self._bound_tip(cp)
         if prev is None:
             return CONTINUITY_GRADE_FIRST_SEEN
 
@@ -1637,26 +1698,6 @@ class AnchorerService:
                 ". Attach a consistency_proof from the accepted mmr_size; a node that lost "
                 "its local log state must start a NEW log_id"
             )
-        self._refuse_or_count(log_id, prev, message)
-
-    def _apply_consistency_proof_policy_legacy(self, cp: dict, prev: dict) -> None:
-        """The ``mmr-checkpoint`` statement path on
-        ``/transparency/register-statement``: it carries no
-        ``consistency_proof``, so a checkpoint for a ``log_id`` this witness
-        already holds is refused under ``enforce`` (logged and counted under
-        ``warn``) exactly as a proof-less one on ``POST /checkpoints`` is.
-        Caller holds ``self._lock``."""
-        if self.consistency_proof_policy == CONSISTENCY_PROOF_POLICY_OFF:
-            return
-        log_id = cp["log_id"]
-        message = (
-            f"mmr-checkpoint statement for log_id={log_id!r}: this witness already accepted a "
-            f"checkpoint for that log_id (accepted mmr_size={prev['mmr_size']}, root="
-            f"{prev['mmr_root']}), and every checkpoint after a log's first must carry a "
-            "consistency_proof, which this path cannot. Submit it to POST /checkpoints with a "
-            "consistency_proof from the accepted mmr_size; a node that lost its local log state "
-            "must start a NEW log_id"
-        )
         self._refuse_or_count(log_id, prev, message)
 
     def _refuse_or_count(self, log_id: str, prev: dict, message: str) -> None:
@@ -1756,6 +1797,17 @@ class AnchorerService:
         if last is None:
             return None
         return {**last, "equivocations": self._store.get_checkpoint_equivocations(log_id)}
+
+    def checkpoint_owner_key(self, log_id: str) -> str | None:
+        """The hex key an UNENROLLED ``log_id`` is bound to: the key of the
+        stored continuity tip, which ``_check_checkpoint_continuity`` lets no
+        other key move (capsule-anchor#110). ``None`` if this witness holds no
+        checkpoint for ``log_id``. Enrolled log ids use their pinned key
+        instead (``submitters.py``), never this."""
+        tip = self._store.get_checkpoint_witness(log_id)
+        if tip is None or not _is_raw_key_hex(tip["key_id"]):
+            return None
+        return tip["key_id"]
 
     def prune_expired_statements(self, now: datetime | None = None) -> int:
         """Age out cached receipts older than ``CAPSULE_ANCHOR_ENTRY_RETENTION``.

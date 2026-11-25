@@ -373,15 +373,24 @@ Checks performed, in order:
    `mmr_root` is 64-hex, `log_id`/`key_id`/`timestamp` are non-empty strings.
 2. **Witness consistency** (409 on failure, response `detail` explains why): unknown
    `log_id` → accepted and graded `"first-seen"` — honestly, since there is nothing yet to
-   be consistent with, no continuity is implied. A known `log_id` must chain exactly from
-   the last checkpoint this service witnessed (`prev_size` equal to that checkpoint's
-   `mmr_size`, and `mmr_size` strictly greater) → graded `"witnessed"`. Anything else — a
-   rollback, a fork, a gap — is refused and **never co-signed**: no log append, no
-   signature, `tree_size` does not change.
+   be consistent with, no continuity is implied. A `log_id` this service already holds is
+   refused and **never co-signed**: no log append, no signature, `tree_size` does not
+   change. Its `key_id` is a label nothing verifies, so this path takes only a log's first
+   checkpoint, and the refusal names no size or root; later checkpoints go to
+   `POST /checkpoints`, signed by the log's own key.
 
-This is a chain-linkage check against what THIS service has witnessed, not an independent
-recomputation of the MMR's peaks (the witness never sees the raw log) — the strongest
-check available given the accepted wire shape above.
+### Reading a log's checkpoint back
+
+`GET /checkpoints/{log_id}` answers anyone with the log's `equivocations`: every position where two different roots were witnessed, so anyone can watch a log for forks. The last checkpoint's size, root, time and receipt would show how often the log is stamped, so they answer only a read signed with the log's own checkpoint key: the pinned key of an enrolled submitter, otherwise the key the log is bound to (below). The read sends two headers:
+
+```
+Checkpoint-Read-Time: <unix seconds, decimal, no leading zeros>
+Checkpoint-Read-Signature: <Ed25519 signature, base64url without padding>
+```
+
+The signature covers the UTF-8 bytes of `capsule-anchor/checkpoint-read/v1`, a line feed, the log id as the route receives it (decoded, so how `/` is percent-encoded does not matter), a line feed, and the time. The witness accepts a time within 300 seconds of its clock, so a captured header pair can be replayed for that long: send it only over HTTPS and never log it. A read with the headers that is not valid gets 403 with a `code` of `read_signature_malformed`, `read_time_skew` or `read_key_mismatch`, and nothing about the log. Every answer is `Cache-Control: no-store`. This is a small scheme of its own, not RFC 9421 HTTP Message Signatures. `packages/tests/vectors/checkpoint-read-vectors.json` holds test vectors.
+
+**A log id belongs to its key.** Once the witness holds a checkpoint for an unenrolled log id, `POST /checkpoints` refuses a checkpoint for that log id signed by any other key (403, `code: log_key_mismatch`), before any continuity check, so the refusal names no size, root or time. An unenrolled log cannot change its key: a log with a new key starts a new log id, or enrolls. An enrolled log id follows its pinned key. The legacy `mmr-checkpoint` statement on `/transparency/register-statement` takes only a log's first checkpoint, and its refusal names no size or root either.
 
 ### Every route
 
@@ -395,7 +404,7 @@ From `packages/capsule_anchor/app.py` and `anchoring/router.py` (and
 | `GET`  | `/health`, `/healthz`, `/livez` | Health: signing-key source, `key_id`, tree size, storage, entry retention, latest tree head, and the public-log state when that is on |
 | `GET`  | `/.well-known/did.json` | Authority key as a DID document (JWK OKP), from `CAPSULE_ANCHOR_PUBLIC_HOST` |
 | `POST` | `/checkpoints` | Register a CLL checkpoint (above) |
-| `GET`  | `/checkpoints/{log_id}` | The last checkpoint witnessed for `log_id`, with any equivocations recorded (404 if never seen) |
+| `GET`  | `/checkpoints/{log_id}` | Any equivocations recorded for `log_id`, to anyone; the last checkpoint witnessed for it only to a read signed with the log's own key (see [Reading a log's checkpoint back](#reading-a-logs-checkpoint-back)). 404 if never seen, to any reader, so whether a log id was ever witnessed is public |
 | `POST` | `/register` | Register a 64-hex digest (above) |
 | `POST` | `/v1/digest` | Legacy alias of `/register` |
 | `GET`  | `/v1/inclusion/{capsule_id}` | Inclusion proof and receipt for a registered digest (404 if absent); never registers |
