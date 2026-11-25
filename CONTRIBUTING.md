@@ -43,7 +43,7 @@ No CLA is required — the DCO is the whole agreement.
 
 ## Dev setup
 
-Before every push, run `scripts/check.sh` (about 40 s on an Apple-silicon Mac). It runs what CI runs on pull requests and main, except the neutrality scan, which needs the `NEUTRALITY_TERMS` repository secret.
+Before every push, run `scripts/check.sh` (about 40 s on an Apple-silicon Mac). It runs what CI runs on pull requests and main, except the neutrality scan, which needs the `NEUTRALITY_TERMS` repository secret, and the DCO sign-off check.
 
 ```bash
 pip install -e ".[dev]"       # editable install + dev tools

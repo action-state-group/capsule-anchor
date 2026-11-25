@@ -3,7 +3,7 @@
 # Runs locally what CI runs on pull requests and main: python.yml on Python
 # 3.11 and 3.12, hostname-lint.yml and neutrality.yml's scanner self-test.
 # Not run: neutrality.yml's scan itself, which needs the NEUTRALITY_TERMS
-# repository secret. Needs uv, which provides both Pythons.
+# repository secret, and dco.yml's sign-off check. Needs uv, which provides both Pythons.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp="$(mktemp -d)"
