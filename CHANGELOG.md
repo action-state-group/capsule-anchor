@@ -24,7 +24,10 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   under every consistency-proof policy, and its refusal no longer names the tip.
 - **Upgrade note:** a watcher built for the old answer reads the unsigned answer as a log
   whose size went to zero. Upgrade such a watcher to sign its read with the log's key before
-  deploying this witness.
+  deploying this witness. The binding uses the key already stored in each log's continuity
+  tip, which before this change could be an earlier key: before deploying, check that the
+  logs you depend on are bound to the key that signs them now (OPERATOR_GUIDE, "Before
+  deploying the log-to-key binding").
 
 ### Added
 

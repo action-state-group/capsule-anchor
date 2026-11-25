@@ -298,9 +298,10 @@ class CheckpointWitnessInfo(BaseModel):
     """Witness outcome for a submitted ``mmr-checkpoint`` statement.
 
     ``status`` is ``"first-seen"`` (unknown ``log_id`` -- nothing to be
-    consistent with; no continuity is implied), ``"witnessed"`` (extends the
-    last checkpoint we saw for this ``log_id``), or ``"already-registered"``
-    (idempotent resubmission of a previously-accepted checkpoint).
+    consistent with; no continuity is implied) or ``"already-registered"``
+    (idempotent resubmission of a previously-accepted checkpoint). A later
+    checkpoint for a ``log_id`` this witness already holds is refused (409):
+    this path takes only a log's first checkpoint (capsule-anchor#110).
     """
 
     log_id: str
@@ -542,18 +543,6 @@ class CheckpointReadBackResponse(BaseModel):
     continuity_grade: str | None = None
 
 
-def _hex_key(key_hex: str | None) -> bytes | None:
-    """A stored ``key_id`` as a raw Ed25519 key, or ``None`` when it is not
-    one (the legacy ``mmr-checkpoint`` path stores a self-asserted label)."""
-    if key_hex is None:
-        return None
-    try:
-        raw = bytes.fromhex(key_hex)
-    except ValueError:
-        return None
-    return raw if len(raw) == 32 else None
-
-
 def get_router() -> APIRouter:
     router = APIRouter(prefix="/anchor", tags=["anchoring"])
 
@@ -734,8 +723,9 @@ def get_router() -> APIRouter:
 
         A statement whose payload self-declares ``artifact_type: mmr-checkpoint``
         additionally goes through the checkpoint witness surface: 400 if the
-        checkpoint payload is malformed, 409 if it doesn't extend the log's last
-        witnessed checkpoint for its ``log_id`` (rollback/fork -- never co-signed).
+        checkpoint payload is malformed, 409 if this witness already holds a
+        checkpoint for its ``log_id`` (only a log's first checkpoint is taken
+        here; never co-signed, and the refusal names no size or root).
         """
         if not _POST_LIMITER.is_allowed():
             raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
@@ -1152,7 +1142,8 @@ def get_router() -> APIRouter:
                 headers={"Cache-Control": "no-store"},
             )
         entry = get_submitters().get(log_id)
-        key = entry.pubkey if entry is not None else _hex_key(svc.checkpoint_owner_key(log_id))
+        owner = svc.checkpoint_owner_key(log_id)
+        key = entry.pubkey if entry is not None else (bytes.fromhex(owner) if owner else None)
         try:
             signed = verify_read(
                 log_id,

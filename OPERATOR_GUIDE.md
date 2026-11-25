@@ -80,20 +80,19 @@ What step 4 applies to depends on the submitter's accumulator:
 whose payload declares `"artifact_type": "mmr-checkpoint"` must be well-formed (400
 otherwise). This path carries no previous root and no `consistency_proof`, and it shares
 the last-accepted checkpoint per `log_id` with `POST /checkpoints`. For a `log_id` this
-witness has never seen, the checkpoint registers (`first-seen`). For a known `log_id`:
-
-- under `enforce`, it is refused (409, `code: consistency_proof_required`), and the
-  message points to `POST /checkpoints`, where a later checkpoint can carry its proof;
-- under `warn` (the default) or `off`, its `prev_size` must equal the `mmr_size` of the
-  last checkpoint accepted for that `log_id` and its `mmr_size` must be strictly greater
-  (409 otherwise). The check is on size only. Under `warn` the witness also logs that
-  `enforce` would have refused it.
+witness has never seen, the checkpoint registers (`first-seen`). For a known `log_id` it is
+refused under every policy (409), with a message that points to `POST /checkpoints` and
+names no size or root: its `key_id` is a label nothing verifies, so it cannot show that a
+later checkpoint comes from the log's owner (capsule-anchor#110).
 
 Resubmitting a checkpoint already registered returns its original Receipt in every mode.
 
-The policy is open as to who may submit: outside the enrolled-submitter allowlist, any
-key may register a checkpoint for any `log_id`. It constrains what is registered, not who
-registers it.
+**Who may submit.** Outside the enrolled-submitter allowlist, any key may register the
+FIRST checkpoint for a `log_id`; that key then owns it. A later `POST /checkpoints`
+checkpoint for the `log_id` signed by any other key is refused (403,
+`code: log_key_mismatch`), naming no size, root or time, and an unenrolled log cannot change
+its key: a log with a new key starts a new `log_id` or enrolls. Ownership is first come, so
+keep a `log_id` to yourself, or enroll it, until its first checkpoint is accepted.
 
 **Signed Statements on `/transparency/register-statement`: embedded payloads.** A statement
 up to 64 KB is registered; its signature is not verified. When it names a CWT `sub`, it is
@@ -198,7 +197,7 @@ is missing — never silently degraded.
 | `CAPSULE_ANCHOR_STH_REFRESH_INTERVAL` | No | Background STH refresh interval in seconds (default `60`). |
 | `CAPSULE_ANCHOR_ENTRY_RETENTION` | No | Entry-retention window: `unlimited` (default) or a positive integer number of seconds. See "Retention" in §4 "Operate". Defaults to today's behavior — unset changes nothing on upgrade. |
 | `CAPSULE_ANCHOR_ENTRY_RETENTION_SWEEP_INTERVAL` | No | Seconds between background retention sweeps (default `3600`). Only read — and only starts a thread — when `CAPSULE_ANCHOR_ENTRY_RETENTION` is set. |
-| `CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF` | No | `off`, `warn` (default) or `enforce`. What `POST /checkpoints` does with a native CLL log's checkpoint that carries no `consistency_proof` when this witness already accepted a checkpoint for its `log_id`. `off` registers it; `warn` registers it and logs a `consistency_proof_required would-refuse` warning with a per-`log_id` count; `enforce` refuses it (409, `code: consistency_proof_required`). The same applies to an `mmr-checkpoint` statement on `/transparency/register-statement` for a `log_id` already held, since that path carries no proof. Foreign accumulators and the JSON wire form are never affected. Any other value fails startup. |
+| `CAPSULE_ANCHOR_REQUIRE_CONSISTENCY_PROOF` | No | `off`, `warn` (default) or `enforce`. What `POST /checkpoints` does with a native CLL log's checkpoint that carries no `consistency_proof` when this witness already accepted a checkpoint for its `log_id`. `off` registers it; `warn` registers it and logs a `consistency_proof_required would-refuse` warning with a per-`log_id` count; `enforce` refuses it (409, `code: consistency_proof_required`). An `mmr-checkpoint` statement on `/transparency/register-statement` for a `log_id` already held is refused under every policy. Foreign accumulators and the JSON wire form are never affected. Any other value fails startup. |
 | `CAPSULE_ANCHOR_CHECKPOINT_SUBMITTERS_FILE` | No | Path to a JSON array of enrolled submitter entries. If absent, the in-package default is used; if empty, all `log_id`s use the open self-asserted-key behavior. |
 | `CAPSULE_ANCHOR_PUBLIC_LOG` | No | `rekor` or `none` (default `none`). Publishes this witness's own STHs to an external public log — see §6 "Plurality" and `docs/architecture/18-public-log-anchor.md`. Refuses to start with `rekor` if the signing key is ephemeral. |
 | `CAPSULE_ANCHOR_REKOR_URL` | No | Rekor instance base URL (default `https://rekor.sigstore.dev`). Only read when `CAPSULE_ANCHOR_PUBLIC_LOG=rekor`. |
@@ -588,6 +587,22 @@ entries) carries the same `key_id` as a JSON field.
      all it needs and all it can use.
    - **Out-of-band publication:** publish retired public keys (with `key_id`, raw hex,
      and rotation date) in your `CHANGELOG.md` or a `keys/` directory in this repo.
+
+### Before deploying the log-to-key binding
+
+From capsule-anchor#110 on, an unenrolled `log_id` belongs to the key in its stored
+continuity tip (`checkpoint_witnesses.key_id`). Before this change a log could change keys,
+and the tip moves only on a first-seen or continuity-witnessed checkpoint, so a tip can hold
+an earlier key. For each log whose owner must keep posting and reading, check before the
+deploy that the tip names the key that signs the log's checkpoints now (its Ed25519 public
+key, 64 lowercase hex):
+
+```sql
+SELECT log_id, key_id, mmr_size FROM checkpoint_witnesses WHERE log_id = '<log id>';
+```
+
+A log whose tip names another key gets 403 `log_key_mismatch` on its next checkpoint and
+`read_key_mismatch` on a signed read after the deploy; it starts a new `log_id`.
 
 ### Recovery after a failed checkpoint
 

@@ -146,18 +146,6 @@ def test_resubmitting_the_same_checkpoint_is_idempotent(client, key):
 # --- rollback rejection (never co-signed) -----------------------------------
 
 
-def test_rollback_fork_prev_size_mismatch_rejected(client, key):
-    """A checkpoint that doesn't chain from the last witnessed state (a fork
-    or a skipped checkpoint) must be refused."""
-    cp1 = _checkpoint("log-E", mmr_size=100, prev_size=0)
-    s1, b1 = _register(client, _build_statement(cp1, key))
-    assert s1 == 200, b1
-
-    cp_fork = _checkpoint("log-E", mmr_size=300, prev_size=50)  # doesn't match witnessed 100
-    status, body = _register(client, _build_statement(cp_fork, key))
-    assert status == 409, body
-
-
 def test_first_checkpoint_of_another_log_is_still_accepted(client, key):
     """Control for the refusal above: a log this witness does not hold yet
     still registers, so the 409 is the known-log rule, not another failure."""

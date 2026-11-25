@@ -175,6 +175,16 @@ def test_malformed_read_headers_are_refused(client, key):
         assert resp.json()["detail"]["code"] == CODE_MALFORMED, headers
 
 
+@pytest.mark.parametrize("length", [1, 85, 87, 88])
+def test_signature_of_the_wrong_length_is_malformed_not_an_error(client, key, length):
+    _post(client, key, "gate-len", 10)
+    t = signed_read_headers(key, "gate-len")[READ_TIME_HEADER]
+    resp = client.get("/checkpoints/gate-len", headers={READ_TIME_HEADER: t, READ_SIGNATURE_HEADER: "A" * length})
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["code"] == CODE_MALFORMED
+    assert resp.headers["cache-control"] == "no-store"
+
+
 def test_duplicate_read_headers_are_refused(client, key):
     _post(client, key, "gate-8", 10)
     good = signed_read_headers(key, "gate-8")
@@ -286,6 +296,47 @@ def test_strangers_proof_carrying_checkpoint_does_not_get_the_tip(client, key):
     assert body["detail"]["code"] == "log_key_mismatch"
     _assert_names_nothing_about(body, log.root_at(size1).hex())
     assert "last_accepted" not in json.dumps(body)
+
+
+@pytest.mark.parametrize("stranger_size", [10, 50])
+def test_a_digest_preregistered_on_register_does_not_carry_a_strangers_checkpoint(client, key, stranger_size):
+    """The receipt cache answers a digest already registered: the ownership
+    check runs before it, so a stranger who first registers its checkpoint's
+    digest on /register still cannot put that checkpoint on the owner's log."""
+    from capsule_anchor.anchoring.service import _checkpoint_digest
+
+    _post(client, key, "owned-cache", 10)
+    stranger = Ed25519PrivateKey.generate()
+    cose = _checkpoint_cose(stranger, log_id="owned-cache", mmr_size=stranger_size,
+                            new_peaks=_peaks_for(f"cache-{stranger_size}"))
+    digest = _checkpoint_digest(parse_and_verify_checkpoint_cose(cose, allowlist=SubmitterAllowlist.from_list([])))
+    assert client.post("/register", json={"capsule_id": digest}).status_code == 200
+
+    status, body = _post_checkpoint(client, cose)
+    assert status == 403, body
+    assert body["detail"]["code"] == "log_key_mismatch"
+    owner = client.get("/checkpoints/owned-cache", headers=signed_read_headers(key, "owned-cache")).json()
+    assert owner["mmr_size"] == 10
+    assert owner["equivocations"] == []
+
+
+def test_owners_resubmission_still_returns_its_stamp(client, key):
+    cose = _checkpoint_cose(key, log_id="owned-again", mmr_size=10, new_peaks=_peaks_for("again"))
+    s1, b1 = _post_checkpoint(client, cose)
+    s2, b2 = _post_checkpoint(client, cose)
+    assert s1 == s2 == 200
+    assert b2["receipt_b64"] == b1["receipt_b64"]
+
+
+def test_a_legacy_label_binds_no_key(client, key):
+    """The legacy mmr-checkpoint path stores a self-asserted key_id label: it
+    must not lock the log's real key out."""
+    from .test_checkpoint_witness import _build_statement, _register
+    from .test_checkpoint_witness import _checkpoint as _legacy_checkpoint
+
+    status, body = _register(client, _build_statement(_legacy_checkpoint("labelled", mmr_size=5, prev_size=0), key))
+    assert status == 200, body
+    _post(client, key, "labelled", 10, prev_size=5, prev_peaks=_peaks_for("labelled-5"))
 
 
 # --- every store binds the same way -----------------------------------------

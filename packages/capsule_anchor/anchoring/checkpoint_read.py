@@ -81,11 +81,14 @@ def verify_read(
     time_value, signature_value = time_values[0].strip(), signature_values[0].strip()
     if not _DECIMAL.fullmatch(time_value):
         raise ReadRefused(CODE_MALFORMED, f"{READ_TIME_HEADER} must be unix seconds in decimal")
-    if not _B64URL.fullmatch(signature_value):
-        raise ReadRefused(CODE_MALFORMED, f"{READ_SIGNATURE_HEADER} must be unpadded base64url")
-    signature = base64.urlsafe_b64decode(signature_value + "=" * (-len(signature_value) % 4))
-    if len(signature) != 64:
-        raise ReadRefused(CODE_MALFORMED, f"{READ_SIGNATURE_HEADER} must carry a 64-byte Ed25519 signature")
+    # 64 bytes encode to exactly 86 unpadded base64url characters; checking
+    # the length first means the decode below cannot fail on padding.
+    if len(signature_value) != 86 or not _B64URL.fullmatch(signature_value):
+        raise ReadRefused(
+            CODE_MALFORMED,
+            f"{READ_SIGNATURE_HEADER} must be a 64-byte Ed25519 signature in unpadded base64url",
+        )
+    signature = base64.urlsafe_b64decode(signature_value + "==")
     if abs(now - int(time_value)) > READ_WINDOW_SECONDS:
         raise ReadRefused(
             CODE_TIME_SKEW,

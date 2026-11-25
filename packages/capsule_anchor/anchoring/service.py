@@ -408,6 +408,12 @@ class ConsistencyProofRequiredError(ContinuityMismatchError):
     code = "consistency_proof_required"
 
 
+def _is_raw_key_hex(value: str) -> bool:
+    """A stored ``key_id`` that is a raw 32-byte Ed25519 key in hex, as the COSE
+    path stores it, not a self-asserted label."""
+    return len(value) == 64 and all(c in "0123456789abcdef" for c in value)
+
+
 class LogKeyMismatchError(RollbackError):
     """A ``POST /checkpoints`` checkpoint for an UNENROLLED ``log_id`` this
     witness already holds, signed by a key other than the one that signed
@@ -1292,6 +1298,8 @@ class AnchorerService:
 
         logged_at = _now()
         with self._lock:
+            if checkpoint_continuity is not None:
+                self._check_log_key(checkpoint_continuity)
             # Atomic dedup + append. The get_statement check MUST be inside the
             # same lock as the append: otherwise two concurrent submissions of
             # the same NEW statement both see "not present" and both append,
@@ -1508,6 +1516,30 @@ class AnchorerService:
             "checkpoints to POST /checkpoints, signed by the log's own key"
         )
 
+    def _check_log_key(self, cp: dict) -> None:
+        """Ownership before anything else about ``cp``'s log (capsule-anchor#110):
+        an UNENROLLED ``log_id`` belongs to the key of its stored continuity
+        tip, the first key this witness accepted for it. Raises
+        ``LogKeyMismatchError`` for any other key. Runs before the receipt
+        cache too, so a digest pre-registered on ``/register`` cannot carry a
+        stranger's checkpoint onto the read surface.
+
+        Enrolled submitters carry a grade and are verified under their
+        pinned key, which may be rotated, so they skip this. A tip whose
+        ``key_id`` is not a 32-byte key (the legacy ``mmr-checkpoint`` path
+        stores a self-asserted label) binds nothing. Caller holds
+        ``self._lock``."""
+        if cp.get("grade") is not None:
+            return
+        tip = self._store.get_checkpoint_witness(cp["log_id"])
+        if tip is None or not _is_raw_key_hex(tip["key_id"]):
+            return
+        if cp["key_id"] != tip["key_id"]:
+            raise LogKeyMismatchError(
+                f"log_id {cp['log_id']!r} belongs to another checkpoint key; a log that "
+                "changes its key must start a NEW log_id"
+            )
+
     def _check_checkpoint_continuity(self, cp: dict) -> str:
         """Stage-2 continuity gate for ``POST /checkpoints``
         ([capsule-anchor-checkpoint-aware-witness]). Caller holds ``self._lock``
@@ -1568,16 +1600,6 @@ class AnchorerService:
         prev = self._store.get_checkpoint_witness(cp["log_id"])
         if prev is None:
             return CONTINUITY_GRADE_FIRST_SEEN
-
-        # Ownership before any continuity diagnostic (capsule-anchor#110): an
-        # unenrolled log_id belongs to the key of its first accepted
-        # checkpoint. Enrolled submitters carry a grade and are verified
-        # under their pinned key, which may be rotated, so they skip this.
-        if cp.get("grade") is None and cp["key_id"] != prev["key_id"]:
-            raise LogKeyMismatchError(
-                f"log_id {cp['log_id']!r} belongs to another checkpoint key; a log that "
-                "changes its key must start a NEW log_id"
-            )
 
         proof = cp.get("consistency_proof")
         if proof is None:
@@ -1759,7 +1781,9 @@ class AnchorerService:
         checkpoint for ``log_id``. Enrolled log ids use their pinned key
         instead (``submitters.py``), never this."""
         tip = self._store.get_checkpoint_witness(log_id)
-        return tip["key_id"] if tip is not None else None
+        if tip is None or not _is_raw_key_hex(tip["key_id"]):
+            return None
+        return tip["key_id"]
 
     def prune_expired_statements(self, now: datetime | None = None) -> int:
         """Age out cached receipts older than ``CAPSULE_ANCHOR_ENTRY_RETENTION``.
