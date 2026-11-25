@@ -27,12 +27,13 @@ from capsule_anchor.countersign.config import disclosable_kinds
 from capsule_anchor.countersign.issuers import IssuerAllowlist
 from capsule_anchor.countersign.policy import (
     DisclosureRefused,
+    ModuleResultInvalid,
     NullPolicyModule,
     PolicyRegistry,
     default_registry,
     reads_disclosed_kinds,
 )
-from capsule_anchor.countersign.recompute import ModuleResultInvalid, recompute_statement
+from capsule_anchor.countersign.recompute import recompute_statement
 from capsule_anchor.countersign.signer import Attestor, Registrar, StatementRefused, sign_countersignature
 from capsule_anchor.countersign.webhooks import (
     WebhookSubscription,

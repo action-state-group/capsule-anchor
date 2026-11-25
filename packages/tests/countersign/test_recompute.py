@@ -110,7 +110,7 @@ def test_module_mapping_results_keep_their_detail_and_default_it():
     """The signed statement's wire form omits ``detail``, so this reads the
     validated results directly: a mapping's ``detail`` is kept, and a mapping
     without one gets the model's default."""
-    from capsule_anchor.countersign.recompute import _module_results
+    from capsule_anchor.countersign.policy import module_results
     from capsule_anchor.countersign.results import CheckResult
 
     class _Dict(dict):
@@ -120,8 +120,36 @@ def test_module_mapping_results_keep_their_detail_and_default_it():
         def check(self, bundle, profile_id):
             return [_Dict(name="a", result="established", detail="d"), {"name": "b", "result": "not present"}]
 
-    out = _module_results(_Module(), None, "pack/v1")
+    out = module_results(_Module(), None, "pack/v1")
     assert out == [
         CheckResult(name="a", result="established", detail="d"),
         CheckResult(name="b", result="not present", detail=""),
     ]
+
+
+def test_profile_conformance_fallback_accepts_mapping_results_and_refuses_bad_words(valid_bundle_raw):
+    """Called without precomputed results, profile_conformance validates the
+    module's results the way the router does: a mapping counts as coverage,
+    a word outside the five raises ModuleResultInvalid."""
+    import pytest
+
+    from capsule_anchor.countersign.checks import profile_conformance
+    from capsule_anchor.countersign.policy import ModuleResultInvalid
+    from capsule_anchor.countersign.recompute import ModuleResultInvalid as reexported
+
+    assert reexported is ModuleResultInvalid
+    bundle = parse_bundle(copy.deepcopy(valid_bundle_raw))
+    kinds = sorted({r["action_type"] for r in bundle.records})
+
+    class _Maps:
+        def check(self, bundle, profile_id):
+            return [{"name": k, "result": "established"} for k in kinds]
+
+    assert profile_conformance(bundle, "pack/v1", _Maps()).result == "established"
+
+    class _Bad:
+        def check(self, bundle, profile_id):
+            return [{"name": kinds[0], "result": "match"}]
+
+    with pytest.raises(ModuleResultInvalid):
+        profile_conformance(bundle, "pack/v1", _Bad())
