@@ -44,7 +44,6 @@ import contextlib
 import hashlib
 import sqlite3
 import threading
-import time
 from collections.abc import Iterator
 from datetime import datetime
 
@@ -124,7 +123,7 @@ class InMemoryLogStore:
         return self._log[log_index] if 0 <= log_index < len(self._log) else None
 
     @contextlib.contextmanager
-    def writer_lock(self) -> Iterator[None]:
+    def writer_lock(self, timeout_s: float = 0.0) -> Iterator[None]:  # noqa: ARG002
         """One process holds this store: the service lock already serializes."""
         yield
 
@@ -632,7 +631,7 @@ class SqliteLogStore:
         return self._row_to_entry(row) if row is not None else None
 
     @contextlib.contextmanager
-    def writer_lock(self) -> Iterator[None]:
+    def writer_lock(self, timeout_s: float = 0.0) -> Iterator[None]:  # noqa: ARG002
         """A SQLite file serves one process: the service lock serializes."""
         yield
 
@@ -1101,7 +1100,7 @@ class PostgresLogStore:
         # writer_lock state: nesting depth, and the connection whose session
         # holds the advisory lock (None when not held).
         self._writer_depth = 0
-        self._writer_conn: object | None = None
+        self._writer_lost = False
         # autocommit=True: explicit conn.transaction() blocks own each write;
         # reads happen outside a transaction (no read-snapshot overhead).
         self._conn = _psycopg.connect(database_url, autocommit=True)
@@ -1112,11 +1111,15 @@ class PostgresLogStore:
     # ------------------------------------------------------------------
 
     def _reconnect(self) -> None:
-        """Replace the stale connection with a fresh one."""
+        """Replace the stale connection with a fresh one. Inside a writer
+        section the advisory lock went with the old session, so the section
+        is marked lost and its later writes refuse (``_transact``)."""
         try:
             self._conn.close()
         except Exception:  # noqa: BLE001, S110
             pass
+        if self._writer_depth:
+            self._writer_lost = True
         self._conn = self._pg.connect(self._database_url, autocommit=True)
 
     def _read(self, sql: str, params: tuple = ()) -> object:
@@ -1133,10 +1136,16 @@ class PostgresLogStore:
             with self._conn.transaction():
                 fn()  # type: ignore[operator]
 
+        if self._writer_depth and self._writer_lost:
+            raise WriterBusy("the writer lock was lost with its connection")
         try:
             _run()
         except self._pg.OperationalError:
             self._reconnect()
+            if self._writer_depth:
+                # Never replay a write without the advisory lock: another
+                # instance may hold it now (capsule-anchor#109).
+                raise WriterBusy("the connection dropped inside the writer section") from None
             _run()
 
     def _init_schema(self) -> None:
@@ -1341,10 +1350,6 @@ class PostgresLogStore:
             entry.prev_log_hash,
         )
         with self._lock:
-            if self._writer_depth and self._writer_conn is not self._conn:
-                # The advisory lock went with a reconnected session: another
-                # instance may be writing now.
-                raise WriterBusy("the writer lock was lost with its connection")
             try:
                 self._transact(
                     lambda: self._conn.execute(
@@ -1371,41 +1376,47 @@ class PostgresLogStore:
     def writer_lock(self, timeout_s: float = WRITER_LOCK_TIMEOUT_S) -> Iterator[None]:
         """Serialize the registration section across instances
         (capsule-anchor#109): a session-level advisory lock on this store's
-        one connection. Re-entrant within the process (the service's RLock
-        already serializes threads). Raises ``WriterBusy`` when it cannot be
-        taken within ``timeout_s``; an ``append_entry`` after the connection
-        was replaced raises ``WriterBusy`` too, since the lock went with it."""
+        one connection. Postgres queues waiters in order, so a busy instance
+        cannot starve the others. Re-entrant within the process; the caller
+        holds the service lock, so one thread enters at a time.
+
+        Raises ``WriterBusy`` when the lock is not granted within
+        ``timeout_s``. If the connection drops inside the section, the lock
+        went with it: later writes in the section raise ``WriterBusy`` and
+        nothing is replayed (``_transact``)."""
         with self._lock:
             if self._writer_depth:
                 self._writer_depth += 1
-                acquired = False
             else:
-                acquired = True
-        if acquired:
-            deadline = time.monotonic() + timeout_s
-            while True:
-                with self._lock:
-                    got = self._read("SELECT pg_try_advisory_lock(%s)", (_WRITER_LOCK_KEY,)).fetchone()[0]
-                    if got:
-                        self._writer_depth = 1
-                        self._writer_conn = self._conn
-                        break
-                if time.monotonic() >= deadline:
-                    raise WriterBusy("another instance holds the log writer lock")
-                time.sleep(0.02)
+                timeout_ms = max(1, int(timeout_s * 1000))
+                try:
+                    with self._conn.transaction():
+                        # SET LOCAL ends with this transaction; the advisory
+                        # lock is session-level and outlives it.
+                        self._conn.execute(f"SET LOCAL lock_timeout = {timeout_ms}")
+                        self._conn.execute("SELECT pg_advisory_lock(%s)", (_WRITER_LOCK_KEY,))
+                except self._pg.errors.LockNotAvailable as exc:
+                    raise WriterBusy("another instance holds the log writer lock") from exc
+                except self._pg.OperationalError as exc:
+                    self._reconnect()
+                    raise WriterBusy("the connection dropped while taking the writer lock") from exc
+                self._writer_depth = 1
+                self._writer_lost = False
         try:
             yield
         finally:
             with self._lock:
                 self._writer_depth -= 1
                 if self._writer_depth == 0:
-                    conn, self._writer_conn = self._writer_conn, None
-                    if conn is self._conn:
+                    lost, self._writer_lost = self._writer_lost, False
+                    if not lost:
                         try:
                             self._conn.execute("SELECT pg_advisory_unlock(%s)", (_WRITER_LOCK_KEY,))
                         except self._pg.Error:
-                            # The session is gone, and its lock with it.
-                            pass
+                            # An unlock that did not complete may leave the
+                            # session holding the lock: drop the session so
+                            # the lock goes with it.
+                            self._reconnect()
 
     def all_entries(self) -> list[TransparencyLogEntry]:
         with self._lock:

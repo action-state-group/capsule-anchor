@@ -201,7 +201,7 @@ With Postgres as the backing store, multiple Cloud Run instances are safe:
   Postgres advisory lock (`PostgresLogStore.writer_lock`), so instances append one at a time.
   `log_index` is the BIGINT primary key as a backstop: an index taken anyway (an instance
   without the lock, during a rollout) is refused with 429 and `Retry-After`, never a 500, and
-  a request that waits more than 10 seconds for the lock gets the same answer.
+  a request that waits more than 10 seconds in all for the instance's own queue and the lock gets the same answer. Postgres grants the lock to waiting instances in turn.
 - **Dedup**: the `submitted_statements` table uses `ON CONFLICT (entry_hash) DO NOTHING`, so
   duplicate submissions from concurrent instances are idempotent.
 - **STH refresh**: each instance re-signs and persists the Signed Tree Head on its own

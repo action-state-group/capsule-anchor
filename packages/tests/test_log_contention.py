@@ -171,6 +171,32 @@ def test_a_replayed_commit_of_our_own_entry_is_success_not_a_second_leaf():
     assert svc.verify_log()
 
 
+def test_busy_checkpoint_post_answers_429_with_retry_after(monkeypatch):
+    from capsule_anchor.anchoring import router
+    from capsule_anchor.app import create_app
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from fastapi.testclient import TestClient
+
+    from .test_checkpoints_and_register_witness_host import _checkpoint_cose, _peaks_for, _post_checkpoint
+
+    client = TestClient(create_app())
+    svc = router.get_service()
+
+    def busy(*_a, **_k):
+        raise WriterBusy("another instance holds the log writer lock")
+
+    monkeypatch.setattr(svc, "witness_checkpoint", busy)
+    key = Ed25519PrivateKey.generate()
+    resp = client.post(
+        "/checkpoints",
+        content=_checkpoint_cose(key, log_id="busy-log", mmr_size=3, new_peaks=_peaks_for("busy")),
+        headers={"Content-Type": "application/cll-checkpoint+cbor"},
+    )
+    assert resp.status_code == 429, resp.text
+    assert resp.headers["retry-after"] == "2"
+    assert _post_checkpoint  # the helper module is the same one the witness tests use
+
+
 def test_busy_answers_429_with_retry_after(monkeypatch):
     from capsule_anchor.anchoring import router
     from capsule_anchor.app import create_app
@@ -222,8 +248,10 @@ def test_a_second_instance_sees_the_first_instances_statement_and_tip(tmp_path):
 
 # --- Postgres: the cross-instance writer lock ---------------------------------
 
-_PG_URL = os.environ.get("CAPSULE_ANCHOR_DATABASE_URL")
-_pg_required = pytest.mark.skipif(not _PG_URL, reason="CAPSULE_ANCHOR_DATABASE_URL not set")
+# These tests TRUNCATE every table, so they run only against a database named
+# for tests, never the application's CAPSULE_ANCHOR_DATABASE_URL.
+_PG_URL = os.environ.get("CAPSULE_ANCHOR_TEST_DATABASE_URL")
+_pg_required = pytest.mark.skipif(not _PG_URL, reason="CAPSULE_ANCHOR_TEST_DATABASE_URL not set")
 
 
 def _pg_pair():
@@ -302,3 +330,159 @@ def test_pg_parallel_registrations_on_two_instances_never_fail():
     assert [e.log_index for e in entries] == list(range(len(entries)))
     assert len({e.payload_hash for e in entries}) == len(entries), "a statement landed at two leaves"
     assert services[0].verify_log()
+
+
+@_pg_required
+def test_pg_waiters_are_served_in_order_not_starved():
+    """One instance runs short sections back to back; the other still gets
+    the lock well before its timeout, because Postgres queues waiters."""
+    import time as _time
+
+    one, two = _pg_pair()
+    stop = threading.Event()
+
+    def stream():
+        while not stop.is_set():
+            with one.writer_lock(timeout_s=5.0):
+                _time.sleep(0.005)
+
+    t = threading.Thread(target=stream)
+    t.start()
+    try:
+        _time.sleep(0.1)
+        start = _time.monotonic()
+        with two.writer_lock(timeout_s=3.0):
+            waited = _time.monotonic() - start
+    finally:
+        stop.set()
+        t.join(10)
+    assert waited < 1.0, waited
+
+
+@_pg_required
+def test_pg_a_failed_unlock_drops_the_session_so_the_lock_is_free():
+    one, two = _pg_pair()
+
+    class _UnlockFails:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args, **kwargs):
+            if "pg_advisory_unlock" in sql:
+                raise one._pg.OperationalError("unlock interrupted")  # noqa: SLF001
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    with one.writer_lock():
+        one._conn = _UnlockFails(one._conn)  # noqa: SLF001
+    with two.writer_lock(timeout_s=2.0):
+        pass
+
+
+@_pg_required
+def test_pg_a_dropped_connection_inside_the_section_refuses_further_writes():
+    one, two = _pg_pair()
+    svc = AnchorerService(attestor=AttestorService(), store=one)
+    svc.register_signed_statement_full(_digest("before-drop"))
+    with pytest.raises(WriterBusy):
+        with one.writer_lock():
+            pid = one._conn.execute("SELECT pg_backend_pid()").fetchone()[0]  # noqa: SLF001
+            two._conn.execute("SELECT pg_terminate_backend(%s)", (pid,))  # noqa: SLF001
+            entry = one.get_entry(0)  # reconnects: the lock went with the old session
+            one.append_entry(entry.model_copy(update={"log_index": 1}))
+    assert two.size() == 1
+    with two.writer_lock(timeout_s=2.0):
+        pass
+
+
+def _cp(key, log, size, prev_size, issued_at, proof=None):
+    from capsule_anchor.anchoring.checkpoint_cose import parse_and_verify_checkpoint_cose
+    from capsule_anchor.anchoring.submitters import SubmitterAllowlist
+
+    return parse_and_verify_checkpoint_cose(
+        log.checkpoint_cose(key, size=size, prev_size=prev_size, issued_at=issued_at, consistency_proof=proof),
+        allowlist=SubmitterAllowlist.from_list([]),
+    )
+
+
+@_pg_required
+def test_pg_two_first_keys_for_one_log_on_two_instances_bind_exactly_one():
+    from capsule_anchor.anchoring.service import LogKeyMismatchError
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from .test_checkpoint_continuity import _Log
+
+    one, two = _pg_pair()
+    attestor = AttestorService()
+    services = [AnchorerService(attestor=attestor, store=one), AnchorerService(attestor=attestor, store=two)]
+    for round_ in range(5):
+        logs = [_Log(f"race-first-{round_}"), _Log(f"race-first-{round_}")]
+        sizes = [log.grow_leaves(2 + i) for i, log in enumerate(logs)]
+        cps = [_cp(Ed25519PrivateKey.generate(), logs[i], sizes[i], 0, "2026-11-25T00:00:00Z") for i in range(2)]
+        outcomes: list[str] = []
+        barrier = threading.Barrier(2)
+
+        def submit(i):
+            barrier.wait()
+            try:
+                services[i].witness_checkpoint(cps[i])
+                outcomes.append("ok")
+            except LogKeyMismatchError:
+                outcomes.append("refused")
+
+        threads = [threading.Thread(target=submit, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        assert sorted(outcomes) == ["ok", "refused"], outcomes
+
+
+@_pg_required
+def test_pg_two_successors_of_one_tip_on_two_instances_are_never_both_accepted():
+    """A fork: two different checkpoints, each with a valid proof that it
+    extends the same accepted tip, reach two instances at once. Without one
+    writer across instances both pass the continuity check against the tip
+    they read and both are co-signed; with it, the second sees the first as
+    the tip and is refused."""
+    from capsule_anchor.anchoring.service import ContinuityMismatchError
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from .test_checkpoint_continuity import _Log, _proof_claim
+
+    one, two = _pg_pair()
+    attestor = AttestorService()
+    services = [AnchorerService(attestor=attestor, store=one), AnchorerService(attestor=attestor, store=two)]
+    key = Ed25519PrivateKey.generate()
+    for round_ in range(5):
+        log_id = f"fork-{round_}"
+        a, b = _Log(log_id), _Log(log_id)  # same leaves, then they diverge in length
+        base = a.grow_leaves(1)
+        assert b.grow_leaves(1) == base
+        services[0].witness_checkpoint(_cp(key, a, base, 0, "2026-11-25T00:00:00Z"))
+        size_a, size_b = a.grow_leaves(1), b.grow_leaves(2)
+        cps = [
+            _cp(key, a, size_a, base, "2026-11-25T00:01:00Z", _proof_claim(a.proof(base, size_a))),
+            _cp(key, b, size_b, base, "2026-11-25T00:01:00Z", _proof_claim(b.proof(base, size_b))),
+        ]
+        outcomes: list[str] = []
+        barrier = threading.Barrier(2)
+
+        def submit(i, cps=cps, outcomes=outcomes, barrier=barrier):
+            barrier.wait()
+            try:
+                services[i].witness_checkpoint(cps[i])
+                outcomes.append("ok")
+            except ContinuityMismatchError:
+                outcomes.append("refused")
+            except BaseException as exc:  # noqa: BLE001
+                outcomes.append(repr(exc))
+
+        threads = [threading.Thread(target=submit, args=(i,)) for i in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(30)
+        assert sorted(outcomes) == ["ok", "refused"], (round_, outcomes)

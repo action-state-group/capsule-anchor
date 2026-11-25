@@ -37,10 +37,12 @@ key, staying decoupled from the parallel key-custody subsystem.
 from __future__ import annotations
 
 import collections.abc
+import contextlib
 import hashlib
 import json
 import logging
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -62,7 +64,7 @@ from capsule_anchor.contracts.types import (
 from . import ct
 from .payload_policy import EmbeddedPayloadPolicy, stored_payload
 from .ct_cache import CachedTree
-from .store import InMemoryLogStore, LogIndexTaken, SqliteLogStore, WriterBusy
+from .store import WRITER_LOCK_TIMEOUT_S, InMemoryLogStore, LogIndexTaken, SqliteLogStore, WriterBusy
 from .submitters import GRADE_COUNTERSIGNED_OBSERVED
 from .tsa import TsaError, timestamp_root_hash, tsa_enabled
 
@@ -840,7 +842,7 @@ class AnchorerService:
             countersignature=countersignature,
         )
 
-        with self._lock, self._store.writer_lock():
+        with self._writer_section():
             # 2. Append to the append-only log under the lock so the chain and
             #    log_index assignment are atomic.
             entry = self._append_log(_LOG_KIND_ROOT, cs_payload, attested_at)
@@ -908,6 +910,22 @@ class AnchorerService:
             return self._store.get_capsule_id(log_index)
 
     # --- append-only log internals -----------------------------------------
+    @contextlib.contextmanager
+    def _writer_section(self) -> collections.abc.Iterator[None]:
+        """The service lock, then the store's cross-instance writer lock,
+        under one deadline (``WRITER_LOCK_TIMEOUT_S``): a request queued
+        behind this instance's own writers does not then wait the full
+        timeout again for the database lock. Raises ``WriterBusy`` (429)
+        when the deadline passes (capsule-anchor#109)."""
+        deadline = time.monotonic() + WRITER_LOCK_TIMEOUT_S
+        if not self._lock.acquire(timeout=WRITER_LOCK_TIMEOUT_S):
+            raise WriterBusy("this instance's writers are queued past the deadline")
+        try:
+            with self._store.writer_lock(timeout_s=max(0.001, deadline - time.monotonic())):
+                yield
+        finally:
+            self._lock.release()
+
     def _sync_log(self) -> None:
         """Bring the cached tree up to the stored log: read only the entries
         after the ones already cached. The log is append-only and never
@@ -1346,7 +1364,7 @@ class AnchorerService:
         # too (capsule-anchor#109): the dedup check, the checkpoint key and
         # continuity checks, the append, the receipt, the tree head and the
         # tip update all see the state the previous writer left.
-        with self._lock, self._store.writer_lock():
+        with self._writer_section():
             if checkpoint_continuity is not None:
                 self._check_log_key(checkpoint_continuity)
             # Atomic dedup + append. The get_statement check MUST be inside the
