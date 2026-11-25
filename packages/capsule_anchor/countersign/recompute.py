@@ -10,10 +10,7 @@ withheld bundle instead.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from datetime import datetime, timezone
-
-from pydantic import ValidationError
 
 from capsule_anchor.countersign.bundle import Bundle
 from capsule_anchor.countersign.checks import (
@@ -23,8 +20,9 @@ from capsule_anchor.countersign.checks import (
     profile_conformance,
     range_membership,
 )
-from capsule_anchor.countersign.policy import PolicyModule
-from capsule_anchor.countersign.results import RESULTS, CheckResult
+# ModuleResultInvalid lived here in v0.1.5 and v0.1.6; still importable from here.
+from capsule_anchor.countersign.policy import ModuleResultInvalid, PolicyModule, module_results  # noqa: F401
+from capsule_anchor.countersign.results import CheckResult
 from capsule_anchor.countersign.statement import Scope, Statement
 
 #: Always present on a statement -- named every time, never implied by
@@ -43,54 +41,6 @@ EXCLUSIONS: tuple[str, ...] = (
 )
 
 
-class ModuleResultInvalid(ValueError):
-    """A policy module returned a check result that is not a valid
-    ``CheckResult`` (a result word outside the five-word vocabulary, a foreign
-    type). The fault is the module's, not the request's: the router answers
-    it with a 502 naming the check and the offending value, never a bare 500."""
-
-
-def _module_results(policy_module: PolicyModule, bundle: Bundle, profile_id: str) -> list[CheckResult]:
-    """The module's results, each a valid ``CheckResult`` (the contract the
-    rest of the engine reads by attribute), or ``ModuleResultInvalid``.
-
-    ``PolicyModule.check`` returns ``[{name, result, detail}]``: each item is a
-    ``CheckResult`` or a mapping with those keys (a module package need not
-    import this one's model; capsule-engine's countersign module returns a
-    ``dict`` subclass). Either form is validated the same way."""
-    out: list[CheckResult] = []
-    returned = policy_module.check(bundle, profile_id)
-    try:
-        items = list(returned)
-    except TypeError as exc:  # not iterable, e.g. a missing ``return`` gave None
-        raise ModuleResultInvalid(
-            f"the policy module for profile {profile_id!r} returned a non-iterable check result"
-        ) from exc
-    for item in items:
-        try:
-            if isinstance(item, CheckResult):
-                fields = item.model_dump()
-            elif isinstance(item, Mapping):
-                fields = dict(item)
-            else:
-                raise TypeError(type(item).__name__)
-            out.append(CheckResult.model_validate(fields))
-        except (TypeError, ValidationError) as exc:
-            # Bounded: a module may build these values from requester-supplied data.
-            if isinstance(item, Mapping):
-                name, result = repr(item.get("name"))[:80], repr(item.get("result"))[:80]
-            else:
-                name = repr(getattr(item, "name", None))[:80]
-                result = repr(getattr(item, "result", None))[:80]
-            raise ModuleResultInvalid(
-                f"the policy module for profile {profile_id!r} returned an invalid result for "
-                f"check {name}: {type(item).__name__} with result {result} "
-                f"is not a CheckResult with a string name and one of "
-                f"{', '.join(repr(r) for r in RESULTS)}"
-            ) from exc
-    return out
-
-
 def recompute_statement(
     bundle: Bundle, *, policy_module: PolicyModule, ledger_id: str, profile_id: str
 ) -> Statement:
@@ -104,14 +54,14 @@ def recompute_statement(
     v2 Evidence Bundle carries no issuer identity and no profile object of
     its own.
     """
-    module_results = _module_results(policy_module, bundle, profile_id)
+    results = module_results(policy_module, bundle, profile_id)
     checks: list[CheckResult] = []
     checks.append(chain_consistency(bundle))
     checks.append(range_membership(bundle))
     checks.append(cadence(bundle))
     checks.append(key_hygiene(bundle))
-    checks.append(profile_conformance(bundle, profile_id, policy_module, module_results))
-    checks.extend(module_results)
+    checks.append(profile_conformance(bundle, profile_id, policy_module, results))
+    checks.extend(results)
 
     return Statement(
         checks=checks,

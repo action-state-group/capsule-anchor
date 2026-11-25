@@ -41,6 +41,13 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Fixed
 
+- **`PolicyModule.check` is typed for what it may return.** Its return type is now
+  `Sequence[CheckResult | Mapping[str, object]]` (it said `list[CheckResult]`), and COUNTERSIGN.md
+  §7 says the same. The result validation moves to `policy.module_results` and
+  `policy.ModuleResultInvalid` (`recompute.ModuleResultInvalid` still imports).
+  `checks.profile_conformance` called without precomputed results now validates the same way:
+  a mapping result counts as coverage, and a word outside the five raises `ModuleResultInvalid`.
+  Closes #106.
 - **A policy module may return its results as mappings again.** `PolicyModule.check` returns
   `[{name, result, detail}]`; since #101 the router accepted only this package's `CheckResult`
   model and answered a module's `dict` results with a 502, which broke capsule-engine's countersign
