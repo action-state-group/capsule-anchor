@@ -32,6 +32,7 @@ from agent_action_capsule.canonical import jcs
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from capsule_anchor.anchoring.service import AnchorerService
+from capsule_anchor.anchoring.service import build_cose_receipt as _build_cose_receipt
 from capsule_anchor.attestation.service import AttestorService
 from capsule_anchor.countersign.bundle import Bundle
 from capsule_anchor.countersign.results import CheckResult
@@ -78,8 +79,20 @@ def _sign(seed: bytes, message: bytes) -> str:
     return Ed25519PrivateKey.from_private_bytes(seed).sign(message).hex()
 
 
+def _pre_103_receipt(**kwargs):
+    """The receipt as the log built it on ``LOG_CLOCK``, before capsule-anchor#103
+    added ``iss``/``sub``/``kid``: the vector is shared byte for byte with
+    capsulectl, so it keeps the receipt shape of the date it records."""
+    for name in ("iss", "sub", "kid"):
+        kwargs.pop(name, None)
+    return _build_cose_receipt(**kwargs)
+
+
 def build_vector() -> dict:
-    with mock.patch("capsule_anchor.anchoring.service._now", return_value=LOG_CLOCK):
+    with (
+        mock.patch("capsule_anchor.anchoring.service._now", return_value=LOG_CLOCK),
+        mock.patch("capsule_anchor.anchoring.service.build_cose_receipt", _pre_103_receipt),
+    ):
         return _build_vector()
 
 
