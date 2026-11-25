@@ -487,6 +487,38 @@ def test_a_valid_module_result_still_signs(monkeypatch, requester_key, issuer_al
     assert resp.status_code == 200, resp.text
 
 
+class _DictResult(dict):
+    """A module package's own result type, as capsule-engine's countersign
+    module returns it: a ``dict`` subclass, not this package's model."""
+
+
+def test_a_mapping_module_result_signs_and_is_folded_unchanged(monkeypatch, requester_key, issuer_allowlist):
+    resp = _post_with_module_result(
+        monkeypatch,
+        requester_key,
+        issuer_allowlist,
+        [_DictResult(name="pack.shape", result="established", detail="d"), {"name": "pack.plain", "result": "not present"}],
+    )
+    assert resp.status_code == 200, resp.text
+    checks = {c["name"]: c for c in resp.json()["countersignatures"][0]["statement"]["checks"]}
+    assert checks["pack.shape"]["result"] == "established"
+    assert checks["pack.plain"]["result"] == "not present"
+
+
+def test_a_mapping_module_result_outside_the_vocabulary_is_a_502_naming_it(monkeypatch, requester_key, issuer_allowlist):
+    resp = _post_with_module_result(
+        monkeypatch, requester_key, issuer_allowlist, [_DictResult(name="pack.shape", result="match")]
+    )
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert "pack/v1" in detail and "pack.shape" in detail and "'match'" in detail
+
+
+def test_a_mapping_module_result_without_a_name_is_a_502(monkeypatch, requester_key, issuer_allowlist):
+    resp = _post_with_module_result(monkeypatch, requester_key, issuer_allowlist, [{"result": "established"}])
+    assert resp.status_code == 502, resp.text
+
+
 def test_a_non_iterable_module_return_is_a_502(monkeypatch, requester_key, issuer_allowlist):
     resp = _post_with_module_result(monkeypatch, requester_key, issuer_allowlist, None)
     assert resp.status_code == 502, resp.text
