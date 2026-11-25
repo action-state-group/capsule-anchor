@@ -404,7 +404,7 @@ From `packages/capsule_anchor/app.py` and `anchoring/router.py` (and
 | `GET`  | `/health`, `/healthz`, `/livez` | Health: signing-key source, `key_id`, tree size, storage, entry retention, latest tree head, and the public-log state when that is on |
 | `GET`  | `/.well-known/did.json` | Authority key as a DID document (JWK OKP), from `CAPSULE_ANCHOR_PUBLIC_HOST` |
 | `POST` | `/checkpoints` | Register a CLL checkpoint (above) |
-| `GET`  | `/checkpoints/{log_id}` | Any equivocations recorded for `log_id`, to anyone; the last checkpoint witnessed for it only to a read signed with the log's own key (see [Reading a log's checkpoint back](#reading-a-logs-checkpoint-back)). 404 if never seen |
+| `GET`  | `/checkpoints/{log_id}` | Any equivocations recorded for `log_id`, to anyone; the last checkpoint witnessed for it only to a read signed with the log's own key (see [Reading a log's checkpoint back](#reading-a-logs-checkpoint-back)). 404 if never seen, to any reader, so whether a log id was ever witnessed is public |
 | `POST` | `/register` | Register a 64-hex digest (above) |
 | `POST` | `/v1/digest` | Legacy alias of `/register` |
 | `GET`  | `/v1/inclusion/{capsule_id}` | Inclusion proof and receipt for a registered digest (404 if absent); never registers |

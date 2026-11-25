@@ -92,7 +92,8 @@ FIRST checkpoint for a `log_id`; that key then owns it. A later `POST /checkpoin
 checkpoint for the `log_id` signed by any other key is refused (403,
 `code: log_key_mismatch`), naming no size, root or time, and an unenrolled log cannot change
 its key: a log with a new key starts a new `log_id` or enrolls. Ownership is first come, so
-keep a `log_id` to yourself, or enroll it, until its first checkpoint is accepted.
+keep a `log_id` to yourself, or enroll it, until its first checkpoint is accepted; if
+another key took it first, start a new `log_id` or enroll.
 
 **Signed Statements on `/transparency/register-statement`: embedded payloads.** A statement
 up to 64 KB is registered; its signature is not verified. When it names a CWT `sub`, it is
@@ -738,8 +739,9 @@ provide.
 twice with different roots, the witness records both as an equivocation event (in the
 `checkpoint_equivocations` table) and surfaces them on
 `GET /checkpoints/{log_id}` under the `equivocations` field, to any reader, signed or
-not. Only the log's own key can submit at its positions (an unenrolled log id is bound
-to its first key), so an equivocation is a fork by the log itself. This is the
+not. From capsule-anchor#110 on, only the log's own key can submit at its positions (an
+unenrolled log id is bound to its first key), so a new equivocation is a fork by the log
+itself; one recorded earlier may have been planted under its id by another key. This is the
 detect-and-surface mechanism; refusing the write on equivocation is planned for a
 later stage.
 
