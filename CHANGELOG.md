@@ -41,6 +41,13 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Fixed
 
+- **Every COSE Receipt now carries `iss`, `sub` and `kid` (RFC 9943 Section 6).** The protected
+  CWT claims gain `iss` (`did:web:<CAPSULE_ANCHOR_PUBLIC_HOST>`, the DID the instance publishes) and
+  `sub` (the registered statement's own CWT subject, else its `entry_hash`) beside `iat`, and the
+  protected header gains `kid` (4), the authority key's `key_id`. Receipts already issued are
+  unchanged, and a re-submitted statement still gets its first receipt. Found by an outside
+  interop (case 06). Closes #103.
+
 - **A policy-module result outside the five-word vocabulary now answers 502, not 500.** A module
   result that is not a valid `CheckResult` (a word such as `match`, a foreign type, or a non-iterable return) is refused
   with HTTP 502 naming the profile, the check and the offending word. The vocabulary and the

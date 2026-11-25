@@ -638,13 +638,12 @@ def get_router() -> APIRouter:
         the key_id a relying party sees on a JSON ``Signature`` object: an STH,
         an ``/anchor/anchor`` receipt, a transparency-log entry).
 
-        A COSE Receipt is NOT one of those: ``build_cose_receipt`` writes only
-        ``alg`` (1), ``vds`` (395) and the optional ``iat``/grade/continuity
-        labels into the protected header -- never a COSE ``kid`` (4). A relying
-        party verifying a COSE Receipt resolves the key from HERE (or from
-        ``/.well-known/did.json``), never from the receipt itself, and across a
-        rotation boundary tries each published key. Do not describe this
-        endpoint as returning "the key_id on every receipt".
+        A COSE Receipt names the same ``key_id`` in its protected ``kid`` (4)
+        since capsule-anchor#103 (RFC 9943 Section 6); receipts issued before
+        that carry no ``kid``. Either way a relying party takes the key itself
+        from HERE (or from ``/.well-known/did.json``), never from the receipt,
+        and for a receipt without ``kid`` tries each published key across a
+        rotation boundary.
 
         The monitor provisions this out-of-band and uses it to independently
         verify every STH signature -- this is what decouples the monitor from

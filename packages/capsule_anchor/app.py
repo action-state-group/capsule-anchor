@@ -202,12 +202,14 @@ def create_app() -> FastAPI:
             store=_store,
             consistency_proof_policy=consistency_proof_policy,
             payload_policy=payload_policy,
+            receipt_issuer=f"did:web:{public_host}",
         )
     else:
         _svc = AnchorerService(
             attestor=attestor,
             consistency_proof_policy=consistency_proof_policy,
             payload_policy=payload_policy,
+            receipt_issuer=f"did:web:{public_host}",
         )
     logger.info("embedded payloads: %s", payload_policy.describe()["embedded_payloads"])
     logger.info("consistency-proof policy for native checkpoint logs: %s", consistency_proof_policy)

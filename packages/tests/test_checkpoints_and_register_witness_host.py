@@ -300,36 +300,35 @@ def test_enrolled_checkpoint_receipt_signs_grade(client, agentrust_key):
     assert HDR_CWT_CLAIMS in protected  # iat still signed too
 
 
-def test_receipt_protected_header_never_carries_a_kid(client, key, agentrust_key):
-    """A COSE Receipt does NOT identify the key that signed it.
+def test_receipt_protected_header_carries_the_authority_kid(client, key, agentrust_key):
+    """A COSE Receipt names the key that signed it (capsule-anchor#103).
 
-    ``build_cose_receipt`` writes only ``alg`` (1), ``vds`` (395) and the
-    optional ``iat``/grade/continuity labels -- never a COSE ``kid`` (4).
-    Pinned because OPERATOR_GUIDE's key-rotation section asserted the
-    opposite ("Every receipt carries a `key_id`") for weeks: a verifier
-    resolves the witness key from ``/anchor/authority-pubkey`` or the DID
-    document and tries the published keys, so retiring a key WITHOUT
-    publishing it silently breaks every historical receipt. Both the
-    enrolled (grade-bearing) and non-enrolled shapes are checked -- adding a
-    protected field must never smuggle a ``kid`` in with it.
+    RFC 9943 Section 6 makes ``kid`` (4) MUST on a Receipt that carries
+    neither ``x5t`` nor ``x5chain``, so ``build_cose_receipt`` signs the
+    authority key's ``key_id`` (the value ``/health``,
+    ``/anchor/authority-pubkey`` and the DID document publish) into the
+    protected header. Both the enrolled (grade-bearing) and non-enrolled
+    shapes are checked. Receipts issued before #103 carry no ``kid``, so a
+    verifier still resolves their key from the published keys.
     """
     cose_label_kid = 4
+    key_id = client.get("/health").json()["key_id"].encode("utf-8")
 
     status, body = _post_checkpoint(
-        client, _checkpoint_cose(key, log_id="log-nokid", mmr_size=1,
-                                 new_peaks=_peaks_for("log-nokid-1")))
+        client, _checkpoint_cose(key, log_id="log-kid", mmr_size=1,
+                                 new_peaks=_peaks_for("log-kid-1")))
     assert status == 200, body
-    assert cose_label_kid not in _receipt_protected_header(body["receipt_b64"])
+    assert _receipt_protected_header(body["receipt_b64"])[cose_label_kid] == key_id
 
     _enroll(client, log_id=_TRACE_REGISTRY_LOG_ID,
             pubkey=agentrust_key.public_key().public_bytes_raw())
     status, body = _post_checkpoint(
         client, _checkpoint_cose(agentrust_key, log_id=_TRACE_REGISTRY_LOG_ID,
-                                 mmr_size=1, new_peaks=_peaks_for("log-nokid-2")))
+                                 mmr_size=1, new_peaks=_peaks_for("log-kid-2")))
     assert status == 200, body
     enrolled = _receipt_protected_header(body["receipt_b64"])
-    assert enrolled[_COSE_GRADE_LABEL] == body["grade"]  # grade IS there
-    assert cose_label_kid not in enrolled                # kid is NOT
+    assert enrolled[_COSE_GRADE_LABEL] == body["grade"]
+    assert enrolled[cose_label_kid] == key_id
 
 
 def test_resubmitting_the_same_checkpoint_is_idempotent(client, key):

@@ -135,6 +135,9 @@ _COSE_VDP_LABEL = 396        # unprotected: verifiable-data-proofs (vdp)
 _COSE_VDP_INCLUSION_KEY = -1  # vdp map key for the inclusion-proofs array
 _COSE_SIGN1_TAG = 18
 _CWT_IAT = 6                 # RFC 8392 §3.1.6 "iat" claim, inside HDR_CWT_CLAIMS (15)
+_CWT_ISS = 1                 # RFC 8392 §3.1.1 "iss" claim
+_CWT_SUB = 2                 # RFC 8392 §3.1.2 "sub" claim
+_COSE_KID_LABEL = 4          # protected: key identifier (RFC 9052 §3.1)
 _COSE_GRADE_LABEL = -65537   # protected: private-use witness grade label
 _COSE_CONTINUITY_LABEL = -65538  # protected: private-use witness continuity assertion
 #: ``policy_id`` value stamped into every signed continuity assertion --
@@ -154,6 +157,9 @@ def build_cose_receipt(
     iat: int | None = None,
     grade: str | None = None,
     continuity: dict | None = None,
+    iss: str | None = None,
+    sub: str | None = None,
+    kid: bytes | None = None,
 ) -> bytes:
     """Assemble a SCITT COSE Receipt (COSE_Sign1, tag 18) -- ~the scitt-cose shape.
 
@@ -177,12 +183,28 @@ def build_cose_receipt(
                   signed into the protected header (label -65538) when given.
                   ``None`` omits it (every non-``continuity-witnessed``
                   registration).
+      iss, sub:   the CWT ``iss`` / ``sub`` claims, signed into the same
+                  protected claims map as ``iat``; ``kid``: the authority
+                  key's identifier (protected label 4). RFC 9943 §6 makes all
+                  three MUST on a Receipt (``kid`` because this Receipt names
+                  its key by neither ``x5t`` nor ``x5chain``), and
+                  ``register_signed_statement_full`` always passes them.
+                  ``None`` omits each (the pre-#103 wire shape).
 
     Returns the tagged COSE_Sign1 CBOR bytes. See the module-level wire spec.
     """
     protected = {_COSE_ALG_LABEL: _COSE_ALG_EDDSA, _COSE_VDS_LABEL: _COSE_VDS_RFC9162_SHA256}
+    claims: dict = {}
+    if iss is not None:
+        claims[_CWT_ISS] = iss
+    if sub is not None:
+        claims[_CWT_SUB] = sub
     if iat is not None:
-        protected[HDR_CWT_CLAIMS] = {_CWT_IAT: iat}
+        claims[_CWT_IAT] = iat
+    if claims:
+        protected[HDR_CWT_CLAIMS] = claims
+    if kid is not None:
+        protected[_COSE_KID_LABEL] = kid
     if grade is not None:
         protected[_COSE_GRADE_LABEL] = grade
     if continuity is not None:
@@ -720,7 +742,14 @@ class AnchorerService:
         store=None,
         consistency_proof_policy: str = DEFAULT_CONSISTENCY_PROOF_POLICY,
         payload_policy: EmbeddedPayloadPolicy | None = None,
+        receipt_issuer: str | None = None,
     ) -> None:
+        #: The CWT ``iss`` every Receipt carries (RFC 9943 §6): the app passes
+        #: ``did:web:<CAPSULE_ANCHOR_PUBLIC_HOST>``, the identity it publishes
+        #: at ``/.well-known/did.json``. A service built without one (tests,
+        #: embedding) names its issuer by the authority key's ``key_id``, the
+        #: one identity it has, rather than claiming a host it may not be.
+        self._receipt_issuer = receipt_issuer
         #: What a registered statement's embedded payload is kept as (see
         #: ``payload_policy``): by default a statement made over a hash keeps its
         #: digest and any other embedded payload is stored detached (its SHA-256).
@@ -1364,6 +1393,12 @@ class AnchorerService:
                 iat=int(logged_at.timestamp()),
                 grade=grade,
                 continuity=continuity_assertion,
+                # RFC 9943 §6: iss, sub and kid are MUST on a Receipt. sub is
+                # what the registered statement says it is about (its own CWT
+                # sub, RFC 9943 §3 and Figure 10), else the entry it covers.
+                iss=self._receipt_issuer or self._attestor.key_id,
+                sub=subject or entry_hash,
+                kid=self._attestor.key_id.encode("utf-8"),
             )
 
             # 3. Persist for idempotent dedup (still INSERT OR IGNORE as
