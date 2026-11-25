@@ -1,0 +1,31 @@
+{
+  "description": "Signed reads of GET /checkpoints/{log_id} (capsule-anchor#110). Message: UTF-8 of 'capsule-anchor/checkpoint-read/v1' LF log_id LF time; Ed25519; signature base64url without padding. The seed is a public test value: sha256('capsule-anchor checkpoint-read test vector seed').",
+  "seed_hex": "43d666ab13f4d9e2a66d08c577596528b6eba971618f31dd7e472c1efcd64a04",
+  "public_key_hex": "50683beae26cd480047c309671714eb204bcd0b1caf276470b790b97db0e893d",
+  "cases": [
+    {
+      "log_id": "deal-cadence/0123456789abcdef",
+      "time": "1795645990",
+      "message_hex": "63617073756c652d616e63686f722f636865636b706f696e742d726561642f76310a6465616c2d636164656e63652f303132333435363738396162636465660a31373935363435393930",
+      "signature": "-MyJXp422IvjDu_q0kG3WFYlYsopBeAicD_3rSoyyU8CpHUQxahzIcsT2kmL6n6rFutZKWtooJx-OLbmcYdVAg"
+    },
+    {
+      "log_id": "trace-registry/v1",
+      "time": "1795645990",
+      "message_hex": "63617073756c652d616e63686f722f636865636b706f696e742d726561642f76310a74726163652d72656769737472792f76310a31373935363435393930",
+      "signature": "bFeR_AYACHYFTR-LJZ_jduFZ7IjuVwEs1CIsEWGw8C93ebQmqD8fjnVKtYdFSvnnwCTeGpozWo98frpHy6tiCA"
+    },
+    {
+      "log_id": "log%2Fwith%literal",
+      "time": "1795645990",
+      "message_hex": "63617073756c652d616e63686f722f636865636b706f696e742d726561642f76310a6c6f6725324677697468256c69746572616c0a31373935363435393930",
+      "signature": "4MAnRlA0qNlzV8Q4cXgMbiHOKyTUXUGjkwbW2I4M8a039DdCagBgW7RWoKIeMxnLuSQTRbgqrt_V4wNbyob4Cw"
+    },
+    {
+      "log_id": "журнал/ログ",
+      "time": "1795645990",
+      "message_hex": "63617073756c652d616e63686f722f636865636b706f696e742d726561642f76310ad0b6d183d180d0bdd0b0d0bb2fe383ade382b00a31373935363435393930",
+      "signature": "wsAnHvXT47T2yt4uCxNJAR8z_GNiT1tDrGSesk-fCFfSXoPXbWt9LOiktj5AHvr9PObuZZDxJEK8IJYuIxnzAQ"
+    }
+  ]
+}

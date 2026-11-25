@@ -23,12 +23,14 @@ Endpoints:
                                            proof is never refused. This is the only
                                            route a default capsule-emit client ever
                                            calls.
-  GET  /checkpoints/{log_id}            -> read-only resolve: the LAST checkpoint
-                                           witnessed for log_id (claims + receipt
-                                           evidence + countersign grade), plus any
-                                           equivocation flagged for it (200 present /
-                                           404 never witnessed) -- see
-                                           AnchorerService.get_checkpoint_readback.
+  GET  /checkpoints/{log_id}            -> read-only resolve: any equivocation
+                                           flagged for log_id, to anyone; the LAST
+                                           checkpoint witnessed for it (claims +
+                                           receipt evidence + countersign grade) only
+                                           to a read signed with the log's own key
+                                           (capsule-anchor#110, checkpoint_read.py)
+                                           (200 present / 403 wrongly signed / 404
+                                           never witnessed).
   POST /register                        -> EXPLICIT OPT-IN route: per-record digest
                                            registration -> full SCITT Receipt (the
                                            plain-SCITT-interop case). Identical
@@ -49,10 +51,9 @@ Endpoints:
                                            statement whose payload self-declares
                                            artifact_type: mmr-checkpoint is
                                            auto-recognized here (no new route) --
-                                           monotonic-size + chain-linkage checked
-                                           against the log's last witnessed
-                                           checkpoint per log_id before co-signing;
-                                           see AnchorerService._check_checkpoint_consistency.
+                                           only a log's FIRST checkpoint is taken
+                                           (its key_id is unverified); see
+                                           AnchorerService._check_checkpoint_consistency.
   GET  /transparency/statements         -> discovery mechanism 2: resolve every
                                            statement registered under a CWT `subject`
                                            claim (e.g. a judged/cited mesh node's key)
@@ -99,7 +100,7 @@ import json
 import threading
 import time
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
 
 from capsule_anchor.contracts.types import (
@@ -112,6 +113,7 @@ from capsule_anchor.contracts.types import (
 from capsule_anchor.public_log import augment_receipt_with_public_log
 
 from .checkpoint_cose import parse_and_verify_checkpoint_cose
+from .checkpoint_read import READ_SIGNATURE_HEADER, READ_TIME_HEADER, ReadRefused, verify_read
 from .checkpoint_json import CLL_CHECKPOINT_JSON_CONTENT_TYPE, parse_and_verify_checkpoint_json
 from .service import (
     MAX_STATEMENT_BYTES,
@@ -120,6 +122,7 @@ from .service import (
     CheckpointSignatureError,
     ConsistencyProofRequiredError,
     ContinuityMismatchError,
+    LogKeyMismatchError,
     NotACheckpointError,
     RollbackError,
 )
@@ -496,6 +499,15 @@ class CheckpointEquivocation(BaseModel):
     conflicting: CheckpointEquivocationSighting
 
 
+class CheckpointEquivocationsResponse(BaseModel):
+    """``GET /checkpoints/{log_id}`` for an UNSIGNED read (ruling u226,
+    capsule-anchor#110): the log's flagged equivocations only. Size, root,
+    time and receipt answer only a read signed with the log's own key."""
+
+    log_id: str
+    equivocations: list[CheckpointEquivocation]
+
+
 class CheckpointReadBackResponse(BaseModel):
     """``GET /checkpoints/{log_id}``: the last checkpoint witnessed for
     ``log_id``, plus every equivocation flagged for it.
@@ -528,6 +540,18 @@ class CheckpointReadBackResponse(BaseModel):
     tree_size: int
     equivocations: list[CheckpointEquivocation]
     continuity_grade: str | None = None
+
+
+def _hex_key(key_hex: str | None) -> bytes | None:
+    """A stored ``key_id`` as a raw Ed25519 key, or ``None`` when it is not
+    one (the legacy ``mmr-checkpoint`` path stores a self-asserted label)."""
+    if key_hex is None:
+        return None
+    try:
+        raw = bytes.fromhex(key_hex)
+    except ValueError:
+        return None
+    return raw if len(raw) == 32 else None
 
 
 def get_router() -> APIRouter:
@@ -734,19 +758,9 @@ def get_router() -> APIRouter:
             result = svc.register_signed_statement_full(statement_bytes)
         except CheckpointPayloadError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except ConsistencyProofRequiredError as exc:
-            # policy=enforce: a later mmr-checkpoint for a known log_id. Same
-            # 409 shape and code as POST /checkpoints.
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "error": str(exc),
-                    "code": exc.code,
-                    "last_accepted_mmr_size": exc.last_accepted_mmr_size,
-                    "last_accepted_root": exc.last_accepted_root,
-                },
-            ) from exc
         except RollbackError as exc:
+            # A later mmr-checkpoint for a log_id this witness already holds:
+            # the message names no size or root (capsule-anchor#110).
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return RegisterStatementResponse(
             receipt_b64=base64.b64encode(result.receipt).decode("ascii"),
@@ -920,6 +934,11 @@ def get_router() -> APIRouter:
         svc = get_service()
         try:
             result = svc.witness_checkpoint(cp)
+        except LogKeyMismatchError as exc:
+            # capsule-anchor#110: another key's checkpoint under a bound
+            # log_id. Refused before any continuity check, and the body names
+            # nothing about the log (no size, root or time).
+            raise HTTPException(status_code=403, detail={"error": str(exc), "code": exc.code}) from exc
         except ContinuityMismatchError as exc:
             # Refuse-on-mismatch (stage 2, [capsule-anchor-checkpoint-aware-witness]):
             # never co-signed, never appended. The body carries THIS witness's
@@ -1059,6 +1078,12 @@ def get_router() -> APIRouter:
         independence is yours to assess. Multi-witness deployment remains the
         anti-equivocation lever a single witness's own claim cannot provide.
 
+        **A log id belongs to its key** (capsule-anchor#110): once this
+        witness holds a checkpoint for an UNENROLLED ``log_id``, a checkpoint
+        for it signed by any other key is refused with **403**
+        (``code: log_key_mismatch``) before any continuity check, so the body
+        names no size, root or time. See ``LogKeyMismatchError``.
+
         Idempotent: resubmitting the same checkpoint (identical `log_id`,
         `mmr_size`, and root) returns the original stamp -- including its
         original protected header -- without creating a new log entry or
@@ -1085,26 +1110,73 @@ def get_router() -> APIRouter:
             return _witness_checkpoint_json(body)
         return _witness_checkpoint_cose(body)
 
-    @canonical.get("/checkpoints/{log_id:path}", response_model=CheckpointReadBackResponse)
-    def checkpoint_readback(log_id: str) -> CheckpointReadBackResponse:
-        """Read-only resolve: the LAST checkpoint witnessed for ``log_id``.
+    @canonical.get(
+        "/checkpoints/{log_id:path}",
+        response_model=CheckpointReadBackResponse | CheckpointEquivocationsResponse,
+    )
+    def checkpoint_readback(log_id: str, request: Request, response: Response):
+        """Read-only resolve: the LAST checkpoint witnessed for ``log_id``,
+        split by ruling u226 (capsule-anchor#110).
 
         ``log_id`` is taken verbatim from the path (``:path`` so an ``iss``
-        containing ``/``, e.g. ``trace-registry/v1``, round-trips). Returns
-        **200** with the stored checkpoint claims, receipt evidence, and
-        countersign ``grade`` if this ``log_id`` has been witnessed by
-        ``POST /checkpoints`` at least once, **404** if it never has. Also
-        carries ``equivocations`` -- any (log_id, mmr_size) position where
-        two DIFFERENT roots were witnessed -- so a watcher can detect a
-        fork attempt without re-deriving it from the raw log feed. This is
-        a pure read; it never registers or mutates anything.
+        containing ``/``, e.g. ``trace-registry/v1``, round-trips).
+
+        * **Unsigned read** (neither read header): **200** with only
+          ``log_id`` and ``equivocations`` -- any (log_id, mmr_size) position
+          where two DIFFERENT roots were witnessed, so anyone can still watch
+          a log for forks. No size, root, time or receipt: those would show
+          the log's cadence to anyone who learned its id.
+        * **Signed read** (``checkpoint_read.py``: ``Checkpoint-Read-Time`` +
+          ``Checkpoint-Read-Signature``, verified under the log's own key --
+          the pinned key of an enrolled submitter, else the key the log is
+          bound to): **200** with the stored checkpoint claims, receipt
+          evidence and countersign ``grade`` as well.
+        * Read headers present but not a valid read by that key: **403**,
+          ``{"error", "code"}`` with ``code`` one of
+          ``read_signature_malformed``, ``read_time_skew``,
+          ``read_key_mismatch``; nothing about the log.
+        * Never witnessed by ``POST /checkpoints``: **404**.
+
+        Every answer is ``Cache-Control: no-store``: the full and the
+        public answer share one URL, and a shared cache must never hand a
+        signed answer to an unsigned reader. A pure read; it never
+        registers or mutates anything.
         """
-        record = get_service().get_checkpoint_readback(log_id)
+        response.headers["Cache-Control"] = "no-store"
+        svc = get_service()
+        record = svc.get_checkpoint_readback(log_id)
         if record is None:
             raise HTTPException(
                 status_code=404,
                 detail=f"log_id {log_id!r} has never been witnessed by POST /checkpoints",
+                headers={"Cache-Control": "no-store"},
             )
+        entry = get_submitters().get(log_id)
+        key = entry.pubkey if entry is not None else _hex_key(svc.checkpoint_owner_key(log_id))
+        try:
+            signed = verify_read(
+                log_id,
+                request.headers.getlist(READ_TIME_HEADER),
+                request.headers.getlist(READ_SIGNATURE_HEADER),
+                key,
+                time.time(),
+            )
+        except ReadRefused as exc:
+            raise HTTPException(
+                status_code=403,
+                detail={"error": str(exc), "code": exc.code},
+                headers={"Cache-Control": "no-store"},
+            ) from exc
+        equivocations = [
+            CheckpointEquivocation(
+                mmr_size=e["mmr_size"],
+                first=CheckpointEquivocationSighting(**e["first"]),
+                conflicting=CheckpointEquivocationSighting(**e["conflicting"]),
+            )
+            for e in record["equivocations"]
+        ]
+        if not signed:
+            return CheckpointEquivocationsResponse(log_id=log_id, equivocations=equivocations)
         return CheckpointReadBackResponse(
             log_id=log_id,
             mmr_size=record["mmr_size"],
@@ -1120,14 +1192,7 @@ def get_router() -> APIRouter:
             leaf_index=record["leaf_index"],
             tree_size=record["tree_size"],
             continuity_grade=record.get("continuity_grade"),
-            equivocations=[
-                CheckpointEquivocation(
-                    mmr_size=e["mmr_size"],
-                    first=CheckpointEquivocationSighting(**e["first"]),
-                    conflicting=CheckpointEquivocationSighting(**e["conflicting"]),
-                )
-                for e in record["equivocations"]
-            ],
+            equivocations=equivocations,
         )
 
     @canonical.post("/register", response_model=RegisterStatementResponse)

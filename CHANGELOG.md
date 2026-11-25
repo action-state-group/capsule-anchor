@@ -6,6 +6,26 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ## [Unreleased]
 
+### Security
+
+- **A log's last checkpoint answers only its own key.** `GET /checkpoints/{log_id}` now
+  returns the checkpoint's size, root, time, receipt and the rest of the record only to a
+  read signed with the log's own checkpoint key (`Checkpoint-Read-Time` and
+  `Checkpoint-Read-Signature` headers); an unsigned read gets only `log_id` and
+  `equivocations`, and a wrongly signed one gets 403. Every answer is `Cache-Control:
+  no-store`. Before, anyone who learned a log id could poll how often the log was stamped
+  (ruling u226). Closes #110.
+- **An unenrolled log id is bound to its key.** Once the witness holds a checkpoint for an
+  unenrolled log id, `POST /checkpoints` refuses a checkpoint for it signed by another key
+  (403, `log_key_mismatch`) before any continuity check, so the refusal names no size, root
+  or time and a stranger can no longer read a log's tip from a 409 or plant equivocations
+  under its id. A log that changes key starts a new log id or enrolls; enrolled logs follow
+  their pin. The legacy `mmr-checkpoint` statement path takes only a log's first checkpoint
+  under every consistency-proof policy, and its refusal no longer names the tip.
+- **Upgrade note:** a watcher built for the old answer reads the unsigned answer as a log
+  whose size went to zero. Upgrade such a watcher to sign its read with the log's key before
+  deploying this witness.
+
 ### Added
 
 - **Countersign accepts an opt-in disclosure of configured record kinds.** A countersign

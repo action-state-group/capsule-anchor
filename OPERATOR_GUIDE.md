@@ -128,8 +128,8 @@ The canonical witness surface exposes two routes at the top level (no prefix):
 
 | Method | Path | What it does |
 |--------|------|-------------|
-| `POST` | `/checkpoints` | Register a CLL checkpoint (`draft-mih-scitt-checkpointed-local-log`). The default path for any `capsule-emit` client. Returns a `CheckpointStampResponse` with `receipt_b64`, `entry_hash`, and `continuity_grade` (`first-seen` / `registered` / `continuity-witnessed`). Verifies the submitter's Ed25519 signature before signing; refuses non-checkpoint bodies with a named 400, and refuses a `consistency_proof`-bearing checkpoint that fails either continuity check with a named 409. |
-| `GET`  | `/checkpoints/{log_id}` | Read back the last checkpoint witnessed for `log_id`, including any equivocations detected. 200 if witnessed at least once, 404 if never. |
+| `POST` | `/checkpoints` | Register a CLL checkpoint (`draft-mih-scitt-checkpointed-local-log`). The default path for any `capsule-emit` client. Returns a `CheckpointStampResponse` with `receipt_b64`, `entry_hash`, and `continuity_grade` (`first-seen` / `registered` / `continuity-witnessed`). Verifies the submitter's Ed25519 signature before signing; refuses non-checkpoint bodies with a named 400, and refuses a `consistency_proof`-bearing checkpoint that fails either continuity check with a named 409. Once it holds a checkpoint for an unenrolled log id, refuses that log id's checkpoint signed by any other key with 403 `log_key_mismatch`, naming no size, root or time: an unenrolled log cannot change its key, so a log with a new key starts a new log id or enrolls. |
+| `GET`  | `/checkpoints/{log_id}` | Any equivocations detected for `log_id`, to anyone. The last checkpoint witnessed for it (size, root, time, receipt) only to a read signed with the log's own key; a wrongly signed read gets 403. 200 if witnessed at least once, 404 if never. See README, "Reading a log's checkpoint back". |
 | `POST` | `/register` | Explicit opt-in, plain-SCITT-interop digest registration. Accepts `{"capsule_id": "<64-hex SHA-256>"}`. Returns a full COSE Receipt. A default `capsule-emit` client never calls this. |
 
 Additional routes available for monitors and legacy callers:
@@ -159,7 +159,7 @@ tables are:
 | `log_entries` | Append-only CT log. PK: `log_index BIGINT`. Hash-chained via `prev_log_hash`; per-entry Ed25519 `log_signature` over the tree head. Never pruned by any retention setting — its row count IS `tree_size`. |
 | `submitted_statements` | Idempotent dedup + re-issue cache: `entry_hash TEXT PRIMARY KEY` → `receipt BYTEA`, `leaf_index`, `tree_size`. The ONLY table `CAPSULE_ANCHOR_ENTRY_RETENTION` prunes — see "Retention" below. |
 | `checkpoint_records` | One row per `(log_id, mmr_size)` position ever witnessed. First-seen root wins; a conflicting later root triggers an equivocation record instead. Carries the `continuity_grade` this witness assigned when it was accepted. |
-| `checkpoint_witnesses` | Chain-tip only: the last-ACCEPTED checkpoint per `log_id`. Backs both the legacy `mmr-checkpoint` monotonicity check and stage 2's continuity gate (`POST /checkpoints`, [capsule-anchor-checkpoint-aware-witness]) -- only advanced on `first-seen` or a verified `continuity-witnessed` acceptance, never on a bare `registered` one. |
+| `checkpoint_witnesses` | Chain-tip only: the last-ACCEPTED checkpoint per `log_id`. Backs the legacy `mmr-checkpoint` first-checkpoint-only check, the log-to-key binding of an unenrolled `log_id`, and stage 2's continuity gate (`POST /checkpoints`, [capsule-anchor-checkpoint-aware-witness]) -- only advanced on `first-seen` or a verified `continuity-witnessed` acceptance, never on a bare `registered` one. |
 | `checkpoint_equivocations` | Fork evidence: appended whenever a different root arrives for an already-witnessed `(log_id, mmr_size)`. Never deleted. |
 | `countersigned_roots` | Legacy anchoring path. |
 | `log_capsule_bindings` | Sidecar: `log_index → capsule_id` binding for the legacy `GET /v1/inclusion/{capsule_id}` resolve. |
@@ -594,8 +594,9 @@ entries) carries the same `key_id` as a JSON field.
 If a checkpoint submission is interrupted mid-flight and you are unsure whether it
 was recorded, resubmit. The service is idempotent: resubmitting the same checkpoint
 (same `log_id`, `mmr_size`, and root) returns the original stamp without creating a
-new log entry. A `GET /checkpoints/{log_id}` tells you the last checkpoint the
-witness recorded for that `log_id` and its `mmr_size`.
+new log entry. A `GET /checkpoints/{log_id}` signed with the log's own key (README,
+"Reading a log's checkpoint back") tells you the last checkpoint the witness recorded
+for that `log_id` and its `mmr_size`; an unsigned read shows only its equivocations.
 
 If a checkpoint was accepted but the network dropped the response before the client
 received it, the same resubmit behavior applies — the response on resubmit is the
@@ -721,7 +722,9 @@ provide.
 **Equivocation detection.** If the same `(log_id, mmr_size)` position is submitted
 twice with different roots, the witness records both as an equivocation event (in the
 `checkpoint_equivocations` table) and surfaces them on
-`GET /checkpoints/{log_id}` under the `equivocations` field. This is the
+`GET /checkpoints/{log_id}` under the `equivocations` field, to any reader, signed or
+not. Only the log's own key can submit at its positions (an unenrolled log id is bound
+to its first key), so an equivocation is a fork by the log itself. This is the
 detect-and-surface mechanism; refusing the write on equivocation is planned for a
 later stage.
 
