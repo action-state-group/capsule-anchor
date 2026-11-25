@@ -589,3 +589,37 @@ def test_pg_a_drop_during_the_insert_is_refused_and_not_replayed():
     assert two.get_statement(_digest("dropped").hex()) is None
     with two.writer_lock(timeout_s=2.0):
         pass
+
+
+@_pg_required
+def test_pg_a_reconnect_while_taking_the_lock_waits_only_what_is_left():
+    """The idle-connection retry shares the first try's budget: while another
+    instance holds the lock, a first try that fails after part of the budget
+    leaves the retry only the rest."""
+    import time as _time
+
+    one, two = _pg_pair()
+    real = one._conn  # noqa: SLF001
+
+    class _FirstTryDrops:
+        def __init__(self, conn):
+            self._conn = conn
+            self.dropped = False
+
+        def execute(self, sql, *args, **kwargs):
+            if "pg_advisory_lock" in sql and not self.dropped:
+                self.dropped = True
+                _time.sleep(0.4)
+                raise one._pg.OperationalError("server closed the connection")  # noqa: SLF001
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    one._conn = _FirstTryDrops(real)  # noqa: SLF001
+    with two.writer_lock():
+        start = _time.monotonic()
+        with pytest.raises(WriterBusy):
+            with one.writer_lock(timeout_s=0.6):
+                pass
+        assert _time.monotonic() - start < 0.9

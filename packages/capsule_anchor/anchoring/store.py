@@ -44,6 +44,7 @@ import contextlib
 import hashlib
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from datetime import datetime
 
@@ -1395,9 +1396,14 @@ class PostgresLogStore:
             if self._writer_depth:
                 self._writer_depth += 1
             else:
-                timeout_ms = max(1, int(timeout_s * 1000))
+                deadline = time.monotonic() + timeout_s
 
                 def _take() -> None:
+                    # One budget for both tries: the retry waits only what is left.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise WriterBusy("the writer lock was not granted in time")
+                    timeout_ms = max(1, int(remaining * 1000))
                     with self._conn.transaction():
                         # SET LOCAL ends with this transaction; the advisory
                         # lock is session-level and outlives it.
