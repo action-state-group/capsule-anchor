@@ -104,3 +104,24 @@ def test_wire_dict_strips_fields_capsule_cli_has_no_struct_field_for(valid_bundl
     assert statement.canonical_bytes() == json.dumps(
         wire, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+
+
+def test_module_mapping_results_keep_their_detail_and_default_it():
+    """The signed statement's wire form omits ``detail``, so this reads the
+    validated results directly: a mapping's ``detail`` is kept, and a mapping
+    without one gets the model's default."""
+    from capsule_anchor.countersign.recompute import _module_results
+    from capsule_anchor.countersign.results import CheckResult
+
+    class _Dict(dict):
+        pass
+
+    class _Module:
+        def check(self, bundle, profile_id):
+            return [_Dict(name="a", result="established", detail="d"), {"name": "b", "result": "not present"}]
+
+    out = _module_results(_Module(), None, "pack/v1")
+    assert out == [
+        CheckResult(name="a", result="established", detail="d"),
+        CheckResult(name="b", result="not present", detail=""),
+    ]

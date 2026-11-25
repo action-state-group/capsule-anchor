@@ -519,6 +519,12 @@ def test_a_mapping_module_result_without_a_name_is_a_502(monkeypatch, requester_
     assert resp.status_code == 502, resp.text
 
 
+def test_a_mapping_module_result_with_a_non_string_name_is_a_502_naming_it(monkeypatch, requester_key, issuer_allowlist):
+    resp = _post_with_module_result(monkeypatch, requester_key, issuer_allowlist, [{"name": 7, "result": "established"}])
+    assert resp.status_code == 502, resp.text
+    assert "check 7:" in resp.json()["detail"]
+
+
 def test_a_non_iterable_module_return_is_a_502(monkeypatch, requester_key, issuer_allowlist):
     resp = _post_with_module_result(monkeypatch, requester_key, issuer_allowlist, None)
     assert resp.status_code == 502, resp.text
