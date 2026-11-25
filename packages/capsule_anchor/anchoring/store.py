@@ -55,16 +55,18 @@ from capsule_anchor.contracts.types import (
 
 
 class LogIndexTaken(Exception):
-    """``append_entry`` found ``log_index`` already used: another writer
-    appended there first, or (Postgres) a commit whose acknowledgement was
-    lost was replayed. The caller compares ``get_entry(log_index)`` with its
-    own entry to tell the two apart (capsule-anchor#109)."""
+    """``append_entry`` found ``log_index`` already used, by another writer
+    (one without the writer lock, during a rollout). The caller compares
+    ``get_entry(log_index)`` with its own entry: an identical row is not a
+    conflict (capsule-anchor#109)."""
 
 
 class WriterBusy(Exception):
     """The cross-instance writer lock could not be taken in time, or was lost
-    with its connection. Nothing was written by the refused request; the
-    client retries later (429 + ``Retry-After``, capsule-anchor#109)."""
+    with its connection; the client retries later (429 + ``Retry-After``,
+    capsule-anchor#109). Refused before the append, the request wrote
+    nothing; refused after a connection drop, its append may have committed
+    without its receipt, so a retry can land the statement at a second leaf."""
 
 
 def _sig_to_json(sig: Signature) -> str:
@@ -1383,18 +1385,35 @@ class PostgresLogStore:
         Raises ``WriterBusy`` when the lock is not granted within
         ``timeout_s``. If the connection drops inside the section, the lock
         went with it: later writes in the section raise ``WriterBusy`` and
-        nothing is replayed (``_transact``)."""
+        nothing is replayed (``_transact``).
+
+        The wait runs on the store's one connection, so this instance's other
+        store reads (``GET /checkpoints``, the public-log reads) wait behind
+        it, for at most ``timeout_s``. A second connection for the lock alone
+        would avoid that, but could drop unseen while the data writes go on."""
         with self._lock:
             if self._writer_depth:
                 self._writer_depth += 1
             else:
                 timeout_ms = max(1, int(timeout_s * 1000))
-                try:
+
+                def _take() -> None:
                     with self._conn.transaction():
                         # SET LOCAL ends with this transaction; the advisory
                         # lock is session-level and outlives it.
                         self._conn.execute(f"SET LOCAL lock_timeout = {timeout_ms}")
                         self._conn.execute("SELECT pg_advisory_lock(%s)", (_WRITER_LOCK_KEY,))
+
+                try:
+                    try:
+                        _take()
+                    except self._pg.OperationalError as exc:
+                        if isinstance(exc, self._pg.errors.LockNotAvailable):
+                            raise
+                        # Nothing is held yet: a connection Cloud SQL closed
+                        # while idle is replaced once, as every other call does.
+                        self._reconnect()
+                        _take()
                 except self._pg.errors.LockNotAvailable as exc:
                     raise WriterBusy("another instance holds the log writer lock") from exc
                 except self._pg.OperationalError as exc:

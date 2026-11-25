@@ -97,8 +97,8 @@ def create_app() -> FastAPI:
 
     # capsule-anchor#109: log contention (the cross-instance writer lock not
     # taken in time, or an index taken by a writer without it) answers 429
-    # with Retry-After on every route that appends -- never a 500. Nothing
-    # was written for the refused request.
+    # with Retry-After on every route that appends -- never a 500. See
+    # WriterBusy for what a refused request may have written.
     @app.exception_handler(WriterBusy)
     async def _writer_busy(_request: Request, exc: WriterBusy) -> JSONResponse:
         return JSONResponse(

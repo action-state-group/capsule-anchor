@@ -12,8 +12,9 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   `COUNT(*)` under a per-process lock, so two instances could take the same index and the
   second request failed on `log_entries_pkey`. A registration now runs under a Postgres
   advisory lock across instances; an index taken anyway, or a 10-second wait for the lock,
-  answers 429 with `Retry-After`, and a replayed commit of the request's own entry counts
-  as success. Closes the server-side half of #109.
+  answers 429 with `Retry-After`. A connection that drops inside the locked section also
+  answers 429 and writes nothing more; if the append had already committed, a retry may
+  land the statement at a second leaf. Closes the server-side half of #109.
 - **A registration no longer reads the whole log.** Each one read every log row two or
   three times and rehashed the whole tree. The service now keeps the tree per process,
   reads only new entries, and keeps the hashes of complete subtrees, so a receipt, a tree

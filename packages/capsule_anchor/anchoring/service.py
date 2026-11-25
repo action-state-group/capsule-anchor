@@ -953,8 +953,8 @@ class AnchorerService:
         other instance appends between the sync and the insert. If the index
         is taken anyway (an instance without the writer lock, during a
         rollout), the request is refused with ``WriterBusy`` (429), never a
-        500 -- unless the row there is exactly this entry, a commit whose
-        acknowledgement was lost and replayed (capsule-anchor#109).
+        500 -- unless the row there is identical to this entry
+        (capsule-anchor#109).
         """
         self._sync_log()
         log_index = self._tree.size
@@ -1417,6 +1417,8 @@ class AnchorerService:
                             timestamp=checkpoint_continuity["timestamp"],
                         )
                         cached_continuity_grade = CONTINUITY_GRADE_FIRST_SEEN
+                    else:
+                        cached_continuity_grade = self._complete_tip(checkpoint_continuity)
                 return StatementRegistration(
                     receipt=receipt_bytes,
                     entry_hash=returned_hash,
@@ -1605,6 +1607,32 @@ class AnchorerService:
         if tip is not None and cp.get("grade") is None and not _is_raw_key_hex(tip["key_id"]):
             return None
         return tip
+
+    def _complete_tip(self, cp: dict) -> str | None:
+        """A checkpoint whose receipt is stored but whose tip update did not
+        land: the connection dropped between the two inside the writer
+        section (capsule-anchor#109), so the retry takes the receipt cache.
+        When the tip is still exactly ``cp``'s claimed predecessor, check the
+        continuity again and move the tip, as the first attempt would have.
+        Returns the grade it earned, or ``None`` if it changed nothing.
+        Caller holds the writer section."""
+        tip = self._bound_tip(cp)
+        if tip is None or (tip["mmr_size"], tip["mmr_root"]) != (cp["prev_size"], cp["prev_root"]):
+            return None
+        try:
+            grade = self._check_checkpoint_continuity(cp)
+        except RollbackError:
+            return None
+        if grade != CONTINUITY_GRADE_WITNESSED:
+            return None
+        self._store.put_checkpoint_witness(
+            cp["log_id"],
+            mmr_size=cp["mmr_size"],
+            mmr_root=cp["root"],
+            key_id=cp["key_id"],
+            timestamp=cp["timestamp"],
+        )
+        return grade
 
     def _check_log_key(self, cp: dict) -> None:
         """Ownership before anything else about ``cp``'s log (capsule-anchor#110):
