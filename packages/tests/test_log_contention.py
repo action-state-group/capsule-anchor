@@ -488,46 +488,6 @@ def test_pg_two_successors_of_one_tip_on_two_instances_are_never_both_accepted()
         assert sorted(outcomes) == ["ok", "refused"], (round_, outcomes)
 
 
-def test_a_retry_completes_a_tip_whose_update_did_not_land():
-    """The connection drops after the receipt is stored but before the tip
-    moves: the retry takes the receipt cache and still moves the tip, so the
-    log's next checkpoint extends it."""
-    from capsule_anchor.anchoring.service import CONTINUITY_GRADE_WITNESSED
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    from .test_checkpoint_continuity import _Log, _proof_claim
-
-    store = InMemoryLogStore()
-    svc = AnchorerService(store=store)
-    key = Ed25519PrivateKey.generate()
-    log = _Log("unlanded")
-    s1 = log.grow_leaves(1)
-    svc.witness_checkpoint(_cp(key, log, s1, 0, "2026-11-25T00:00:00Z"))
-    s2 = log.grow_leaves(1)
-    cp2 = _cp(key, log, s2, s1, "2026-11-25T00:01:00Z", _proof_claim(log.proof(s1, s2)))
-
-    real_put = store.put_checkpoint_witness
-    drops = {"n": 1}
-
-    def drop_once(log_id, **kw):
-        if drops["n"]:
-            drops["n"] -= 1
-            raise WriterBusy("the connection dropped inside the writer section")
-        return real_put(log_id, **kw)
-
-    store.put_checkpoint_witness = drop_once
-    with pytest.raises(WriterBusy):
-        svc.witness_checkpoint(cp2)
-    assert store.get_checkpoint_witness("unlanded")["mmr_size"] == s1
-
-    retry = svc.witness_checkpoint(cp2)
-    assert retry.continuity_grade == CONTINUITY_GRADE_WITNESSED
-    assert store.get_checkpoint_witness("unlanded")["mmr_size"] == s2
-    s3 = log.grow_leaves(1)
-    nxt = svc.witness_checkpoint(_cp(key, log, s3, s2, "2026-11-25T00:02:00Z", _proof_claim(log.proof(s2, s3))))
-    assert nxt.continuity_grade == CONTINUITY_GRADE_WITNESSED
-
-
 def test_one_deadline_covers_the_local_queue_and_the_database_lock(monkeypatch):
     import time as _time
 
@@ -623,3 +583,73 @@ def test_pg_a_reconnect_while_taking_the_lock_waits_only_what_is_left():
             with one.writer_lock(timeout_s=0.6):
                 pass
         assert _time.monotonic() - start < 0.9
+
+
+@_pg_required
+def test_pg_a_drop_at_the_tip_write_rolls_the_whole_section_back_and_no_fork_is_signed():
+    """Instance A's connection drops after its log entry and receipt are
+    written but before its checkpoint tip moves. The section is one
+    transaction, so all of it rolls back: no leaf, no receipt, the tip
+    unchanged. Instance B's different successor of the same tip is then
+    accepted, and A's retry is refused: the witness never signs both."""
+    from capsule_anchor.anchoring.service import ContinuityMismatchError
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from .test_checkpoint_continuity import _Log, _proof_claim
+
+    one, two = _pg_pair()
+    attestor = AttestorService()
+    a_svc, b_svc = AnchorerService(attestor=attestor, store=one), AnchorerService(attestor=attestor, store=two)
+    key = Ed25519PrivateKey.generate()
+    a, b = _Log("drop-tip"), _Log("drop-tip")
+    base = a.grow_leaves(1)
+    assert b.grow_leaves(1) == base
+    a_svc.witness_checkpoint(_cp(key, a, base, 0, "2026-11-25T00:00:00Z"))
+    size_a, size_b = a.grow_leaves(1), b.grow_leaves(2)
+    cp_a = _cp(key, a, size_a, base, "2026-11-25T00:01:00Z", _proof_claim(a.proof(base, size_a)))
+    cp_b = _cp(key, b, size_b, base, "2026-11-25T00:01:00Z", _proof_claim(b.proof(base, size_b)))
+    leaves_before = two.size()
+
+    real = one._conn  # noqa: SLF001
+
+    class _TipWriteDrops:
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args, **kwargs):
+            if sql.startswith("INSERT INTO checkpoint_witnesses"):
+                self._conn.close()  # the server goes away mid-section
+                raise one._pg.OperationalError("server closed the connection")  # noqa: SLF001
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    one._conn = _TipWriteDrops(real)  # noqa: SLF001
+    with pytest.raises(WriterBusy):
+        a_svc.witness_checkpoint(cp_a)
+    assert two.size() == leaves_before, "the log entry rolled back"
+    assert two.get_checkpoint_witness("drop-tip")["mmr_size"] == base
+    assert two.get_checkpoint_record("drop-tip", size_a) is None
+
+    b_svc.witness_checkpoint(cp_b)  # the other branch, accepted against the unchanged tip
+    with pytest.raises(ContinuityMismatchError):
+        a_svc.witness_checkpoint(cp_a)
+    # A's cache rolled back with the section: it keeps registering cleanly.
+    a_svc.register_signed_statement_full(_digest("after-drop"))
+    assert a_svc.verify_log()
+    assert [e.log_index for e in two.all_entries()] == list(range(two.size()))
+
+
+def test_cached_tree_truncate_forgets_rolled_back_leaves():
+    tree = CachedTree()
+    leaves = [_leaf(n) for n in range(700)]
+    for h in leaves[:600]:
+        tree.append(h)
+    tree.root(600)
+    tree.truncate(300)
+    assert tree.size == 300
+    for h in leaves[300:700]:
+        tree.append(h)
+    assert tree.root(700) == ct.merkle_tree_hash(leaves)
+    assert tree.root(512) == ct.merkle_tree_hash(leaves[:512])

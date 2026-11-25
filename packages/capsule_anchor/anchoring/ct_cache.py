@@ -47,6 +47,14 @@ class CachedTree:
     def append(self, leaf_hash_hex: str) -> None:
         self._leaves.append(bytes.fromhex(leaf_hash_hex))
 
+    def truncate(self, size: int) -> None:
+        """Forget every leaf from ``size`` on, and every kept subtree hash
+        that covered one: an append whose transaction rolled back."""
+        if size >= len(self._leaves):
+            return
+        del self._leaves[size:]
+        self._memo = {k: v for k, v in self._memo.items() if k[0] + k[1] <= size}
+
     def leaf(self, index: int) -> str:
         return self._leaves[index].hex()
 

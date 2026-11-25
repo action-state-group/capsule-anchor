@@ -920,9 +920,17 @@ class AnchorerService:
         deadline = time.monotonic() + WRITER_LOCK_TIMEOUT_S
         if not self._lock.acquire(timeout=WRITER_LOCK_TIMEOUT_S):
             raise WriterBusy("this instance's writers are queued past the deadline")
+        size, last = self._tree.size, self._last_entry
         try:
             with self._store.writer_lock(timeout_s=max(0.001, deadline - time.monotonic())):
                 yield
+        except BaseException:
+            # The section did not complete: on Postgres its writes were rolled
+            # back, so the cached tree must not keep an entry it appended.
+            # (If a commit did land after all, _sync_log reads it back.)
+            self._tree.truncate(size)
+            self._last_entry = last
+            raise
         finally:
             self._lock.release()
 
@@ -1417,8 +1425,6 @@ class AnchorerService:
                             timestamp=checkpoint_continuity["timestamp"],
                         )
                         cached_continuity_grade = CONTINUITY_GRADE_FIRST_SEEN
-                    else:
-                        cached_continuity_grade = self._complete_tip(checkpoint_continuity)
                 return StatementRegistration(
                     receipt=receipt_bytes,
                     entry_hash=returned_hash,
@@ -1607,32 +1613,6 @@ class AnchorerService:
         if tip is not None and cp.get("grade") is None and not _is_raw_key_hex(tip["key_id"]):
             return None
         return tip
-
-    def _complete_tip(self, cp: dict) -> str | None:
-        """A checkpoint whose receipt is stored but whose tip update did not
-        land: the connection dropped between the two inside the writer
-        section (capsule-anchor#109), so the retry takes the receipt cache.
-        When the tip is still exactly ``cp``'s claimed predecessor, check the
-        continuity again and move the tip, as the first attempt would have.
-        Returns the grade it earned, or ``None`` if it changed nothing.
-        Caller holds the writer section."""
-        tip = self._bound_tip(cp)
-        if tip is None or (tip["mmr_size"], tip["mmr_root"]) != (cp["prev_size"], cp["prev_root"]):
-            return None
-        try:
-            grade = self._check_checkpoint_continuity(cp)
-        except RollbackError:
-            return None
-        if grade != CONTINUITY_GRADE_WITNESSED:
-            return None
-        self._store.put_checkpoint_witness(
-            cp["log_id"],
-            mmr_size=cp["mmr_size"],
-            mmr_root=cp["root"],
-            key_id=cp["key_id"],
-            timestamp=cp["timestamp"],
-        )
-        return grade
 
     def _check_log_key(self, cp: dict) -> None:
         """Ownership before anything else about ``cp``'s log (capsule-anchor#110):
