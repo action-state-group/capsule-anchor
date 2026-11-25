@@ -61,7 +61,8 @@ from capsule_anchor.contracts.types import (
 
 from . import ct
 from .payload_policy import EmbeddedPayloadPolicy, stored_payload
-from .store import InMemoryLogStore, SqliteLogStore
+from .ct_cache import CachedTree
+from .store import InMemoryLogStore, LogIndexTaken, SqliteLogStore, WriterBusy
 from .submitters import GRADE_COUNTERSIGNED_OBSERVED
 from .tsa import TsaError, timestamp_root_hash, tsa_enabled
 
@@ -808,6 +809,12 @@ class AnchorerService:
         else:
             self._store = SqliteLogStore(db_path)
 
+        # capsule-anchor#109: this process's copy of the log's CT leaves and
+        # its last entry, read incrementally (_sync_log) instead of reading
+        # the whole log on every registration. Guarded by self._lock.
+        self._tree = CachedTree()
+        self._last_entry: TransparencyLogEntry | None = None
+
     # --- AnchorerService protocol ------------------------------------------
     def anchor(
         self,
@@ -833,7 +840,7 @@ class AnchorerService:
             countersignature=countersignature,
         )
 
-        with self._lock:
+        with self._lock, self._store.writer_lock():
             # 2. Append to the append-only log under the lock so the chain and
             #    log_index assignment are atomic.
             entry = self._append_log(_LOG_KIND_ROOT, cs_payload, attested_at)
@@ -901,16 +908,42 @@ class AnchorerService:
             return self._store.get_capsule_id(log_index)
 
     # --- append-only log internals -----------------------------------------
+    def _sync_log(self) -> None:
+        """Bring the cached tree up to the stored log: read only the entries
+        after the ones already cached. The log is append-only and never
+        pruned, so nothing cached ever changes. Caller holds ``self._lock``."""
+        for entry in self._store.entries_after(self._tree.size):
+            if entry.log_index != self._tree.size:
+                raise RuntimeError(
+                    f"log entry {entry.log_index} read where {self._tree.size} was expected"
+                )
+            self._tree.append(ct_leaf_hash(entry))
+            self._last_entry = entry
+
+    def log_size(self) -> int:
+        """The number of log entries, read incrementally (not ``COUNT(*)``)."""
+        with self._lock:
+            self._sync_log()
+            return self._tree.size
+
     def _append_log(
         self, kind: str, signed_payload: bytes, logged_at: datetime
     ) -> TransparencyLogEntry:
         """Append one entry, chaining its tree head to the prior head.
 
-        Caller holds ``self._lock``.
+        Caller holds ``self._lock`` and ``self._store.writer_lock()``, so no
+        other instance appends between the sync and the insert. If the index
+        is taken anyway (an instance without the writer lock, during a
+        rollout), the request is refused with ``WriterBusy`` (429), never a
+        500 -- unless the row there is exactly this entry, a commit whose
+        acknowledgement was lost and replayed (capsule-anchor#109).
         """
-        log_index = self._store.size()
+        self._sync_log()
+        log_index = self._tree.size
         payload_hash = self._crypto.sha256(signed_payload)
-        prev_log_hash = self._head_hash() if log_index > 0 else None
+        prev_log_hash = (
+            self._entry_head_hash(self._last_entry) if self._last_entry is not None else None
+        )
 
         log_signature = self._attestor.attest(
             tree_head_payload(log_index, payload_hash, prev_log_hash)
@@ -923,7 +956,18 @@ class AnchorerService:
             log_signature=log_signature,
             prev_log_hash=prev_log_hash,
         )
-        self._store.append_entry(entry)
+        try:
+            self._store.append_entry(entry)
+        except LogIndexTaken:
+            stored = self._store.get_entry(log_index)
+            if stored is None or (
+                stored.payload_hash,
+                stored.prev_log_hash,
+                stored.log_signature,
+            ) != (entry.payload_hash, entry.prev_log_hash, entry.log_signature):
+                raise WriterBusy(f"log index {log_index} was taken by another writer") from None
+        self._tree.append(ct_leaf_hash(entry))
+        self._last_entry = entry
         return entry
 
     def _entry_head_hash(self, entry: TransparencyLogEntry) -> str:
@@ -931,9 +975,6 @@ class AnchorerService:
         return self._crypto.sha256(
             tree_head_payload(entry.log_index, entry.payload_hash, entry.prev_log_hash)
         )
-
-    def _head_hash(self) -> str:
-        return self._entry_head_hash(self._store.all_entries()[-1])
 
     # --- audit / verification helpers (hash chain) -------------------------
     def verify_log(self, entries: list[TransparencyLogEntry] | None = None) -> bool:
@@ -972,19 +1013,21 @@ class AnchorerService:
 
     # --- RFC6962 CT log: signed tree head ----------------------------------
     def _ct_leaves(self, entries: list[TransparencyLogEntry] | None = None) -> list[str]:
-        """RFC6962 leaf hashes for the current log (or a supplied slice)."""
-        log = entries if entries is not None else self.transparency_log()
-        return [ct_leaf_hash(e) for e in log]
+        """RFC6962 leaf hashes for the current log (from the cached tree), or
+        for a supplied slice. Caller holds ``self._lock`` when ``entries`` is
+        None."""
+        if entries is not None:
+            return [ct_leaf_hash(e) for e in entries]
+        self._sync_log()
+        return self._tree.leaves_hex(self._tree.size)
 
     def ct_root(self, tree_size: int | None = None) -> str:
         """RFC6962 Merkle Tree Hash of the first ``tree_size`` log leaves."""
         with self._lock:
-            leaves = self._ct_leaves()
+            self._sync_log()
             if tree_size is None:
-                tree_size = len(leaves)
-            if tree_size < 0 or tree_size > len(leaves):
-                raise ValueError("tree_size out of range")
-            return ct.merkle_tree_hash(leaves[:tree_size])
+                tree_size = self._tree.size
+            return self._tree.root(tree_size)
 
     def _sign_and_persist_sth(self) -> SignedTreeHead:
         """Sign the current STH and persist it to the store.
@@ -994,8 +1037,11 @@ class AnchorerService:
         rather than an empty/stale value, and GET /anchor/sth is stable across calls
         within the same tree state instead of producing a fresh timestamp each time.
         """
-        tree_size = self._store.size()
-        root_hash = ct.merkle_tree_hash(self._ct_leaves()[:tree_size])
+        # Size and root from one synced snapshot, never a separate COUNT(*):
+        # another instance may append in between (capsule-anchor#109).
+        self._sync_log()
+        tree_size = self._tree.size
+        root_hash = self._tree.root(tree_size)
         timestamp = _now()
         signature = self._attestor.attest(sth_payload(tree_size, root_hash, timestamp))
         sth = SignedTreeHead(
@@ -1022,7 +1068,8 @@ class AnchorerService:
             stored_json = self._store.get_latest_sth()
             if stored_json is not None:
                 stored = SignedTreeHead.model_validate_json(stored_json)
-                if stored.tree_size >= self._store.size():
+                self._sync_log()
+                if stored.tree_size >= self._tree.size:
                     return stored
             return self._sign_and_persist_sth()
 
@@ -1095,19 +1142,17 @@ class AnchorerService:
         TENANT ledger leaves.
         """
         with self._lock:
-            leaves = self._ct_leaves()
+            self._sync_log()
             if tree_size is None:
-                tree_size = len(leaves)
-            if not (0 <= leaf_index < tree_size <= len(leaves)):
+                tree_size = self._tree.size
+            if not (0 <= leaf_index < tree_size <= self._tree.size):
                 raise IndexError("leaf_index / tree_size out of range")
-            sub = leaves[:tree_size]
-            audit_path = ct.inclusion_audit_path(leaf_index, sub)
             return InclusionProof(
                 leaf_index=leaf_index,
                 tree_size=tree_size,
-                leaf_hash=sub[leaf_index],
-                audit_path=audit_path,
-                root_hash=ct.merkle_tree_hash(sub),
+                leaf_hash=self._tree.leaf(leaf_index),
+                audit_path=self._tree.audit_path(leaf_index, tree_size),
+                root_hash=self._tree.root(tree_size),
             )
 
     def verify_inclusion(
@@ -1297,7 +1342,11 @@ class AnchorerService:
                 checkpoint_fields = parse_checkpoint_payload(payload)  # may raise CheckpointPayloadError
 
         logged_at = _now()
-        with self._lock:
+        # The writer lock makes this section one-at-a-time across instances
+        # too (capsule-anchor#109): the dedup check, the checkpoint key and
+        # continuity checks, the append, the receipt, the tree head and the
+        # tip update all see the state the previous writer left.
+        with self._lock, self._store.writer_lock():
             if checkpoint_continuity is not None:
                 self._check_log_key(checkpoint_continuity)
             # Atomic dedup + append. The get_statement check MUST be inside the
@@ -1387,10 +1436,9 @@ class AnchorerService:
             # entry_hash derivation comment above), so they must never diverge.
             entry = self._append_log(_LOG_KIND_SCITT, preimage_bytes, logged_at)
             leaf_index = entry.log_index
-            leaves = self._ct_leaves()
-            tree_size = len(leaves)
-            audit_hex = ct.inclusion_audit_path(leaf_index, leaves)
-            root_hex = ct.merkle_tree_hash(leaves)
+            tree_size = self._tree.size
+            audit_hex = self._tree.audit_path(leaf_index, tree_size)
+            root_hex = self._tree.root(tree_size)
 
             audit_path = [bytes.fromhex(h) for h in audit_hex]
             root = bytes.fromhex(root_hex)
