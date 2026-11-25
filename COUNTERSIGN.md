@@ -224,9 +224,10 @@ def check(bundle: Bundle, profile_id: str) -> Sequence[CheckResult | Mapping[str
 ```
 
 Each item is a `CheckResult` or a `{name, result, detail}` mapping; either is validated the
-same way, and an item whose `result` is not one of the five words, whose `name` is missing or
-not a string, or that is any other type answers the request with 502 (the module's fault, not
-the requester's). Loaded by profile id. This module ships **no** implementations of this interface —
+same way, and an item whose `result` is not one of the five results (§2), whose `name` is missing
+or not a string, whose `detail` is present and not a string, or that is any other type answers the
+request with 502 (the module's fault, not the requester's). A return that is not a sequence is
+answered the same way. Loaded by profile id. This module ships **no** implementations of this interface —
 only `NullPolicyModule`, a test double that declares no coverage for any record
 kind (every kind then reads `not checked` in profile conformance). A profile's
 checks — what a record kind means, what its content must satisfy — are a separate
