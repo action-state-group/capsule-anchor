@@ -328,15 +328,40 @@ def test_owners_resubmission_still_returns_its_stamp(client, key):
     assert b2["receipt_b64"] == b1["receipt_b64"]
 
 
-def test_a_legacy_label_binds_no_key(client, key):
+def _assert_bound_to(client, owner, log_id, size):
+    resp = client.get(f"/checkpoints/{log_id}", headers=signed_read_headers(owner, log_id))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["mmr_size"] == size
+    stranger = Ed25519PrivateKey.generate()
+    status, body = _post_checkpoint(
+        client, _checkpoint_cose(stranger, log_id=log_id, mmr_size=size, new_peaks=_peaks_for(f"{log_id}-x"))
+    )
+    assert status == 403, body
+    assert client.get(f"/checkpoints/{log_id}").json()["equivocations"] == []
+
+
+def test_a_legacy_label_binds_no_key_and_the_next_verified_key_owns_the_log(client, key):
     """The legacy mmr-checkpoint path stores a self-asserted key_id label: it
-    must not lock the log's real key out."""
+    must not lock the log's real key out, nor leave the log open to any key."""
     from .test_checkpoint_witness import _build_statement, _register
     from .test_checkpoint_witness import _checkpoint as _legacy_checkpoint
 
     status, body = _register(client, _build_statement(_legacy_checkpoint("labelled", mmr_size=5, prev_size=0), key))
     assert status == 200, body
-    _post(client, key, "labelled", 10, prev_size=5, prev_peaks=_peaks_for("labelled-5"))
+    post = _post(client, key, "labelled", 10, prev_size=5, prev_peaks=_peaks_for("labelled-5"))
+    assert post["continuity_grade"] == "first-seen"
+    _assert_bound_to(client, key, "labelled", 10)
+
+
+def test_a_first_checkpoint_preregistered_on_register_still_binds_its_key(client, key):
+    from capsule_anchor.anchoring.service import _checkpoint_digest
+
+    cose = _checkpoint_cose(key, log_id="prereg", mmr_size=10, new_peaks=_peaks_for("prereg-10"))
+    digest = _checkpoint_digest(parse_and_verify_checkpoint_cose(cose, allowlist=SubmitterAllowlist.from_list([])))
+    assert client.post("/register", json={"capsule_id": digest}).status_code == 200
+    status, body = _post_checkpoint(client, cose)
+    assert status == 200, body
+    _assert_bound_to(client, key, "prereg", 10)
 
 
 # --- every store binds the same way -----------------------------------------

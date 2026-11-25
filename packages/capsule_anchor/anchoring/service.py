@@ -1337,6 +1337,19 @@ class AnchorerService:
                     )
                     if stored is not None:
                         cached_continuity_grade = stored.get("continuity_grade")
+                    elif self._bound_tip(checkpoint_continuity) is None:
+                        # A log's FIRST checkpoint whose digest was already
+                        # registered (on /register): it still binds the log
+                        # to its key, or the log would stay open to any key
+                        # (capsule-anchor#110).
+                        self._store.put_checkpoint_witness(
+                            checkpoint_continuity["log_id"],
+                            mmr_size=checkpoint_continuity["mmr_size"],
+                            mmr_root=checkpoint_continuity["root"],
+                            key_id=checkpoint_continuity["key_id"],
+                            timestamp=checkpoint_continuity["timestamp"],
+                        )
+                        cached_continuity_grade = CONTINUITY_GRADE_FIRST_SEEN
                 return StatementRegistration(
                     receipt=receipt_bytes,
                     entry_hash=returned_hash,
@@ -1516,6 +1529,17 @@ class AnchorerService:
             "checkpoints to POST /checkpoints, signed by the log's own key"
         )
 
+    def _bound_tip(self, cp: dict) -> dict | None:
+        """The continuity tip ``cp`` is checked against. For an UNENROLLED
+        ``log_id``, a tip whose ``key_id`` is a legacy self-asserted label (not
+        a 32-byte key) counts as none: it binds no key and proves nothing, so
+        the next verified checkpoint is graded first-seen and binds its own
+        key. Caller holds ``self._lock``."""
+        tip = self._store.get_checkpoint_witness(cp["log_id"])
+        if tip is not None and cp.get("grade") is None and not _is_raw_key_hex(tip["key_id"]):
+            return None
+        return tip
+
     def _check_log_key(self, cp: dict) -> None:
         """Ownership before anything else about ``cp``'s log (capsule-anchor#110):
         an UNENROLLED ``log_id`` belongs to the key of its stored continuity
@@ -1531,8 +1555,8 @@ class AnchorerService:
         ``self._lock``."""
         if cp.get("grade") is not None:
             return
-        tip = self._store.get_checkpoint_witness(cp["log_id"])
-        if tip is None or not _is_raw_key_hex(tip["key_id"]):
+        tip = self._bound_tip(cp)
+        if tip is None:
             return
         if cp["key_id"] != tip["key_id"]:
             raise LogKeyMismatchError(
@@ -1597,7 +1621,7 @@ class AnchorerService:
             the PURE, imported ``cll.checkpoint.core.verify_consistency``
             function, never a capsule-anchor reimplementation of MMR math.
         """
-        prev = self._store.get_checkpoint_witness(cp["log_id"])
+        prev = self._bound_tip(cp)
         if prev is None:
             return CONTINUITY_GRADE_FIRST_SEEN
 
