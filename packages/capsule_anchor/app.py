@@ -8,9 +8,14 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from capsule_anchor.anchoring.store import WriterBusy
+
+#: Seconds a client waits before retrying a write refused for log contention.
+_WRITER_BUSY_RETRY_AFTER_S = 2
 
 _ROOT_HTML = Path(__file__).parent / "static" / "root.html"
 logger = logging.getLogger("capsule_anchor")
@@ -35,7 +40,7 @@ def _start_sth_refresh_thread(svc: object, interval_s: float) -> threading.Threa
         while True:
             time.sleep(interval_s)
             try:
-                if svc._store.size() > 0:  # type: ignore[attr-defined]
+                if svc.log_size() > 0:  # type: ignore[attr-defined]
                     svc.refresh_sth()  # type: ignore[attr-defined]
             except Exception:  # noqa: BLE001
                 pass
@@ -89,6 +94,18 @@ def create_app() -> FastAPI:
         ),
         version="0.1.0",
     )
+
+    # capsule-anchor#109: log contention (the cross-instance writer lock not
+    # taken in time, or an index taken by a writer without it) answers 429
+    # with Retry-After on every route that appends -- never a 500. See
+    # WriterBusy for what a refused request may have written.
+    @app.exception_handler(WriterBusy)
+    async def _writer_busy(_request: Request, exc: WriterBusy) -> JSONResponse:
+        return JSONResponse(
+            status_code=429,
+            content={"detail": {"error": f"the log is busy: {exc}; retry", "code": "log_busy"}},
+            headers={"Retry-After": str(_WRITER_BUSY_RETRY_AFTER_S)},
+        )
 
     # Read-only CORS: allow browsers on the standard site to fetch the public
     # log endpoints. GET-only so write paths (all POST) are unaffected.
@@ -214,6 +231,9 @@ def create_app() -> FastAPI:
     logger.info("embedded payloads: %s", payload_policy.describe()["embedded_payloads"])
     logger.info("consistency-proof policy for native checkpoint logs: %s", consistency_proof_policy)
     cfg_anchor(_svc)
+    # Read the log once now, so the first registration on a new instance does
+    # not do it while holding the service lock (capsule-anchor#109).
+    _svc.log_size()
 
     # Enrolled external checkpoint submitters (POST /checkpoints identity
     # pinning) -- loads from CAPSULE_ANCHOR_CHECKPOINT_SUBMITTERS_FILE if
@@ -349,7 +369,7 @@ def create_app() -> FastAPI:
         from capsule_anchor.anchoring.retention import declared_posture
         from capsule_anchor.anchoring.router import get_service
         svc = get_service()
-        tree_size = svc._store.size()
+        tree_size = svc.log_size()
         result: dict = {
             "ok": True,
             # Scheme only ("env" | "file" | "generated") -- never the

@@ -40,8 +40,12 @@ in service.py and ct.py.
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import sqlite3
 import threading
+import time
+from collections.abc import Iterator
 from datetime import datetime
 
 from capsule_anchor.contracts.types import (
@@ -49,6 +53,21 @@ from capsule_anchor.contracts.types import (
     Signature,
     TransparencyLogEntry,
 )
+
+
+class LogIndexTaken(Exception):
+    """``append_entry`` found ``log_index`` already used, by another writer
+    (one without the writer lock, during a rollout). The caller compares
+    ``get_entry(log_index)`` with its own entry: an identical row is not a
+    conflict (capsule-anchor#109)."""
+
+
+class WriterBusy(Exception):
+    """The cross-instance writer lock could not be taken in time, or was lost
+    with its connection; the client retries later (429 + ``Retry-After``,
+    capsule-anchor#109). The section is one transaction (``writer_lock``):
+    a refused request wrote nothing, or, if the drop came after its commit,
+    wrote all of it, receipt included, so a retry gets that receipt."""
 
 
 def _sig_to_json(sig: Signature) -> str:
@@ -99,7 +118,17 @@ class InMemoryLogStore:
 
     # --- log ---
     def append_entry(self, entry: TransparencyLogEntry) -> None:
+        if entry.log_index != len(self._log):
+            raise LogIndexTaken(entry.log_index)
         self._log.append(entry)
+
+    def get_entry(self, log_index: int) -> TransparencyLogEntry | None:
+        return self._log[log_index] if 0 <= log_index < len(self._log) else None
+
+    @contextlib.contextmanager
+    def writer_lock(self, timeout_s: float = 0.0) -> Iterator[None]:  # noqa: ARG002
+        """One process holds this store: the service lock already serializes."""
+        yield
 
     def all_entries(self) -> list[TransparencyLogEntry]:
         return list(self._log)
@@ -576,20 +605,38 @@ class SqliteLogStore:
 
     # --- log ---
     def append_entry(self, entry: TransparencyLogEntry) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT INTO log_entries "
-                "(log_index, logged_at, kind, payload_hash, log_signature, "
-                " prev_log_hash) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    entry.log_index,
-                    entry.logged_at.isoformat(),
-                    entry.kind,
-                    entry.payload_hash,
-                    _sig_to_json(entry.log_signature),
-                    entry.prev_log_hash,
-                ),
+        try:
+            with self._lock, self._conn:
+                self._conn.execute(
+                    "INSERT INTO log_entries "
+                    "(log_index, logged_at, kind, payload_hash, log_signature, "
+                    " prev_log_hash) VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        entry.log_index,
+                        entry.logged_at.isoformat(),
+                        entry.kind,
+                        entry.payload_hash,
+                        _sig_to_json(entry.log_signature),
+                        entry.prev_log_hash,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise LogIndexTaken(entry.log_index) from exc
+
+    def get_entry(self, log_index: int) -> TransparencyLogEntry | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT log_index, logged_at, kind, payload_hash, log_signature, "
+                "prev_log_hash FROM log_entries WHERE log_index = ?",
+                (log_index,),
             )
+            row = cur.fetchone()
+        return self._row_to_entry(row) if row is not None else None
+
+    @contextlib.contextmanager
+    def writer_lock(self, timeout_s: float = 0.0) -> Iterator[None]:  # noqa: ARG002
+        """A SQLite file serves one process: the service lock serializes."""
+        yield
 
     def all_entries(self) -> list[TransparencyLogEntry]:
         with self._lock:
@@ -1014,6 +1061,15 @@ class SqliteLogStore:
             self._conn.close()
 
 
+#: How long a registration waits for the cross-instance writer lock before
+#: answering 429 (capsule-anchor#109).
+WRITER_LOCK_TIMEOUT_S = 10.0
+
+#: The advisory-lock key for the log writer: a stable 63-bit number derived
+#: from a name, so no other user of the database picks it by accident.
+_WRITER_LOCK_KEY = int.from_bytes(hashlib.sha256(b"capsule-anchor/log-writer").digest()[:8], "big") >> 1
+
+
 class PostgresLogStore:
     """Durable append-only store backed by Cloud SQL Postgres (psycopg v3).
 
@@ -1043,7 +1099,11 @@ class PostgresLogStore:
             ) from exc
         self._pg = _psycopg
         self._database_url = database_url
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # held across a writer section (writer_lock)
+        # writer_lock state: nesting depth, and the connection whose session
+        # holds the advisory lock (None when not held).
+        self._writer_depth = 0
+        self._writer_lost = False
         # autocommit=True: explicit conn.transaction() blocks own each write;
         # reads happen outside a transaction (no read-snapshot overhead).
         self._conn = _psycopg.connect(database_url, autocommit=True)
@@ -1054,11 +1114,15 @@ class PostgresLogStore:
     # ------------------------------------------------------------------
 
     def _reconnect(self) -> None:
-        """Replace the stale connection with a fresh one."""
+        """Replace the stale connection with a fresh one. Inside a writer
+        section the advisory lock went with the old session, so the section
+        is marked lost and its later writes refuse (``_transact``)."""
         try:
             self._conn.close()
         except Exception:  # noqa: BLE001, S110
             pass
+        if self._writer_depth:
+            self._writer_lost = True
         self._conn = self._pg.connect(self._database_url, autocommit=True)
 
     def _read(self, sql: str, params: tuple = ()) -> object:
@@ -1075,10 +1139,16 @@ class PostgresLogStore:
             with self._conn.transaction():
                 fn()  # type: ignore[operator]
 
+        if self._writer_depth and self._writer_lost:
+            raise WriterBusy("the writer lock was lost with its connection")
         try:
             _run()
         except self._pg.OperationalError:
             self._reconnect()
+            if self._writer_depth:
+                # Never replay a write without the advisory lock: another
+                # instance may hold it now (capsule-anchor#109).
+                raise WriterBusy("the connection dropped inside the writer section") from None
             _run()
 
     def _init_schema(self) -> None:
@@ -1283,14 +1353,108 @@ class PostgresLogStore:
             entry.prev_log_hash,
         )
         with self._lock:
-            self._transact(
-                lambda: self._conn.execute(
-                    "INSERT INTO log_entries "
-                    "(log_index, logged_at, kind, payload_hash, log_signature, prev_log_hash) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    params,
+            try:
+                self._transact(
+                    lambda: self._conn.execute(
+                        "INSERT INTO log_entries "
+                        "(log_index, logged_at, kind, payload_hash, log_signature, prev_log_hash) "
+                        "VALUES (%s, %s, %s, %s, %s, %s)",
+                        params,
+                    )
                 )
+            except self._pg.errors.UniqueViolation as exc:
+                raise LogIndexTaken(entry.log_index) from exc
+
+    def get_entry(self, log_index: int) -> TransparencyLogEntry | None:
+        with self._lock:
+            cur = self._read(
+                "SELECT log_index, logged_at, kind, payload_hash, log_signature, "
+                "prev_log_hash FROM log_entries WHERE log_index = %s",
+                (log_index,),
             )
+            row = cur.fetchone()
+        return self._row_to_entry(row) if row is not None else None
+
+    @contextlib.contextmanager
+    def writer_lock(self, timeout_s: float = WRITER_LOCK_TIMEOUT_S) -> Iterator[None]:
+        """Serialize the registration section across instances, and make it
+        atomic (capsule-anchor#109): a session-level advisory lock on this
+        store's one connection, then ONE transaction around the whole
+        section. The log entry, the receipt, the subject index, the tree head
+        and the checkpoint tip commit together or not at all, so a connection
+        that drops mid-section leaves no half state (no stored receipt whose
+        tip never moved, which would let another instance co-sign a fork).
+
+        Postgres queues waiters for the lock in order, so a busy instance
+        cannot starve the others. Re-entrant within the process; the store
+        lock is held for the whole section, so this instance's other store
+        calls wait behind it (and behind the lock wait, at most
+        ``timeout_s``) rather than run inside the open transaction. A second
+        connection for the lock alone would avoid that wait, but could drop
+        unseen while the data writes go on.
+
+        Raises ``WriterBusy`` when the lock is not granted within
+        ``timeout_s``, or when the connection drops inside the section (the
+        transaction is then rolled back and nothing is replayed)."""
+        with self._lock:
+            if self._writer_depth:
+                self._writer_depth += 1
+                try:
+                    yield
+                finally:
+                    self._writer_depth -= 1
+                return
+            deadline = time.monotonic() + timeout_s
+
+            def _take() -> None:
+                # One budget for both tries: the retry waits only what is left.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise WriterBusy("the writer lock was not granted in time")
+                timeout_ms = max(1, int(remaining * 1000))
+                with self._conn.transaction():
+                    # SET LOCAL ends with this transaction; the advisory
+                    # lock is session-level and outlives it.
+                    self._conn.execute(f"SET LOCAL lock_timeout = {timeout_ms}")
+                    self._conn.execute("SELECT pg_advisory_lock(%s)", (_WRITER_LOCK_KEY,))
+
+            try:
+                try:
+                    _take()
+                except self._pg.OperationalError as exc:
+                    if isinstance(exc, self._pg.errors.LockNotAvailable):
+                        raise
+                    # Nothing is held yet: a connection Cloud SQL closed
+                    # while idle is replaced once, as every other call does.
+                    self._reconnect()
+                    _take()
+            except self._pg.errors.LockNotAvailable as exc:
+                raise WriterBusy("another instance holds the log writer lock") from exc
+            except self._pg.OperationalError as exc:
+                self._reconnect()
+                raise WriterBusy("the connection dropped while taking the writer lock") from exc
+            self._writer_depth = 1
+            self._writer_lost = False
+            try:
+                try:
+                    with self._conn.transaction():
+                        yield
+                except self._pg.OperationalError as exc:
+                    # The drop rolled the transaction back with the session.
+                    if not self._writer_lost:
+                        self._reconnect()
+                    raise WriterBusy("the connection dropped inside the writer section") from exc
+            finally:
+                self._writer_depth = 0
+                lost, self._writer_lost = self._writer_lost, False
+                if not lost:
+                    try:
+                        self._conn.execute("SELECT pg_advisory_unlock(%s)", (_WRITER_LOCK_KEY,))
+                    except self._pg.Error:
+                        # An unlock that did not complete may leave the
+                        # session holding the lock: drop the session so the
+                        # lock goes with it.
+                        self._reconnect()
 
     def all_entries(self) -> list[TransparencyLogEntry]:
         with self._lock:

@@ -196,8 +196,14 @@ CI refuses to deploy while `did.json` is unreachable (it needs the identity from
 
 With Postgres as the backing store, multiple Cloud Run instances are safe:
 
-- **Log integrity**: all instances write to the same Postgres database; `log_index` is a BIGINT
-  primary key, so concurrent appends serialize correctly.
+- **Log integrity**: all instances write to the same Postgres database. Each registration
+  (its duplicate check, checkpoint checks, append, receipt and tree head) runs under a
+  Postgres advisory lock (`PostgresLogStore.writer_lock`), so instances append one at a time.
+  `log_index` is the BIGINT primary key as a backstop: an index taken anyway (an instance
+  without the lock, during a rollout) is refused with 429 and `Retry-After`, never a 500, and
+  a request that waits more than 10 seconds in all for the instance's own queue and the
+  lock gets the same answer. Postgres grants the lock to waiting instances in turn, and the
+  whole registration is one transaction, so a dropped connection leaves no half state.
 - **Dedup**: the `submitted_statements` table uses `ON CONFLICT (entry_hash) DO NOTHING`, so
   duplicate submissions from concurrent instances are idempotent.
 - **STH refresh**: each instance re-signs and persists the Signed Tree Head on its own

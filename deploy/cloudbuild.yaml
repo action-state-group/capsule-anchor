@@ -19,8 +19,10 @@ substitutions:
   # The service refuses to start without it (see app.py fail-closed check).
   _DATABASE_SECRET: "capsule-anchor-database-url"
   _TAG: "latest"
-  # Safe to scale out with the Postgres backend: log_index appends serialize
-  # via a BIGINT primary key, submitted_statements dedup is idempotent, and
+  # Safe to scale out with the Postgres backend: registrations serialize on
+  # a Postgres advisory lock (PostgresLogStore.writer_lock, capsule-anchor#109),
+  # with the BIGINT log_index primary key as a backstop answered 429,
+  # submitted_statements dedup is idempotent, and
   # the singleton STH row is written through an atomic compare-and-swap (see
   # LogStore.put_sth) so concurrent instances can never move it backwards.
   # 10 matches deploy/DEPLOY.md's recommended HA config -- not a safety cap,
