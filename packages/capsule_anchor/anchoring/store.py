@@ -65,9 +65,9 @@ class LogIndexTaken(Exception):
 class WriterBusy(Exception):
     """The cross-instance writer lock could not be taken in time, or was lost
     with its connection; the client retries later (429 + ``Retry-After``,
-    capsule-anchor#109). Refused before the append, the request wrote
-    nothing; refused after a connection drop, its append may have committed
-    without its receipt, so a retry can land the statement at a second leaf."""
+    capsule-anchor#109). The section is one transaction (``writer_lock``):
+    a refused request wrote nothing, or, if the drop came after its commit,
+    wrote all of it, receipt included, so a retry gets that receipt."""
 
 
 def _sig_to_json(sig: Signature) -> str:
