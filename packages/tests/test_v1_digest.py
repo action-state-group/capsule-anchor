@@ -11,7 +11,7 @@ DIGEST_64 = "a" * 64  # valid 64-hex (32 bytes of 0xaa)
 DIGEST_B = bytes.fromhex(DIGEST_64)
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def client():
     return TestClient(create_app())
 

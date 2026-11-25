@@ -20,7 +20,7 @@ CID = "c" * 64  # arbitrary valid 64-hex capsule_id, distinct from other test mo
 UNKNOWN_CID = "d1" * 32  # never registered in this app instance
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def client():
     return TestClient(create_app())
 

@@ -90,7 +90,7 @@ def _build_statement_and_twin(payload: bytes, key: ec.EllipticCurvePrivateKey) -
     return statement, statement_twin
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def client():
     return TestClient(create_app())
 
