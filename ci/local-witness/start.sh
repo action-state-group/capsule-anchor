@@ -10,7 +10,12 @@ set -euo pipefail
 
 dir="$RUNNER_TEMP/local-witness"
 mkdir -p "$dir"
-python3 -m venv "$dir/venv"
+# PYTHON picks the interpreter the venv is made from (scripts/check.sh passes
+# its uv-provisioned 3.12); the service needs 3.11 or later (pyproject.toml).
+base="${PYTHON:-python3}"
+"$base" -c 'import sys; sys.exit(sys.version_info < (3, 11))' \
+  || { echo "::error::$base is older than Python 3.11, which capsule-anchor needs; set PYTHON"; exit 1; }
+"$base" -m venv "$dir/venv"
 "$dir/venv/bin/pip" install --quiet --disable-pip-version-check "$SRC"
 py="$dir/venv/bin/python"
 
@@ -40,6 +45,10 @@ url="https://localhost:$port"
 # main), so uvicorn serves the app factory directly. The three variables are the
 # ones create_app requires; in-memory storage is right for a witness that lives
 # only as long as the job.
+# Every other CAPSULE_ANCHOR_* setting the calling job may carry is dropped, so
+# none reaches this witness: a database URL would replace the in-memory store
+# and CAPSULE_ANCHOR_PUBLIC_LOG=rekor would publish to a real external log.
+unset $(compgen -e | grep '^CAPSULE_ANCHOR_' || true)
 CAPSULE_ANCHOR_SIGNING_KEY="$seed" CAPSULE_ANCHOR_PUBLIC_HOST=localhost CAPSULE_ANCHOR_INSECURE_IN_MEMORY=1 \
   nohup "$py" -m uvicorn --factory capsule_anchor.app:create_app --host 127.0.0.1 --port "$port" \
   --ssl-keyfile "$dir/tls.key" --ssl-certfile "$dir/tls.crt" > "$dir/witness.log" 2>&1 &

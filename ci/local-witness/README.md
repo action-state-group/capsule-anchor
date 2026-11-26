@@ -29,5 +29,8 @@ instead of posting to the hosted witness at `witness.agentactioncapsule.org`
 - Unless `block-production: "false"`, `witness.`, `anchor.` and
   `ts.agentactioncapsule.org` resolve to this host for the rest of the job, so a
   call that still reaches for the hosted witness fails.
+- The service runs from its own venv, made from `python3` (3.11 or later; set
+  `PYTHON` to choose another), and ignores any `CAPSULE_ANCHOR_*` setting of the
+  calling job.
 - Made for Linux runners. `scripts/check.sh` also runs it on a Mac, with
   `BLOCK=false`.

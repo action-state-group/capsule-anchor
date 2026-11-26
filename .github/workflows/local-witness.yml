@@ -17,6 +17,11 @@ jobs:
   local-witness:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # Settings a calling job may carry: the witness must ignore both (an
+    # unreachable database, publication to a real external log).
+    env:
+      CAPSULE_ANCHOR_DATABASE_URL: postgresql://nobody:nothing@127.0.0.1:1/none
+      CAPSULE_ANCHOR_PUBLIC_LOG: rekor
     steps:
       - uses: actions/checkout@v4
         with:

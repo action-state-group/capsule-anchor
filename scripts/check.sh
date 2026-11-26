@@ -27,8 +27,10 @@ done
 # local-witness.yml: start ci/local-witness, register a checkpoint over TLS,
 # check the authority key and the log.
 mkdir -p "$tmp/lw"
-RUNNER_TEMP="$tmp/lw" GITHUB_OUTPUT="$tmp/lw/out" SRC="$PWD" BLOCK=false bash ci/local-witness/start.sh
-trap 'kill "$(cat "$tmp/lw/local-witness/pid")" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+# Set before the start, so a start that fails after launching the service still stops it.
+trap 'kill "$(cat "$tmp/lw/local-witness/pid" 2>/dev/null)" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+RUNNER_TEMP="$tmp/lw" GITHUB_OUTPUT="$tmp/lw/out" SRC="$PWD" BLOCK=false PYTHON="$tmp/py3.12/bin/python" \
+  bash ci/local-witness/start.sh
 out() { sed -n "s/^$1=//p" "$tmp/lw/out"; }
 SSL_CERT_FILE="$(out ca-bundle)" "$tmp/py3.12/bin/python" examples/cross-witness-checkpoint-smoke/submit_checkpoint.py \
   --host "$(out url)" --log-id ci-local-witness/v1 > /dev/null
