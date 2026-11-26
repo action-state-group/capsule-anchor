@@ -836,10 +836,11 @@ def test_a_preregistered_checkpoint_that_does_not_extend_the_tip_is_refused():
 
 
 @pytest.mark.parametrize("db", _EVERY_STORE)
-def test_a_second_signing_of_one_position_keeps_its_own_receipt(tmp_path, db):
+def test_a_second_signing_of_one_position_is_completed_with_its_own_receipt(tmp_path, db):
     """N signed twice (same size and root, another issued_at) is two signing
-    acts with two receipts. Completing or retrying the second never answers,
-    or records, the first one's receipt."""
+    acts with two receipts. A's record, left with no grade, neither lends B
+    its receipt nor keeps B from being accepted: B's retry completes B, so
+    B's successor is not refused. A's retry then gets no grade B earned."""
     from capsule_anchor.anchoring.service import _checkpoint_digest
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -853,28 +854,30 @@ def test_a_second_signing_of_one_position_keeps_its_own_receipt(tmp_path, db):
     proof = _proof_claim(log.proof(s1, s2))
     n_a = _cp(key, log, s2, s1, "2026-11-26T07:49:00Z", proof)
     n_b = _cp(key, log, s2, s1, "2026-11-26T07:49:30Z", proof)
+    s3 = log.grow_leaves(2)
+    after_b = _cp(key, log, s3, s2, "2026-11-26T07:50:00Z", _proof_claim(log.proof(s2, s3)))
     assert _checkpoint_digest(n_a) != _checkpoint_digest(n_b)
     svc.witness_checkpoint(first)
     plain_a = svc.register_signed_statement_full(bytes.fromhex(_checkpoint_digest(n_a)))
     plain_b = svc.register_signed_statement_full(bytes.fromhex(_checkpoint_digest(n_b)))
     svc._record_checkpoint_read_surface(n_a, plain_a)  # noqa: SLF001 -- A's record, left with no grade
 
-    got_b = svc.witness_checkpoint(n_b)  # B is not A's acceptance: it keeps its own receipt
-    assert got_b.receipt == plain_b.receipt
-    assert got_b.entry_hash == plain_b.entry_hash
+    got_b = svc.witness_checkpoint(n_b)
+    assert got_b.continuity_grade == CONTINUITY_GRADE_WITNESSED
+    assert (got_b.entry_hash, got_b.leaf_index) == (plain_b.entry_hash, plain_b.leaf_index)
+    assert got_b.receipt not in (plain_a.receipt, plain_b.receipt)  # signed for B, with the assertion
+    assert _continuity_assertion(got_b.receipt)["mmr_size"] == s2
     record = svc.get_checkpoint_readback("two-signings")
-    assert (record["entry_hash"], record["receipt"]) == (plain_a.entry_hash, plain_a.receipt)
+    assert (record["entry_hash"], record["receipt"]) == (plain_b.entry_hash, got_b.receipt)
+    assert svc.witness_checkpoint(after_b).continuity_grade == CONTINUITY_GRADE_WITNESSED
 
-    got_a = svc.witness_checkpoint(n_a)  # A completes its own record
-    assert got_a.continuity_grade == CONTINUITY_GRADE_WITNESSED
-    record = svc.get_checkpoint_readback("two-signings")
-    assert (record["entry_hash"], record["receipt"]) == (plain_a.entry_hash, got_a.receipt)
-    again_b = svc.witness_checkpoint(n_b)
-    assert (again_b.receipt, again_b.continuity_grade) == (plain_b.receipt, None)  # A's grade is not B's
+    got_a = svc.witness_checkpoint(n_a)  # behind the tip now: its own receipt, no grade of B's
+    assert (got_a.receipt, got_a.continuity_grade) == (plain_a.receipt, None)
+    assert svc._store.get_checkpoint_record("two-signings", s2)["entry_hash"] == plain_b.entry_hash  # noqa: SLF001
 
 
 @pytest.mark.parametrize("db", _EVERY_STORE)
-def test_a_store_completes_only_the_same_signing_acts_record(tmp_path, db):
+def test_a_store_completes_an_ungraded_record_whole_and_never_a_graded_one(tmp_path, db):
     store = _store_service(tmp_path, db)._store  # noqa: SLF001
     base = {
         "root": "aa" * 32, "prev_size": 1, "prev_root": "bb" * 32, "key_id": "cc" * 32,
@@ -887,15 +890,11 @@ def test_a_store_completes_only_the_same_signing_acts_record(tmp_path, db):
              "tree_size": 6, "receipt": b"other", "continuity_grade": CONTINUITY_GRADE_WITNESSED}
     assert store.put_checkpoint_record("ids", 7, other) is False
     got = store.get_checkpoint_record("ids", 7)
-    assert (got["entry_hash"], got["receipt"], got["continuity_grade"]) == ("01" * 32, b"first", None)
-    same = {**base, "tree_size": 9, "receipt": b"completed", "continuity_grade": CONTINUITY_GRADE_WITNESSED}
-    store.put_checkpoint_record("ids", 7, same)
-    got = store.get_checkpoint_record("ids", 7)
-    assert (got["receipt"], got["tree_size"], got["continuity_grade"]) == (
-        b"completed", 9, CONTINUITY_GRADE_WITNESSED,
-    )
+    assert {k: got[k] for k in other} == other  # one act's record, never a mix of two
+    later = {**base, "entry_hash": "03" * 32, "receipt": b"later", "continuity_grade": CONTINUITY_GRADE_WITNESSED}
+    store.put_checkpoint_record("ids", 7, later)
+    assert store.get_checkpoint_record("ids", 7)["entry_hash"] == "02" * 32  # a graded record stays
     assert store.get_checkpoint_equivocations("ids") == []
-
 
 @_pg_required
 def test_pg_a_retry_before_the_first_writers_record_keeps_the_witnessed_grade():

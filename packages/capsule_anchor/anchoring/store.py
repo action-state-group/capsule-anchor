@@ -224,12 +224,10 @@ class InMemoryLogStore:
             self._checkpoint_records[key] = dict(record)
             return False
         if existing["root"] == record["root"]:
-            if (
-                existing["entry_hash"] == record["entry_hash"]
-                and existing.get("continuity_grade") is None
-                and record.get("continuity_grade") is not None
-            ):
-                self._checkpoint_records[key] = dict(record)  # the same signing act completed (#120)
+            if existing.get("continuity_grade") is None and record.get("continuity_grade") is not None:
+                # An acceptance at this position completed: its record, whole,
+                # replaces the one left with no grade (capsule-anchor#120).
+                self._checkpoint_records[key] = dict(record)
             return False  # idempotent resubmission of the same checkpoint
         # EQUIVOCATION: a different root already occupies this exact
         # (log_id, mmr_size) slot. Never overwrite the first-seen record --
@@ -851,17 +849,21 @@ class SqliteLogStore:
                 )
                 return False
             if existing[0] == record["root"]:
-                if (
-                    existing[1] == record["entry_hash"]
-                    and existing[3] is None
-                    and record.get("continuity_grade") is not None
-                ):
-                    # The same signing act's acceptance completed (capsule-anchor#120).
+                if existing[3] is None and record.get("continuity_grade") is not None:
+                    # An acceptance at this position completed: its record,
+                    # whole, replaces the one left with no grade
+                    # (capsule-anchor#120).
                     self._conn.execute(
-                        "UPDATE checkpoint_records SET receipt = ?, tree_size = ?, "
-                        "continuity_grade = ? WHERE log_id = ? AND mmr_size = ?",
+                        "UPDATE checkpoint_records SET prev_size = ?, prev_root = ?, "
+                        "key_id = ?, timestamp = ?, grade = ?, entry_hash = ?, "
+                        "entry_hash_scheme = ?, leaf_index = ?, tree_size = ?, "
+                        "receipt = ?, continuity_grade = ? "
+                        "WHERE log_id = ? AND mmr_size = ?",
                         (
-                            record["receipt"], int(record["tree_size"]),
+                            int(record["prev_size"]), record["prev_root"], record["key_id"],
+                            record["timestamp"], record.get("grade"), record["entry_hash"],
+                            record["entry_hash_scheme"], int(record["leaf_index"]),
+                            int(record["tree_size"]), record["receipt"],
                             record["continuity_grade"], log_id, mmr_size,
                         ),
                     )
@@ -1710,17 +1712,21 @@ class PostgresLogStore:
                 (log_id, mmr_size),
             ).fetchone()
             if existing[0] == record["root"]:
-                if (
-                    existing[1] == record["entry_hash"]
-                    and existing[3] is None
-                    and record.get("continuity_grade") is not None
-                ):
-                    # The same signing act's acceptance completed (capsule-anchor#120).
+                if existing[3] is None and record.get("continuity_grade") is not None:
+                    # An acceptance at this position completed: its record,
+                    # whole, replaces the one left with no grade
+                    # (capsule-anchor#120).
                     self._conn.execute(
-                        "UPDATE checkpoint_records SET receipt = %s, tree_size = %s, "
-                        "continuity_grade = %s WHERE log_id = %s AND mmr_size = %s",
+                        "UPDATE checkpoint_records SET prev_size = %s, prev_root = %s, "
+                        "key_id = %s, timestamp = %s, grade = %s, entry_hash = %s, "
+                        "entry_hash_scheme = %s, leaf_index = %s, tree_size = %s, "
+                        "receipt = %s, continuity_grade = %s "
+                        "WHERE log_id = %s AND mmr_size = %s",
                         (
-                            record["receipt"], int(record["tree_size"]),
+                            int(record["prev_size"]), record["prev_root"], record["key_id"],
+                            record["timestamp"], record.get("grade"), record["entry_hash"],
+                            record["entry_hash_scheme"], int(record["leaf_index"]),
+                            int(record["tree_size"]), record["receipt"],
                             record["continuity_grade"], log_id, mmr_size,
                         ),
                     )

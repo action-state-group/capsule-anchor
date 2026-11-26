@@ -1410,25 +1410,27 @@ class AnchorerService:
                     stored = self._store.get_checkpoint_record(
                         checkpoint_continuity["log_id"], checkpoint_continuity["mmr_size"]
                     )
-                    if stored is not None and stored["entry_hash"] != returned_hash:
-                        # Another signing act holds this position (the same
-                        # checkpoint signed again, or an equivocation): this
-                        # one keeps its own receipt, and the grade that act
-                        # earned is not this one's.
-                        pass
-                    elif stored is not None and stored.get("continuity_grade") is not None:
-                        # This checkpoint's completed acceptance: answer its
+                    if (
+                        stored is not None
+                        and stored["entry_hash"] == returned_hash
+                        and stored.get("continuity_grade") is not None
+                    ):
+                        # This signing act's completed acceptance: answer its
                         # own receipt, which a completion may have re-signed.
+                        # A record of ANOTHER act at this position (the same
+                        # checkpoint signed again) is never answered here: its
+                        # receipt and grade are that act's.
                         cached_continuity_grade = stored["continuity_grade"]
                         receipt_bytes = stored["receipt"]
                         tree_size = stored["tree_size"]
                     else:
-                        # The digest has a receipt but this checkpoint's
+                        # The digest has a receipt but this signing act's
                         # acceptance never completed: it was registered on
                         # /register, or an earlier acceptance stored the
                         # receipt and failed before its tip (a v0.1.4 store
                         # committed each write on its own), or a retry
-                        # recorded it with no grade. Accept it now as a new
+                        # recorded it with no grade, or another act holds
+                        # the record at this position. Accept it now as a new
                         # checkpoint would be, on the leaf it already has, so
                         # a receipt is never answered while the tip stays
                         # behind it (capsule-anchor#120). A log's first
