@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Local witness answered
+description: >-
+  Print the log of the witness ci/local-witness started and fail unless it
+  answered at least one POST /checkpoints with a 2xx status. Run it after the
+  step that registers checkpoints, with if: always() to keep the log on failure.
+inputs:
+  log:
+    description: The log output of ci/local-witness.
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        LOG: ${{ inputs.log }}
+      run: |
+        set -euo pipefail
+        echo "::group::local witness log"
+        cat "$LOG"
+        echo "::endgroup::"
+        n="$(grep -cE '"POST /checkpoints HTTP/[0-9.]+" 2[0-9][0-9]' "$LOG" || true)"
+        echo "local witness answered POST /checkpoints with 2xx: $n time(s)"
+        [ "$n" -gt 0 ] || { echo "::error::the local witness answered no POST /checkpoints with 2xx"; exit 1; }

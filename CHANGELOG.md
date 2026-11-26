@@ -6,6 +6,16 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **`ci/local-witness`, a witness for other repositories' CI.** A composite action starts
+  this service inside the calling job over TLS on `localhost` (its own venv, an in-memory
+  store, a throwaway key), outputs the URL, the authority public key, a CA bundle for
+  `SSL_CERT_FILE` and the log path, and blocks the hosted witness's hostnames for the rest
+  of the job. `ci/local-witness/check` prints the log and fails unless it answered a
+  `POST /checkpoints`. CI jobs that test witnessing use it instead of posting to
+  `witness.agentactioncapsule.org` (#109, ask 1).
+
 ### Fixed
 
 - **Concurrent appends no longer answer 500.** Instances took the next log index from

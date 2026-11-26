@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# ci/local-witness (the witness other repositories' CI starts instead of
+# posting to the hosted one, #109): start it from this checkout, register a
+# checkpoint with the cross-witness smoke client over TLS, check the receipt
+# is signed under the key the action reported, and check the log.
+name: local-witness
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  local-witness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Settings a calling job may carry: the witness must ignore both (an
+    # unreachable database, publication to a real external log).
+    env:
+      CAPSULE_ANCHOR_DATABASE_URL: postgresql://nobody:nothing@127.0.0.1:1/none
+      CAPSULE_ANCHOR_PUBLIC_LOG: rekor
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: witness
+        uses: ./ci/local-witness
+      - name: production is blocked
+        run: |
+          if curl -s --max-time 10 -o /dev/null https://witness.agentactioncapsule.org/health; then
+            echo "::error::the production witness is still reachable"; exit 1
+          fi
+      - name: register a checkpoint and verify its receipt under the reported key
+        env:
+          SSL_CERT_FILE: ${{ steps.witness.outputs.ca-bundle }}
+          URL: ${{ steps.witness.outputs.url }}
+          KEY: ${{ steps.witness.outputs.public-key }}
+        run: |
+          python3 -m venv "$RUNNER_TEMP/smoke"
+          "$RUNNER_TEMP/smoke/bin/pip" install --quiet cbor2 httpx cryptography scitt-cose
+          "$RUNNER_TEMP/smoke/bin/python" examples/cross-witness-checkpoint-smoke/submit_checkpoint.py --host "$URL" --log-id ci-local-witness/v1
+          "$RUNNER_TEMP/smoke/bin/python" - <<'PY'
+          import os, httpx
+          got = httpx.get(os.environ["URL"] + "/anchor/authority-pubkey").json()["pubkey_hex"]
+          assert got == os.environ["KEY"], (got, os.environ["KEY"])
+          print("authority key matches the action's output:", got)
+          PY
+      - if: always()
+        uses: ./ci/local-witness/check
+        with:
+          log: ${{ steps.witness.outputs.log }}
