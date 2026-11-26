@@ -5,7 +5,7 @@ Runs only with ``CAPSULE_ANCHOR_TEST_DATABASE_URL`` set; see ``conftest.py``.
 from __future__ import annotations
 
 import os
-import uuid
+import time
 
 import pytest
 from capsule_anchor.app import create_app
@@ -31,14 +31,6 @@ def _connect(url):
     return psycopg.connect(url, autocommit=True)
 
 
-def _connections_to_test_database() -> int:
-    with _connect(TEST_DATABASE_URL) as conn:
-        return conn.execute(
-            "SELECT count(*) FROM pg_stat_activity "
-            "WHERE datname = current_database() AND pid <> pg_backend_pid()"
-        ).fetchone()[0]
-
-
 def test_each_test_starts_on_an_empty_schema_of_its_own():
     url = os.environ["CAPSULE_ANCHOR_DATABASE_URL"]
     with _connect(url) as conn:
@@ -62,31 +54,37 @@ def test_a_closed_store_cannot_reconnect_and_holds_no_connection():
     teardown closed the store, that call must fail, not open a connection."""
     from capsule_anchor.anchoring.store import PostgresLogStore
 
-    before = _connections_to_test_database()
     store = PostgresLogStore(os.environ["CAPSULE_ANCHOR_DATABASE_URL"])
-    assert _connections_to_test_database() == before + 1
+    backend_pid = store._conn.info.backend_pid
     close_for_good(store)
     with pytest.raises(RuntimeError, match="closed at teardown"):
         store.size()
-    assert _connections_to_test_database() == before
-
-
-def test_schema_cycle_leaves_everything_else_in_the_database_alone():
-    sentinel = f"sentinel_{uuid.uuid4().hex}"
+    assert store._conn.closed
     with _connect(TEST_DATABASE_URL) as conn:
-        conn.execute(f"CREATE TABLE public.{sentinel} (v int)")
-        conn.execute(f"INSERT INTO public.{sentinel} VALUES (1)")
+        # The server ends a backend shortly after its client goes away.
+        deadline = time.monotonic() + 5
+        while conn.execute(
+            "SELECT count(*) FROM pg_stat_activity WHERE pid = %s", (backend_pid,)
+        ).fetchone()[0]:
+            assert time.monotonic() < deadline, "the closed store's backend is still connected"
+            time.sleep(0.05)
+
+
+def test_schema_cycle_leaves_other_schemas_alone():
+    keep, _ = create_test_schema(TEST_DATABASE_URL)
     try:
+        with _connect(TEST_DATABASE_URL) as conn:
+            conn.execute(f'CREATE TABLE "{keep}".sentinel (v int)')
+            conn.execute(f'INSERT INTO "{keep}".sentinel VALUES (1)')
         schema, _ = create_test_schema(TEST_DATABASE_URL)
         drop_test_schema(TEST_DATABASE_URL, schema)
         with _connect(TEST_DATABASE_URL) as conn:
-            assert conn.execute(f"SELECT v FROM public.{sentinel}").fetchall() == [(1,)]
+            assert conn.execute(f'SELECT v FROM "{keep}".sentinel').fetchall() == [(1,)]
             assert conn.execute(
                 "SELECT count(*) FROM pg_namespace WHERE nspname = %s", (schema,)
             ).fetchone()[0] == 0
     finally:
-        with _connect(TEST_DATABASE_URL) as conn:
-            conn.execute(f"DROP TABLE public.{sentinel}")
+        drop_test_schema(TEST_DATABASE_URL, keep)
 
 
 def test_drop_refuses_a_schema_this_suite_did_not_create():

@@ -51,7 +51,7 @@ pytest -q                      # run the suite
 ruff check .                   # lint
 ```
 
-The suite runs in memory by default and ignores any `CAPSULE_ANCHOR_DATABASE_URL` in your shell, so it never touches a real witness database. To run it against Postgres as well, install the `postgres` extra and point `CAPSULE_ANCHOR_TEST_DATABASE_URL` at a database you can create schemas in. Each test then gets an empty schema of its own there, dropped when the test ends; nothing else in that database is changed.
+The suite runs in memory by default and ignores any `CAPSULE_ANCHOR_DATABASE_URL` in your shell, so it never touches a real witness database. To run it against Postgres as well, install the `postgres` extra and point `CAPSULE_ANCHOR_TEST_DATABASE_URL` at a database you can create schemas in. Each test then gets an empty schema of its own there, dropped when the test ends; nothing else in that database is changed. Give each concurrent run its own test database: the store's writer lock is a Postgres advisory lock, which is shared across schemas.
 
 ```bash
 pip install -e ".[dev,postgres]"
