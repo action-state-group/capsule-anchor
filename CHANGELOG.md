@@ -16,6 +16,15 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   `POST /checkpoints`. CI jobs that test witnessing use it instead of posting to
   `witness.agentactioncapsule.org` (#109, ask 1).
 
+### Changed
+
+- **A cached checkpoint that does not extend the tip is now refused.** A checkpoint whose
+  receipt was stored but whose acceptance was never recorded, posted again on
+  `POST /checkpoints` while it is ahead of the log's tip, now gets the same continuity check
+  as a new checkpoint. If it does not extend the tip it is refused with 409, where it used to
+  get its stored receipt back. A client retries or re-anchors it to the witness's tip like any
+  continuity 409 (#120).
+
 ### Fixed
 
 - **Countersign accepts a withheld bundle that states `payloads_mode: "selected"`.** A
@@ -33,6 +42,19 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   drops inside it also answers 429 and rolls the whole registration back, and one whose
   commit landed left its receipt, so a retry gets that receipt, not a second leaf. Closes
   the server-side half of #109.
+- **A retried checkpoint no longer leaves the log's tip behind its receipt.** On Postgres, a
+  retry of a checkpoint on another instance waits for the first acceptance to commit (the
+  #109 writer lock), and the checkpoint's read-back record now commits in the same
+  transaction as its receipt and tip, so a concurrent retry no longer stores an empty
+  continuity grade over it. On every store, a checkpoint whose receipt was stored but whose
+  acceptance was never recorded (its digest registered on `/register` first, or an
+  acceptance that failed after storing the receipt) now moves the tip on its next
+  `POST /checkpoints` while it is ahead of the log's tip and extends it. The answer is the
+  stored receipt, graded `continuity-witnessed` only when that receipt carries the signed
+  continuity assertion for this checkpoint; otherwise it answers with no continuity grade,
+  though the tip moved. A proof-less checkpoint is still graded `registered` and leaves the
+  tip where it was, and one at or behind the tip still answers its stored receipt and moves
+  nothing (#120).
 - **A registration no longer reads the whole log.** Each one read every log row two or
   three times and rehashed the whole tree. The service now keeps the tree per process,
   reads only new entries, and keeps the hashes of complete subtrees, so a receipt, a tree
