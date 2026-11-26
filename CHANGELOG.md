@@ -36,16 +36,16 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 - **A retried checkpoint no longer leaves the log's tip behind its receipt.** On Postgres, a
   retry of a checkpoint on another instance waits for the first acceptance to commit (the
   #109 writer lock), and the checkpoint's read-back record now commits in the same
-  transaction as its receipt and tip, so a concurrent retry no longer stores its own empty
+  transaction as its receipt and tip, so a concurrent retry no longer stores an empty
   continuity grade over it. On every store, a checkpoint whose receipt was stored but whose
-  acceptance never completed (its digest registered on `/register` first, an acceptance that
-  failed after storing the receipt, or a read-back record left with no grade) is accepted on
-  its next `POST /checkpoints` when it is ahead of the log's tip: the same continuity check
-  as a new checkpoint, a receipt for its existing leaf signed with the continuity assertion
-  when it earns `continuity-witnessed`, and the tip moves. One that does not extend the tip
-  is refused with 409, like a new one. A proof-less checkpoint is still graded `registered`
-  and leaves the tip where it was, and one at or behind the tip still answers its stored
-  receipt and moves nothing (#120).
+  acceptance was never recorded (its digest registered on `/register` first, or an
+  acceptance that failed after storing the receipt) gets, on its next `POST /checkpoints`
+  while it is ahead of the log's tip, the same continuity check as a new checkpoint: the tip
+  moves to it, or it is refused with 409 if it does not extend the tip. The answer is the
+  stored receipt, graded `continuity-witnessed` only when that receipt carries the signed
+  continuity assertion for this checkpoint. A proof-less checkpoint is still graded
+  `registered` and leaves the tip where it was, and one at or behind the tip still answers
+  its stored receipt and moves nothing (#120).
 - **A registration no longer reads the whole log.** Each one read every log row two or
   three times and rehashed the whole tree. The service now keeps the tree per process,
   reads only new entries, and keeps the hashes of complete subtrees, so a receipt, a tree

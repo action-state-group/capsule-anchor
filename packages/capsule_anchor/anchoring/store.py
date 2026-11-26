@@ -224,10 +224,6 @@ class InMemoryLogStore:
             self._checkpoint_records[key] = dict(record)
             return False
         if existing["root"] == record["root"]:
-            if existing.get("continuity_grade") is None and record.get("continuity_grade") is not None:
-                # An acceptance at this position completed: its record, whole,
-                # replaces the one left with no grade (capsule-anchor#120).
-                self._checkpoint_records[key] = dict(record)
             return False  # idempotent resubmission of the same checkpoint
         # EQUIVOCATION: a different root already occupies this exact
         # (log_id, mmr_size) slot. Never overwrite the first-seen record --
@@ -828,7 +824,7 @@ class SqliteLogStore:
     def put_checkpoint_record(self, log_id: str, mmr_size: int, record: dict) -> bool:
         with self._lock, self._conn:
             cur = self._conn.execute(
-                "SELECT root, entry_hash, timestamp, continuity_grade FROM checkpoint_records "
+                "SELECT root, entry_hash, timestamp FROM checkpoint_records "
                 "WHERE log_id = ? AND mmr_size = ?",
                 (log_id, mmr_size),
             )
@@ -849,24 +845,6 @@ class SqliteLogStore:
                 )
                 return False
             if existing[0] == record["root"]:
-                if existing[3] is None and record.get("continuity_grade") is not None:
-                    # An acceptance at this position completed: its record,
-                    # whole, replaces the one left with no grade
-                    # (capsule-anchor#120).
-                    self._conn.execute(
-                        "UPDATE checkpoint_records SET prev_size = ?, prev_root = ?, "
-                        "key_id = ?, timestamp = ?, grade = ?, entry_hash = ?, "
-                        "entry_hash_scheme = ?, leaf_index = ?, tree_size = ?, "
-                        "receipt = ?, continuity_grade = ? "
-                        "WHERE log_id = ? AND mmr_size = ?",
-                        (
-                            int(record["prev_size"]), record["prev_root"], record["key_id"],
-                            record["timestamp"], record.get("grade"), record["entry_hash"],
-                            record["entry_hash_scheme"], int(record["leaf_index"]),
-                            int(record["tree_size"]), record["receipt"],
-                            record["continuity_grade"], log_id, mmr_size,
-                        ),
-                    )
                 return False  # idempotent resubmission of the same checkpoint
             self._conn.execute(
                 "INSERT INTO checkpoint_equivocations (log_id, mmr_size, first_root, "
@@ -1707,29 +1685,11 @@ class PostgresLogStore:
             if cur.rowcount:
                 return  # freshly inserted -- first sighting of this position
             existing = self._conn.execute(
-                "SELECT root, entry_hash, timestamp, continuity_grade FROM checkpoint_records "
+                "SELECT root, entry_hash, timestamp FROM checkpoint_records "
                 "WHERE log_id = %s AND mmr_size = %s",
                 (log_id, mmr_size),
             ).fetchone()
             if existing[0] == record["root"]:
-                if existing[3] is None and record.get("continuity_grade") is not None:
-                    # An acceptance at this position completed: its record,
-                    # whole, replaces the one left with no grade
-                    # (capsule-anchor#120).
-                    self._conn.execute(
-                        "UPDATE checkpoint_records SET prev_size = %s, prev_root = %s, "
-                        "key_id = %s, timestamp = %s, grade = %s, entry_hash = %s, "
-                        "entry_hash_scheme = %s, leaf_index = %s, tree_size = %s, "
-                        "receipt = %s, continuity_grade = %s "
-                        "WHERE log_id = %s AND mmr_size = %s",
-                        (
-                            int(record["prev_size"]), record["prev_root"], record["key_id"],
-                            record["timestamp"], record.get("grade"), record["entry_hash"],
-                            record["entry_hash_scheme"], int(record["leaf_index"]),
-                            int(record["tree_size"]), record["receipt"],
-                            record["continuity_grade"], log_id, mmr_size,
-                        ),
-                    )
                 return  # idempotent resubmission of the same checkpoint
             # EQUIVOCATION: a different root already occupies this exact
             # (log_id, mmr_size) slot. Never overwrite the first-seen row --

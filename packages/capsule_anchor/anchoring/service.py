@@ -280,6 +280,25 @@ def _decode_cose_sign1(data: bytes) -> tuple[bytes, dict, bytes | None, bytes] |
     return protected_bstr, dict(unprotected), payload, signature
 
 
+def _receipt_asserts_continuity(receipt: bytes, cp: dict) -> bool:
+    """True when ``receipt`` (this witness's own COSE Receipt) carries the
+    signed continuity assertion for exactly ``cp``'s extension: its log, its
+    prev and its new (size, root)."""
+    decoded = _decode_cose_sign1(receipt)
+    if decoded is None:
+        return False
+    try:
+        protected = cbor2.loads(decoded[0]) if decoded[0] else {}
+    except Exception:  # noqa: BLE001 - our own bytes, but never raise on a decode
+        return False
+    assertion = protected.get(_COSE_CONTINUITY_LABEL) if isinstance(protected, collections.abc.Mapping) else None
+    if not isinstance(assertion, collections.abc.Mapping):
+        return False
+    return all(
+        assertion.get(k) == cp[k] for k in ("log_id", "prev_size", "prev_root", "mmr_size", "root")
+    )
+
+
 def _peek_unauthenticated_subject(protected: dict) -> str | None:
     """Structurally read the CWT ``sub`` claim (RFC 9597 label 15, CWT claim
     2) out of an ALREADY-DECODED protected header, without any signature
@@ -1415,47 +1434,35 @@ class AnchorerService:
                         and stored["entry_hash"] == returned_hash
                         and stored.get("continuity_grade") is not None
                     ):
-                        # This signing act's completed acceptance: answer its
-                        # own receipt, which a completion may have re-signed.
-                        # A record of ANOTHER act at this position (the same
-                        # checkpoint signed again) is never answered here: its
-                        # receipt and grade are that act's.
+                        # This signing act's completed acceptance.
                         cached_continuity_grade = stored["continuity_grade"]
-                        receipt_bytes = stored["receipt"]
-                        tree_size = stored["tree_size"]
                     else:
-                        # The digest has a receipt but this signing act's
-                        # acceptance never completed: it was registered on
-                        # /register, or an earlier acceptance stored the
-                        # receipt and failed before its tip (a v0.1.4 store
-                        # committed each write on its own), or a retry
-                        # recorded it with no grade, or another act holds
-                        # the record at this position. Accept it now as a new
-                        # checkpoint would be, on the leaf it already has, so
-                        # a receipt is never answered while the tip stays
-                        # behind it (capsule-anchor#120). A log's first
-                        # checkpoint binds the log to its key here too
-                        # (capsule-anchor#110). A checkpoint at or behind the
-                        # tip is an older position this witness cannot
-                        # re-check: it keeps its receipt and moves nothing.
+                        # The digest has a receipt, but no completed
+                        # acceptance of this signing act is recorded: it was
+                        # registered on /register, or an earlier acceptance
+                        # stored the receipt and failed before its tip (a
+                        # v0.1.4 store committed each write on its own). If
+                        # it is ahead of the tip, check it as a new checkpoint
+                        # and move the tip, so its receipt is never answered
+                        # while the tip stays behind it (capsule-anchor#120);
+                        # one that does not extend the tip is refused. A log's
+                        # first checkpoint binds the log to its key here
+                        # (capsule-anchor#110). One at or behind the tip is an
+                        # older position: it keeps its receipt, moves nothing.
                         tip = self._bound_tip(checkpoint_continuity)
                         if tip is None or tip["mmr_size"] < checkpoint_continuity["mmr_size"]:
-                            cached_continuity_grade = self._check_checkpoint_continuity(
-                                checkpoint_continuity
-                            )
-                            self._sync_log()
-                            tree_size = self._tree.size
-                            receipt_bytes = self._sign_receipt(
-                                leaf_index=leaf_index,
-                                tree_size=tree_size,
-                                logged_at=logged_at,
-                                grade=grade,
-                                continuity=self._continuity_assertion(
-                                    checkpoint_continuity, cached_continuity_grade, logged_at
-                                ),
-                                sub=subject or returned_hash,
-                            )
-                            self._advance_tip(checkpoint_continuity, cached_continuity_grade)
+                            checked = self._check_checkpoint_continuity(checkpoint_continuity)
+                            self._advance_tip(checkpoint_continuity, checked)
+                            # The answer is the stored receipt, not re-signed,
+                            # so it claims only what that receipt proves: a
+                            # witnessed grade only when the receipt carries
+                            # the signed continuity assertion for exactly
+                            # this checkpoint.
+                            if checked == CONTINUITY_GRADE_WITNESSED:
+                                if _receipt_asserts_continuity(receipt_bytes, checkpoint_continuity):
+                                    cached_continuity_grade = checked
+                            else:
+                                cached_continuity_grade = checked
                 return StatementRegistration(
                     receipt=receipt_bytes,
                     entry_hash=returned_hash,
@@ -1494,22 +1501,52 @@ class AnchorerService:
             entry = self._append_log(_LOG_KIND_SCITT, preimage_bytes, logged_at)
             leaf_index = entry.log_index
             tree_size = self._tree.size
+            audit_hex = self._tree.audit_path(leaf_index, tree_size)
+            root_hex = self._tree.root(tree_size)
+
+            audit_path = [bytes.fromhex(h) for h in audit_hex]
+            root = bytes.fromhex(root_hex)
+
+            # Stage-2: the signed continuity assertion (Amendment 2026-09-06
+            # point 4) -- ONLY for a submission that actually earned
+            # CONTINUITY_GRADE_WITNESSED (both checks ran and passed). Never
+            # attached for first-seen/registered: neither establishes
+            # continuity, and a signed assertion on either would misrepresent
+            # what this witness actually checked.
+            continuity_assertion: dict | None = None
+            if checkpoint_continuity is not None and continuity_grade == CONTINUITY_GRADE_WITNESSED:
+                continuity_assertion = {
+                    "policy_id": CONTINUITY_POLICY_ID,
+                    "log_id": checkpoint_continuity["log_id"],
+                    "prev_size": checkpoint_continuity["prev_size"],
+                    "prev_root": checkpoint_continuity["prev_root"],
+                    "mmr_size": checkpoint_continuity["mmr_size"],
+                    "root": checkpoint_continuity["root"],
+                    "checked": ["prev_equality", "consistency_proof"],
+                    "witness_key_id": self._attestor.key_id,
+                    "ts": logged_at.isoformat(),
+                }
 
             # 2. Assemble + sign the COSE Receipt (detached root payload).
-            receipt = self._sign_receipt(
-                leaf_index=leaf_index,
+            #    iat is this witness's OWN clock (logged_at, already computed
+            #    above for the log append) -- never the submitter's
+            #    self-asserted checkpoint `issued_at`. grade is the caller's
+            #    (None unless this is an enrolled checkpoint submission).
+            receipt = build_cose_receipt(
                 tree_size=tree_size,
-                logged_at=logged_at,
+                leaf_index=leaf_index,
+                audit_path=audit_path,
+                root=root,
+                sign=lambda payload: bytes.fromhex(self._attestor.attest(payload).signature),
+                iat=int(logged_at.timestamp()),
                 grade=grade,
-                continuity=(
-                    self._continuity_assertion(checkpoint_continuity, continuity_grade, logged_at)
-                    if checkpoint_continuity is not None
-                    else None
-                ),
+                continuity=continuity_assertion,
                 # RFC 9943 §6: iss, sub and kid are MUST on a Receipt. sub is
                 # what the registered statement says it is about (its own CWT
                 # sub, RFC 9943 §3 and Figure 10), else the entry it covers.
+                iss=self._receipt_issuer or self._attestor.key_id,
                 sub=subject or entry_hash,
+                kid=self._attestor.key_id.encode("utf-8"),
             )
 
             # 3. Persist for idempotent dedup (still INSERT OR IGNORE as
@@ -1593,55 +1630,6 @@ class AnchorerService:
             f"this witness already holds a checkpoint for log_id={cp['log_id']!r}; the "
             "mmr-checkpoint statement path takes only a log's first checkpoint. Submit later "
             "checkpoints to POST /checkpoints, signed by the log's own key"
-        )
-
-    def _continuity_assertion(self, cp: dict, continuity_grade: str | None, logged_at: datetime) -> dict | None:
-        """The signed continuity assertion (Amendment 2026-09-06 point 4),
-        ONLY for a checkpoint that earned CONTINUITY_GRADE_WITNESSED (both
-        checks ran and passed). Never for first-seen or registered: neither
-        establishes continuity, and a signed assertion on either would
-        misrepresent what this witness actually checked."""
-        if continuity_grade != CONTINUITY_GRADE_WITNESSED:
-            return None
-        return {
-            "policy_id": CONTINUITY_POLICY_ID,
-            "log_id": cp["log_id"],
-            "prev_size": cp["prev_size"],
-            "prev_root": cp["prev_root"],
-            "mmr_size": cp["mmr_size"],
-            "root": cp["root"],
-            "checked": ["prev_equality", "consistency_proof"],
-            "witness_key_id": self._attestor.key_id,
-            "ts": logged_at.isoformat(),
-        }
-
-    def _sign_receipt(
-        self,
-        *,
-        leaf_index: int,
-        tree_size: int,
-        logged_at: datetime,
-        grade: str | None,
-        continuity: dict | None,
-        sub: str,
-    ) -> bytes:
-        """A COSE Receipt for ``leaf_index`` in the tree of ``tree_size``
-        leaves. iat is this witness's OWN clock (``logged_at``), never the
-        submitter's self-asserted ``issued_at``; ``grade`` is the caller's
-        (None unless this is an enrolled checkpoint submission). Caller holds
-        ``self._lock`` with the cached tree synced to ``tree_size``."""
-        return build_cose_receipt(
-            tree_size=tree_size,
-            leaf_index=leaf_index,
-            audit_path=[bytes.fromhex(h) for h in self._tree.audit_path(leaf_index, tree_size)],
-            root=bytes.fromhex(self._tree.root(tree_size)),
-            sign=lambda payload: bytes.fromhex(self._attestor.attest(payload).signature),
-            iat=int(logged_at.timestamp()),
-            grade=grade,
-            continuity=continuity,
-            iss=self._receipt_issuer or self._attestor.key_id,
-            sub=sub,
-            kid=self._attestor.key_id.encode("utf-8"),
         )
 
     def _advance_tip(self, cp: dict, continuity_grade: str | None) -> None:
