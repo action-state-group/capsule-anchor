@@ -26,6 +26,8 @@ from capsule_anchor.anchoring.store import (
 )
 from capsule_anchor.attestation.service import AttestorService
 
+from .pg_isolation import TEST_DATABASE_URL
+
 
 def _digest(n: int | str) -> bytes:
     return hashlib.sha256(f"contention-{n}".encode()).digest()
@@ -248,23 +250,20 @@ def test_a_second_instance_sees_the_first_instances_statement_and_tip(tmp_path):
 
 # --- Postgres: the cross-instance writer lock ---------------------------------
 
-# These tests TRUNCATE every table, so they run only against a database named
-# for tests, never the application's CAPSULE_ANCHOR_DATABASE_URL.
-_PG_URL = os.environ.get("CAPSULE_ANCHOR_TEST_DATABASE_URL")
-_pg_required = pytest.mark.skipif(not _PG_URL, reason="CAPSULE_ANCHOR_TEST_DATABASE_URL not set")
+# These run only with CAPSULE_ANCHOR_TEST_DATABASE_URL set, each in an empty
+# schema of its own there (see conftest.py), never against the application's
+# CAPSULE_ANCHOR_DATABASE_URL.
+_pg_required = pytest.mark.skipif(
+    TEST_DATABASE_URL is None, reason="CAPSULE_ANCHOR_TEST_DATABASE_URL not set"
+)
 
 
 def _pg_pair():
+    """Two stores, as two instances of the witness, over this test's schema."""
     from capsule_anchor.anchoring.store import PostgresLogStore
 
-    first = PostgresLogStore(_PG_URL)
-    with first._lock, first._conn.transaction():  # noqa: SLF001
-        first._conn.execute(  # noqa: SLF001
-            "TRUNCATE TABLE submitted_statements, log_capsule_bindings, "
-            "countersigned_roots, log_entries, checkpoint_witnesses, "
-            "checkpoint_records, checkpoint_equivocations RESTART IDENTITY CASCADE"
-        )
-    return first, PostgresLogStore(_PG_URL)
+    url = os.environ["CAPSULE_ANCHOR_DATABASE_URL"]
+    return PostgresLogStore(url), PostgresLogStore(url)
 
 
 @_pg_required
