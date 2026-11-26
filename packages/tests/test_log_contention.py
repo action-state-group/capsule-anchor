@@ -17,7 +17,7 @@ import threading
 import pytest
 from capsule_anchor.anchoring import ct
 from capsule_anchor.anchoring.ct_cache import MEMO_MIN, CachedTree
-from capsule_anchor.anchoring.service import AnchorerService, ct_leaf_hash
+from capsule_anchor.anchoring.service import CONTINUITY_GRADE_WITNESSED, AnchorerService, ct_leaf_hash
 from capsule_anchor.anchoring.store import (
     InMemoryLogStore,
     LogIndexTaken,
@@ -638,6 +638,192 @@ def test_pg_a_drop_at_the_tip_write_rolls_the_whole_section_back_and_no_fork_is_
     a_svc.register_signed_statement_full(_digest("after-drop"))
     assert a_svc.verify_log()
     assert [e.log_index for e in two.all_entries()] == list(range(two.size()))
+
+
+@_pg_required
+def test_pg_a_retry_on_another_instance_never_gets_a_receipt_before_the_tip_moves():
+    """capsule-anchor#120: instance A has stored checkpoint N's statement but
+    not yet moved its tip (held here at the tree head, the step that was slow
+    at v0.1.4). The client's retry of N reaches instance B, then N+1 (prev N)
+    follows on B. B must not answer N's receipt until A's tip commits;
+    otherwise N+1 is checked against the tip before N and refused with 409,
+    as the hosted witness did to checkpoint 38 after 35's receipt."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from .test_checkpoint_continuity import _Log, _proof_claim
+
+    one, two = _pg_pair()
+    attestor = AttestorService()
+    a_svc, b_svc = AnchorerService(attestor=attestor, store=one), AnchorerService(attestor=attestor, store=two)
+    key = Ed25519PrivateKey.generate()
+    log = _Log("retry-tip")
+    s1 = log.grow_leaves(2)
+    a_svc.witness_checkpoint(_cp(key, log, s1, 0, "2026-11-26T07:48:00Z"))
+    s2 = log.grow_leaves(2)
+    cp_n = _cp(key, log, s2, s1, "2026-11-26T07:49:00Z", _proof_claim(log.proof(s1, s2)))
+    s3 = log.grow_leaves(2)
+    cp_next = _cp(key, log, s3, s2, "2026-11-26T07:50:00Z", _proof_claim(log.proof(s2, s3)))
+
+    reached, release = threading.Event(), threading.Event()
+    sign_sth = a_svc._sign_and_persist_sth  # noqa: SLF001
+
+    def held_sth():
+        reached.set()
+        release.wait(10)
+        return sign_sth()
+
+    a_svc._sign_and_persist_sth = held_sth  # noqa: SLF001
+    out: dict = {}
+
+    def first_attempt():
+        out["a"] = a_svc.witness_checkpoint(cp_n)
+
+    def retry_then_next():
+        try:
+            out["retry"] = b_svc.witness_checkpoint(cp_n)
+            out["next"] = b_svc.witness_checkpoint(cp_next)
+        except BaseException as exc:  # noqa: BLE001
+            out["error"] = exc
+
+    ta = threading.Thread(target=first_attempt)
+    ta.start()
+    tb = None
+    try:
+        assert reached.wait(10), "A never reached the tree head"
+        tb = threading.Thread(target=retry_then_next)
+        tb.start()
+        tb.join(1.0)
+        assert tb.is_alive(), f"B answered while A's tip was uncommitted: {out.get('error')!r}"
+    finally:
+        release.set()
+        ta.join(30)
+        if tb is not None:
+            tb.join(30)
+    assert "error" not in out, out["error"]
+    assert out["retry"].receipt == out["a"].receipt  # one statement, one receipt
+    assert out["next"].continuity_grade == CONTINUITY_GRADE_WITNESSED
+    assert two.get_checkpoint_witness("retry-tip")["mmr_size"] == s3
+
+
+def _chain(key, log_id):
+    """A first checkpoint and two verified extensions, each one's prev the one before."""
+    from .test_checkpoint_continuity import _Log, _proof_claim
+
+    log = _Log(log_id)
+    sizes = [log.grow_leaves(2) for _ in range(3)]
+    cps = [_cp(key, log, sizes[0], 0, "2026-11-26T07:48:00Z")]
+    for prev, size, ts in ((sizes[0], sizes[1], "07:49"), (sizes[1], sizes[2], "07:50")):
+        cps.append(_cp(key, log, size, prev, f"2026-11-26T{ts}:00Z", _proof_claim(log.proof(prev, size))))
+    return cps
+
+
+def _store_service(tmp_path, db):
+    return AnchorerService() if db == "memory" else AnchorerService(db_path=str(tmp_path / "w.db"))
+
+
+@pytest.mark.parametrize("db", ["memory", "sqlite"])
+def test_a_receipt_stored_before_its_tip_failed_is_completed_by_the_retry(tmp_path, db):
+    """capsule-anchor#120: checkpoint N's acceptance stores its receipt, then
+    fails before its tip moves (these stores, like v0.1.4's Postgres store,
+    commit each write on its own). The retry of N finds the receipt; it must
+    also move the tip, or N+1 is refused although N's receipt was issued."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    svc = _store_service(tmp_path, db)
+    first, n, n1 = _chain(Ed25519PrivateKey.generate(), "partial-tip")
+    svc.witness_checkpoint(first)
+    sign_sth = svc._sign_and_persist_sth  # noqa: SLF001
+
+    def fails():
+        raise RuntimeError("the tree head write failed")
+
+    svc._sign_and_persist_sth = fails  # noqa: SLF001
+    with pytest.raises(RuntimeError):
+        svc.witness_checkpoint(n)
+    svc._sign_and_persist_sth = sign_sth  # noqa: SLF001
+    assert svc._store.get_checkpoint_witness("partial-tip")["mmr_size"] == first["mmr_size"]  # noqa: SLF001
+
+    retry = svc.witness_checkpoint(n)
+    assert retry.continuity_grade == CONTINUITY_GRADE_WITNESSED
+    assert svc._store.get_checkpoint_witness("partial-tip")["mmr_size"] == n["mmr_size"]  # noqa: SLF001
+    assert svc.witness_checkpoint(n1).continuity_grade == CONTINUITY_GRADE_WITNESSED
+    # The older checkpoint resubmitted now keeps its receipt and moves nothing.
+    assert svc.witness_checkpoint(n).receipt == retry.receipt
+    assert svc._store.get_checkpoint_witness("partial-tip")["mmr_size"] == n1["mmr_size"]  # noqa: SLF001
+
+
+def test_a_checkpoint_preregistered_on_register_moves_the_tip_when_posted():
+    """N's digest was registered as a plain statement first. Posting N on
+    /checkpoints answers that receipt; it must also accept N as a checkpoint,
+    so N+1 is not refused."""
+    from capsule_anchor.anchoring.service import _checkpoint_digest
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    svc = AnchorerService()
+    first, n, n1 = _chain(Ed25519PrivateKey.generate(), "prereg-tip")
+    svc.witness_checkpoint(first)
+    plain = svc.register_signed_statement_full(bytes.fromhex(_checkpoint_digest(n)))
+    posted = svc.witness_checkpoint(n)
+    assert posted.receipt == plain.receipt
+    assert posted.continuity_grade == CONTINUITY_GRADE_WITNESSED
+    assert svc.get_checkpoint_readback("prereg-tip")["continuity_grade"] == CONTINUITY_GRADE_WITNESSED
+    assert svc.witness_checkpoint(n1).continuity_grade == CONTINUITY_GRADE_WITNESSED
+
+
+def test_a_preregistered_checkpoint_that_does_not_extend_the_tip_is_refused():
+    """Completing a cached checkpoint runs the same continuity check as a new
+    one: a digest registered on /register gets no co-signed continuity it
+    would be refused as a new submission."""
+    from capsule_anchor.anchoring.service import ContinuityMismatchError, _checkpoint_digest
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    svc = AnchorerService()
+    first, _n, n1 = _chain(Ed25519PrivateKey.generate(), "prereg-gap")
+    svc.witness_checkpoint(first)
+    svc.register_signed_statement_full(bytes.fromhex(_checkpoint_digest(n1)))
+    with pytest.raises(ContinuityMismatchError):
+        svc.witness_checkpoint(n1)  # its prev is N, which this witness never accepted
+    assert svc._store.get_checkpoint_witness("prereg-gap")["mmr_size"] == first["mmr_size"]  # noqa: SLF001
+
+
+@_pg_required
+def test_pg_a_retry_before_the_first_writers_record_keeps_the_witnessed_grade():
+    """The read-surface record commits with the receipt and tip. A retry on
+    another instance while the first is about to write its record waits for
+    it, and both read back continuity-witnessed (before #120 the retry could
+    store its own grade, None, first, and keep it)."""
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    one, two = _pg_pair()
+    attestor = AttestorService()
+    a_svc, b_svc = AnchorerService(attestor=attestor, store=one), AnchorerService(attestor=attestor, store=two)
+    first, n, _n1 = _chain(Ed25519PrivateKey.generate(), "record-race")
+    a_svc.witness_checkpoint(first)
+    reached, release = threading.Event(), threading.Event()
+    record = a_svc._record_checkpoint_read_surface  # noqa: SLF001
+
+    def held_record(cp, result):
+        reached.set()
+        release.wait(10)
+        return record(cp, result)
+
+    a_svc._record_checkpoint_read_surface = held_record  # noqa: SLF001
+    out: dict = {}
+    ta = threading.Thread(target=lambda: out.setdefault("a", a_svc.witness_checkpoint(n)))
+    tb = threading.Thread(target=lambda: out.setdefault("b", b_svc.witness_checkpoint(n)))
+    ta.start()
+    try:
+        assert reached.wait(10), "A never reached its record"
+        tb.start()
+        tb.join(1.0)
+        assert tb.is_alive(), "B answered before A's record committed"
+    finally:
+        release.set()
+        ta.join(30)
+        if tb.ident is not None:
+            tb.join(30)
+    assert out["a"].continuity_grade == out["b"].continuity_grade == CONTINUITY_GRADE_WITNESSED
+    assert b_svc.get_checkpoint_readback("record-race")["continuity_grade"] == CONTINUITY_GRADE_WITNESSED
 
 
 def test_cached_tree_truncate_forgets_rolled_back_leaves():

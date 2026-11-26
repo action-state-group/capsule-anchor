@@ -1412,19 +1412,25 @@ class AnchorerService:
                     )
                     if stored is not None:
                         cached_continuity_grade = stored.get("continuity_grade")
-                    elif self._bound_tip(checkpoint_continuity) is None:
-                        # A log's FIRST checkpoint whose digest was already
-                        # registered (on /register): it still binds the log
-                        # to its key, or the log would stay open to any key
-                        # (capsule-anchor#110).
-                        self._store.put_checkpoint_witness(
-                            checkpoint_continuity["log_id"],
-                            mmr_size=checkpoint_continuity["mmr_size"],
-                            mmr_root=checkpoint_continuity["root"],
-                            key_id=checkpoint_continuity["key_id"],
-                            timestamp=checkpoint_continuity["timestamp"],
-                        )
-                        cached_continuity_grade = CONTINUITY_GRADE_FIRST_SEEN
+                    else:
+                        # The digest has a receipt but this checkpoint was
+                        # never accepted on POST /checkpoints: it was
+                        # registered on /register, or an earlier acceptance
+                        # stored the receipt and failed before its tip and
+                        # record (a v0.1.4 store committed each write on its
+                        # own). Accept it now, as a new checkpoint would be,
+                        # so the receipt is never answered while the tip
+                        # stays behind it (capsule-anchor#120). A log's first
+                        # checkpoint binds the log to its key here too
+                        # (capsule-anchor#110). A checkpoint at or behind the
+                        # tip is a resubmission of an older position: it
+                        # keeps its receipt and moves nothing.
+                        tip = self._bound_tip(checkpoint_continuity)
+                        if tip is None or tip["mmr_size"] < checkpoint_continuity["mmr_size"]:
+                            cached_continuity_grade = self._check_checkpoint_continuity(
+                                checkpoint_continuity
+                            )
+                            self._advance_tip(checkpoint_continuity, cached_continuity_grade)
                 return StatementRegistration(
                     receipt=receipt_bytes,
                     entry_hash=returned_hash,
@@ -1556,17 +1562,8 @@ class AnchorerService:
             # this log_id (a downgrade-triggered DoS on the exact property
             # this feature exists to provide) -- see
             # _check_checkpoint_continuity's docstring.
-            if checkpoint_continuity is not None and continuity_grade in (
-                CONTINUITY_GRADE_FIRST_SEEN,
-                CONTINUITY_GRADE_WITNESSED,
-            ):
-                self._store.put_checkpoint_witness(
-                    checkpoint_continuity["log_id"],
-                    mmr_size=checkpoint_continuity["mmr_size"],
-                    mmr_root=checkpoint_continuity["root"],
-                    key_id=checkpoint_continuity["key_id"],
-                    timestamp=checkpoint_continuity["timestamp"],
-                )
+            if checkpoint_continuity is not None:
+                self._advance_tip(checkpoint_continuity, continuity_grade)
 
         witness_info = (
             {**checkpoint_fields, "status": witness_status} if checkpoint_fields is not None else None
@@ -1602,6 +1599,20 @@ class AnchorerService:
             "mmr-checkpoint statement path takes only a log's first checkpoint. Submit later "
             "checkpoints to POST /checkpoints, signed by the log's own key"
         )
+
+    def _advance_tip(self, cp: dict, continuity_grade: str | None) -> None:
+        """Move ``cp``'s log tip to ``cp`` when it earned first-seen or
+        continuity-witnessed, never on a bare "registered" (see the comment
+        at the call in ``register_signed_statement_full``). Caller holds the
+        writer section."""
+        if continuity_grade in (CONTINUITY_GRADE_FIRST_SEEN, CONTINUITY_GRADE_WITNESSED):
+            self._store.put_checkpoint_witness(
+                cp["log_id"],
+                mmr_size=cp["mmr_size"],
+                mmr_root=cp["root"],
+                key_id=cp["key_id"],
+                timestamp=cp["timestamp"],
+            )
 
     def _bound_tip(self, cp: dict) -> dict | None:
         """The continuity tip ``cp`` is checked against. For an UNENROLLED
@@ -1822,10 +1833,16 @@ class AnchorerService:
         before it is ever co-signed.
         """
         digest_hex = _checkpoint_digest(cp)
-        result = self.register_signed_statement_full(
-            bytes.fromhex(digest_hex), grade=cp.get("grade"), checkpoint_continuity=cp
-        )
-        self._record_checkpoint_read_surface(cp, result)
+        # The read-surface record commits in the same writer section as the
+        # receipt and the tip. Written after it, a retry on another instance
+        # could find the receipt with no record and store its own grade
+        # first, and the first writer's record would not replace it
+        # (capsule-anchor#120).
+        with self._writer_section():
+            result = self.register_signed_statement_full(
+                bytes.fromhex(digest_hex), grade=cp.get("grade"), checkpoint_continuity=cp
+            )
+            self._record_checkpoint_read_surface(cp, result)
         return result
 
     def _record_checkpoint_read_surface(self, cp: dict, result: StatementRegistration) -> None:
