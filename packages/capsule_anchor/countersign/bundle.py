@@ -4,9 +4,11 @@
 The canonical AAC Evidence Bundle (``draft-mih-zhang-agent-action-capsule-
 evidence-bundle-00``, wire ``bundle_version: "2"`` / ``bundle_kind:
 "evidence-bundle/v2"``) -- the exact shape ``capsulectl bundle`` produces --
-carrying ``completeness.payloads_mode: "none"``: every record's full content
-withheld to digests, checkpoints, and completeness proofs only. The one
-exception is a holder's opt-in ``disclosures`` overlay of the ``agent_input``
+carrying ``completeness.payloads_mode: "none"`` or ``"selected"``: every
+record's full content withheld to digests, checkpoints, and completeness
+proofs only. ``selected`` is what capsule-cli and capsulectl write for a
+withheld bundle with records (the draft allows either and requires ``none``
+for an empty history), and is accepted only when it discloses nothing at all. The one exception, for ``none`` only, is a holder's opt-in ``disclosures`` overlay of the ``agent_input``
 of the record kinds the deployer lists as disclosable (``config.disclosable_kinds``,
 empty by default), checked against the digest each record sealed. This module does not own that wire format -- it is
 the donated spec's own bundle shape, codec'd and verified by the neutral
@@ -20,6 +22,7 @@ bundle -- INCLUDING, always, a bundle that is not payload-free apart from that o
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
@@ -104,9 +107,10 @@ class Bundle:
 
 def parse_bundle(raw: dict, *, disclosable_kinds: frozenset[str] = frozenset()) -> Bundle:
     """Parse ``raw`` into a :class:`Bundle`, refusing anything that isn't a
-    well-formed, withheld v2 Evidence Bundle (``payloads_mode`` ``none``, plus
+    well-formed, withheld v2 Evidence Bundle: ``payloads_mode`` ``none``, plus
     at most an opt-in disclosure of ``agent_input``
-    payloads of ``disclosable_kinds``, empty by default). Never verifies a
+    payloads of ``disclosable_kinds``, empty by default; or ``payloads_mode``
+    ``selected`` disclosing nothing (see :func:`_check_selected_withheld`). Never verifies a
     requester's signature -- see :func:`accept_bundle` for the full
     acceptance path."""
     if not isinstance(raw, dict):
@@ -123,19 +127,90 @@ def parse_bundle(raw: dict, *, disclosable_kinds: frozenset[str] = frozenset()) 
     if not isinstance(completeness, dict):
         raise BundleRefused("bundle does not parse: missing completeness")
     payloads_mode = completeness.get("payloads_mode")
-    if payloads_mode != "none":
+    if payloads_mode == "selected":
+        _check_selected_withheld(raw)
+    elif payloads_mode != "none":
         raise BundleRefused(
             f"bundle carries payloads present (completeness.payloads_mode={payloads_mode!r}) -- "
-            "this module accepts only a withheld bundle (payloads_mode: none); any bundle with "
-            "payloads present is refused by construction"
+            "this module accepts only a withheld bundle (payloads_mode: none, or selected with "
+            "nothing disclosed); any bundle with payloads present is refused by construction"
         )
-    if "disclosures" in raw:
+    elif "disclosures" in raw:
         _check_disclosures(raw, disclosable_kinds)
     try:
         digest = bundle_digest(raw)
     except (TypeError, ValueError) as exc:
         raise BundleRefused(f"bundle digest could not be computed: {exc}") from exc
     return Bundle(raw=raw, digest=digest)
+
+
+#: The members a ``payloads_mode: "selected"`` bundle may carry here: the
+#: Evidence Bundle v2 members that hold no payload material (the draft's
+#: Evidence Bundle Object). ``disclosures`` and ``disclosure_record`` are not
+#: among them, so nothing a record withholds can be revealed.
+_SELECTED_MEMBERS = frozenset(
+    {
+        "bundle_version",
+        "bundle_kind",
+        "root",
+        "records",
+        "completeness",
+        "completeness_certificate",
+        "checkpoint",
+        "category_coverage",
+        "verification",
+        "extensions",
+        "countersignatures",
+    }
+)
+
+#: The extension kinds a ``selected`` bundle may carry: the producer's key
+#: declaration, which capsule-cli's digests-only bundle and capsulectl's deal
+#: withheld form both write. Any other kind is
+#: refused, since some carry payloads (``composed/v1`` nests whole member
+#: bundles, disclosures included).
+_SELECTED_EXTENSIONS = frozenset({"producer-key/v1"})
+_LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}")
+
+
+def _check_selected_withheld(raw: dict) -> None:
+    """Refuse a ``payloads_mode: "selected"`` bundle unless it discloses
+    nothing. A withheld bundle with records may state ``none`` or
+    ``selected`` (the draft requires ``none`` only for an empty history); the
+    AAC Python reference builder, capsule-cli's digests-only bundle and
+    capsulectl's ``deal report --withheld`` write ``selected``. It is accepted here only with no
+    ``disclosures`` (not even an empty overlay), no ``disclosure_record``, no
+    member outside :data:`_SELECTED_MEMBERS` and no extension outside
+    :data:`_SELECTED_EXTENSIONS`, whose one block has exactly the draft's
+    shape. This closes every place the draft defines for payload material;
+    it cannot show that a producer hid nothing in a free-form value such as
+    ``verification``, which is the producer's own statement."""
+    extra = sorted(set(raw) - _SELECTED_MEMBERS)
+    if extra:
+        raise BundleRefused(
+            f"a payloads_mode: selected bundle may disclose nothing here, but it carries {extra}"
+        )
+    extensions = raw.get("extensions", {})
+    if not isinstance(extensions, dict):
+        raise BundleRefused("extensions must be an object")
+    kinds = sorted(set(extensions) - _SELECTED_EXTENSIONS)
+    if kinds:
+        raise BundleRefused(
+            f"a payloads_mode: selected bundle may carry only the {sorted(_SELECTED_EXTENSIONS)} "
+            f"extension here, but it carries {kinds}"
+        )
+    # The draft's producer-key/v1 block is exactly one 64-lowercase-hex
+    # public_key, and a producer MUST NOT add other members; anything else
+    # in it could carry what the bundle withholds.
+    if "producer-key/v1" in extensions:
+        block = extensions["producer-key/v1"]
+        key = block.get("public_key") if isinstance(block, dict) else None
+        if not (
+            isinstance(key, str) and _LOWER_HEX_64.fullmatch(key) and set(block) == {"public_key"}
+        ):
+            raise BundleRefused(
+                'the producer-key/v1 extension must be exactly {"public_key": <64 lowercase hex>}'
+            )
 
 
 def _check_disclosures(raw: dict, disclosable_kinds: frozenset[str]) -> None:
