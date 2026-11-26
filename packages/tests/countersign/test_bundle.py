@@ -1,4 +1,5 @@
-"""accept_bundle: parse, payloads-none enforcement, digest binding, and the
+"""accept_bundle: parse, withheld-payload enforcement (``none``, or
+``selected`` disclosing nothing), digest binding, and the
 registration-policy issuer check -- the key checked against is always the
 one THIS instance's issuer allowlist pins for the requester id, never one a
 caller supplies. Each negative case is a mutant of ``valid_bundle_raw`` -- the
@@ -8,6 +9,8 @@ behind a fixture that never worked."""
 from __future__ import annotations
 
 import copy
+import json
+import pathlib
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -54,9 +57,9 @@ def test_payloads_present_mutant_red_then_green(valid_bundle_raw, issuer_allowli
     """The mutant check: flip the condition, confirm the check actually
     flips to failure, then restore and re-verify green."""
 
-    # RED: mutate payloads_mode away from "none" -- must raise.
+    # RED: mutate payloads_mode to "all" -- must raise.
     red = copy.deepcopy(valid_bundle_raw)
-    red["completeness"]["payloads_mode"] = "selected"
+    red["completeness"]["payloads_mode"] = "all"
     with pytest.raises(BundleRefused):
         _accept(red, issuer_allowlist, requester_key)
     # GREEN: restore -- must accept.
@@ -240,3 +243,88 @@ def test_no_configured_kinds_refuses_any_disclosure(issuer_allowlist, requester_
     from .conftest import base_bundle_raw
 
     _accept(base_bundle_raw(), issuer_allowlist, requester_key, disclosable_kinds=frozenset())
+
+
+# --- payloads_mode "selected": the withheld form a producer with records writes ---
+
+_VECTORS = pathlib.Path(__file__).parent / "vectors"
+
+
+def _capsulectl_withheld() -> dict:
+    """capsulectl's real ``deal report --withheld`` bundle (evidencebook
+    63f2d61; vectors/capsulectl-deal-withheld.md says how it was written)."""
+    return json.loads((_VECTORS / "capsulectl-deal-withheld.json").read_text())
+
+
+def test_capsulectl_withheld_bundle_is_accepted(issuer_allowlist, requester_key):
+    raw = _capsulectl_withheld()
+    assert raw["completeness"]["payloads_mode"] == "selected"
+    assert "disclosures" not in raw
+    bundle = _accept(raw, issuer_allowlist, requester_key)
+    assert bundle.verification.graph_closure.status == "pass"
+    assert bundle.verification.per_record_membership.status == "pass"
+
+
+def test_selected_fixture_bundle_without_disclosures_is_accepted(valid_bundle_raw, issuer_allowlist, requester_key):
+    raw = copy.deepcopy(valid_bundle_raw)
+    raw["completeness"]["payloads_mode"] = "selected"
+    _accept(raw, issuer_allowlist, requester_key)
+
+
+@pytest.mark.parametrize("mode", ["all", "partial", "NONE", "", None, [], {}, ["selected"], True, 0])
+def test_any_other_payloads_mode_is_refused(mode, issuer_allowlist, requester_key):
+    raw = _capsulectl_withheld()
+    raw["completeness"]["payloads_mode"] = mode
+    with pytest.raises(BundleRefused, match="payloads present"):
+        _accept(raw, issuer_allowlist, requester_key)
+
+
+def test_missing_payloads_mode_is_refused(issuer_allowlist, requester_key):
+    raw = _capsulectl_withheld()
+    del raw["completeness"]["payloads_mode"]
+    with pytest.raises(BundleRefused, match="payloads present"):
+        _accept(raw, issuer_allowlist, requester_key)
+
+
+@pytest.mark.parametrize(
+    "member, value",
+    [
+        ("disclosures", {}),
+        ("disclosure_record", "00" * 32),
+        ("payloads", {"any": "member outside the v2 core"}),
+    ],
+)
+def test_selected_with_a_disclosure_member_is_refused(member, value, issuer_allowlist, requester_key):
+    """Even an empty overlay: a selected bundle discloses nothing here."""
+    raw = _capsulectl_withheld()
+    raw[member] = value
+    with pytest.raises(BundleRefused, match="may disclose nothing"):
+        _accept(raw, issuer_allowlist, requester_key, disclosable_kinds=frozenset({"fyi"}))
+
+
+def test_selected_with_a_matching_disclosable_overlay_is_refused(issuer_allowlist, requester_key):
+    """The opt-in agent_input overlay that ``none`` admits is refused under
+    ``selected``, even for a disclosable kind whose digest matches."""
+    from .conftest import declared_count_bundle_raw
+
+    raw, _ = declared_count_bundle_raw()
+    raw["completeness"]["payloads_mode"] = "selected"
+    with pytest.raises(BundleRefused, match="may disclose nothing"):
+        _accept(raw, issuer_allowlist, requester_key)
+
+
+def test_selected_with_a_composed_member_bundle_is_refused(valid_bundle_raw, issuer_allowlist, requester_key):
+    """composed/v1 nests whole member bundles, disclosures included."""
+    raw = _capsulectl_withheld()
+    child = copy.deepcopy(valid_bundle_raw)
+    child["disclosures"] = {child["root"]: {"agent_input": {"secret": "x"}}}
+    raw["extensions"]["composed/v1"] = {"members": [{"id": "m1", "outcome": "artifact", "bundle": child}]}
+    with pytest.raises(BundleRefused, match="composed/v1"):
+        _accept(raw, issuer_allowlist, requester_key)
+
+
+def test_selected_with_non_object_extensions_is_refused(issuer_allowlist, requester_key):
+    raw = _capsulectl_withheld()
+    raw["extensions"] = ["producer-key/v1"]
+    with pytest.raises(BundleRefused, match="extensions must be an object"):
+        _accept(raw, issuer_allowlist, requester_key)

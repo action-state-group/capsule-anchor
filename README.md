@@ -520,7 +520,8 @@ are set (`countersign/config.py`). It countersigns an Agent Action Capsule
 Evidence Bundle v2 for a requester this service already knows:
 
 1. **The bundle** must be an Evidence Bundle v2 with no payloads
-   (`completeness.payloads_mode` is `"none"`; a `disclosures` overlay is accepted only for
+   (`completeness.payloads_mode` is `"selected"` with nothing disclosed, the form a
+   withheld bundle with records states, or `"none"`; with `"none"` a `disclosures` overlay is accepted only for
    a matching payload of a record kind the deployer lists in
    `CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS` (empty by default), at the holder's opt-in); its digest
    is computed by `agent-action-capsule`'s neutral bundle library.

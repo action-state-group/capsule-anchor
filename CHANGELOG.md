@@ -18,6 +18,13 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Fixed
 
+- **Countersign accepts a withheld bundle that states `payloads_mode: "selected"`.** The
+  AAC Evidence Bundle draft keeps `"none"` for an empty history, so a withheld bundle with
+  records, such as the one `capsulectl deal report --withheld` writes, states `"selected"`
+  and was refused with HTTP 422. It is now accepted when it discloses nothing: no
+  `disclosures` (not even an empty one), no `disclosure_record`, no member outside the v2
+  core and no extension other than `producer-key/v1`. Every other mode stays refused (#121).
+
 - **Concurrent appends no longer answer 500.** Instances took the next log index from
   `COUNT(*)` under a per-process lock, so two instances could take the same index and the
   second request failed on `log_entries_pkey`. A registration now runs under a Postgres

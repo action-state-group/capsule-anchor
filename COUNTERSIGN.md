@@ -10,7 +10,9 @@ what is defined here.
 (`draft-mih-zhang-agent-action-capsule-evidence-bundle-00`, wire `bundle_version: "2"`
 / `bundle_kind: "evidence-bundle/v2"`) — the exact bytes `capsulectl bundle` produces,
 carrying `completeness.payloads_mode: "none"` and, at most, the holder's opt-in disclosure of
-the payloads of record kinds the deployment lists as disclosable (§5). This
+the payloads of record kinds the deployment lists as disclosable (§5), or
+`payloads_mode: "selected"` with nothing disclosed (the form `capsulectl deal report --withheld`
+writes). This
 module never invents its own bundle model: the digest (JCS-canonical,
 `sha256(JCS(bundle \ countersignatures))`) and the structural/completeness
 verification (graph closure, CLL #13 range proof, per-record inclusion proof) are
@@ -132,7 +134,9 @@ CAPSULE_ANCHOR_COUNTERSIGN=1
 ```
 
 Either alone leaves the witness's default (permissive) behavior untouched. With both
-set, `POST /countersign/register` is mounted.
+set, `POST /countersign/register` is mounted. A client posts to that full path:
+`capsulectl countersign request --service URL` posts to `URL` exactly as given, so pass
+`https://HOST/countersign/register`; the bare base URL answers 405.
 
 ## 5. Registration policy — the trust anchor
 
@@ -150,8 +154,19 @@ raised during it, and is also HTTP 422):
 
 1. **Shape.** The submission's `bundle` parses as a well-formed v2 Evidence Bundle
    (`bundle_version: "2"`, `bundle_kind: "evidence-bundle/v2"`) carrying
-   `completeness.payloads_mode: "none"`. Anything with a payload present is refused by
-   construction. The one exception is an optional, holder opt-in `disclosures` overlay
+   `completeness.payloads_mode: "none"`, or `"selected"` with nothing disclosed. Anything
+   with a payload present is refused by construction.
+
+   A bundle that has records and withholds every payload states `"selected"`: the AAC
+   Evidence Bundle draft keeps `"none"` for an empty history, and capsule-cli and
+   `capsulectl deal report --withheld` write `"selected"`. Such a bundle is accepted only
+   when it carries no `disclosures` member (not even an empty one), no `disclosure_record`,
+   no member outside the v2 core (`bundle_version`, `bundle_kind`, `root`, `records`,
+   `completeness`, `completeness_certificate`, `checkpoint`, `category_coverage`,
+   `verification`, `extensions`, `countersignatures`) and no extension other than
+   `producer-key/v1`; `composed/v1`, for example, nests whole member bundles and is refused.
+
+   For `"none"`, the one exception is an optional, holder opt-in `disclosures` overlay
    that discloses only the `agent_input` of records whose `action_type` the deployment
    lists as disclosable (`CAPSULE_ANCHOR_COUNTERSIGN_DISCLOSABLE_KINDS`, comma-separated,
    empty by default, so an instance that sets none refuses every overlay), so a policy

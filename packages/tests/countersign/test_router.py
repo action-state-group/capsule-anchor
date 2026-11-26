@@ -5,6 +5,7 @@ Bundle submission into ``{"countersignatures": [entry]}`` -- matching
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 import capsule_anchor.countersign.router as router_module
@@ -107,6 +108,39 @@ def test_payloads_present_is_refused_over_http(monkeypatch, requester_key, issue
     resp = client.post("/countersign/register", json=_submission(raw, requester_key))
     assert resp.status_code == 422
     assert "refused" in resp.json()["detail"]
+
+
+def test_capsulectl_withheld_bundle_round_trips_over_http(monkeypatch, requester_key, issuer_allowlist):
+    """capsulectl's real ``deal report --withheld`` bundle (payloads_mode
+    selected, nothing disclosed) is countersigned, not refused with a 422."""
+    from .test_bundle import _capsulectl_withheld
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    resp = client.post("/countersign/register", json=_submission(_capsulectl_withheld(), requester_key, profile_id=None))
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["countersignatures"][0]["receipt"]["entry_hash"]
+
+
+@pytest.mark.parametrize("mode", ["all", None, [], {}, 1])
+def test_other_payloads_modes_are_a_422_over_http(mode, monkeypatch, requester_key, issuer_allowlist):
+    from .test_bundle import _capsulectl_withheld
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    raw = _capsulectl_withheld()
+    raw["completeness"]["payloads_mode"] = mode
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id=None))
+    assert resp.status_code == 422, resp.text
+    assert "refused" in resp.json()["detail"]
+
+
+def test_selected_with_disclosures_is_a_422_over_http(monkeypatch, requester_key, issuer_allowlist):
+    from .test_bundle import _capsulectl_withheld
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    raw = _capsulectl_withheld()
+    raw["disclosures"] = {}
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id=None))
+    assert resp.status_code == 422, resp.text
 
 
 def test_webhook_delivery_runs_as_a_background_task(monkeypatch, requester_key, issuer_allowlist):
