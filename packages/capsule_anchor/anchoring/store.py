@@ -224,8 +224,12 @@ class InMemoryLogStore:
             self._checkpoint_records[key] = dict(record)
             return False
         if existing["root"] == record["root"]:
-            if existing.get("continuity_grade") is None and record.get("continuity_grade") is not None:
-                self._checkpoint_records[key] = dict(record)  # its acceptance completed (#120)
+            if (
+                existing["entry_hash"] == record["entry_hash"]
+                and existing.get("continuity_grade") is None
+                and record.get("continuity_grade") is not None
+            ):
+                self._checkpoint_records[key] = dict(record)  # the same signing act completed (#120)
             return False  # idempotent resubmission of the same checkpoint
         # EQUIVOCATION: a different root already occupies this exact
         # (log_id, mmr_size) slot. Never overwrite the first-seen record --
@@ -847,8 +851,12 @@ class SqliteLogStore:
                 )
                 return False
             if existing[0] == record["root"]:
-                if existing[3] is None and record.get("continuity_grade") is not None:
-                    # Its acceptance completed (capsule-anchor#120).
+                if (
+                    existing[1] == record["entry_hash"]
+                    and existing[3] is None
+                    and record.get("continuity_grade") is not None
+                ):
+                    # The same signing act's acceptance completed (capsule-anchor#120).
                     self._conn.execute(
                         "UPDATE checkpoint_records SET receipt = ?, tree_size = ?, "
                         "continuity_grade = ? WHERE log_id = ? AND mmr_size = ?",
@@ -1702,8 +1710,12 @@ class PostgresLogStore:
                 (log_id, mmr_size),
             ).fetchone()
             if existing[0] == record["root"]:
-                if existing[3] is None and record.get("continuity_grade") is not None:
-                    # Its acceptance completed (capsule-anchor#120).
+                if (
+                    existing[1] == record["entry_hash"]
+                    and existing[3] is None
+                    and record.get("continuity_grade") is not None
+                ):
+                    # The same signing act's acceptance completed (capsule-anchor#120).
                     self._conn.execute(
                         "UPDATE checkpoint_records SET receipt = %s, tree_size = %s, "
                         "continuity_grade = %s WHERE log_id = %s AND mmr_size = %s",

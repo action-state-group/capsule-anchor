@@ -1410,10 +1410,18 @@ class AnchorerService:
                     stored = self._store.get_checkpoint_record(
                         checkpoint_continuity["log_id"], checkpoint_continuity["mmr_size"]
                     )
-                    if stored is not None and stored.get("continuity_grade") is not None:
-                        # A completed acceptance: answer its own receipt.
+                    if stored is not None and stored["entry_hash"] != returned_hash:
+                        # Another signing act holds this position (the same
+                        # checkpoint signed again, or an equivocation): this
+                        # one keeps its own receipt, and the grade that act
+                        # earned is not this one's.
+                        pass
+                    elif stored is not None and stored.get("continuity_grade") is not None:
+                        # This checkpoint's completed acceptance: answer its
+                        # own receipt, which a completion may have re-signed.
                         cached_continuity_grade = stored["continuity_grade"]
                         receipt_bytes = stored["receipt"]
+                        tree_size = stored["tree_size"]
                     else:
                         # The digest has a receipt but this checkpoint's
                         # acceptance never completed: it was registered on
