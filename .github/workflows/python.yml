@@ -27,3 +27,35 @@ jobs:
 
       - name: pytest
         run: python -m pytest -q
+
+  # The same suite against Postgres (#116): every Postgres-backed test runs
+  # here, each in a schema of its own (packages/tests/conftest.py).
+  test-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: capsule_anchor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      CAPSULE_ANCHOR_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/capsule_anchor_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: install capsule-anchor with Postgres support
+        run: pip install -e ".[dev,postgres]"
+
+      - name: pytest against Postgres
+        run: python -m pytest -q -rs
