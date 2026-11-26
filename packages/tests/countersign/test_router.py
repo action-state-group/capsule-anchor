@@ -143,6 +143,16 @@ def test_selected_with_disclosures_is_a_422_over_http(monkeypatch, requester_key
     assert resp.status_code == 422, resp.text
 
 
+def test_selected_with_a_producer_key_extra_member_is_a_422_over_http(monkeypatch, requester_key, issuer_allowlist):
+    from .test_bundle import _capsulectl_withheld
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    raw = _capsulectl_withheld()
+    raw["extensions"]["producer-key/v1"]["disclosures"] = {"x": {"agent_input": {"secret": 1}}}
+    resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id=None))
+    assert resp.status_code == 422, resp.text
+
+
 def test_webhook_delivery_runs_as_a_background_task(monkeypatch, requester_key, issuer_allowlist):
     """A webhook subscription must never block the response -- it is
     scheduled via FastAPI's BackgroundTasks, not called inline before the

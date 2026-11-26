@@ -164,7 +164,9 @@ raised during it, and is also HTTP 422):
    no member outside the v2 core (`bundle_version`, `bundle_kind`, `root`, `records`,
    `completeness`, `completeness_certificate`, `checkpoint`, `category_coverage`,
    `verification`, `extensions`, `countersignatures`) and no extension other than
-   `producer-key/v1`; `composed/v1`, for example, nests whole member bundles and is refused.
+   `producer-key/v1`, which must be exactly `{"public_key": <64 lowercase hex>}`; `composed/v1`, for example, nests whole member bundles and is refused. These close every place the draft defines for payload
+   material; a free-form value such as `verification` is the producer's own statement and is
+   not inspected.
 
    For `"none"`, the one exception is an optional, holder opt-in `disclosures` overlay
    that discloses only the `agent_input` of records whose `action_type` the deployment

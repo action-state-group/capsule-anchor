@@ -328,3 +328,25 @@ def test_selected_with_non_object_extensions_is_refused(issuer_allowlist, reques
     raw["extensions"] = ["producer-key/v1"]
     with pytest.raises(BundleRefused, match="extensions must be an object"):
         _accept(raw, issuer_allowlist, requester_key)
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        "e17d56b529642ae4bbdedf116ef917c2d5933f42344a9643382cd0d394aed92d",
+        {},
+        {"public_key": "E17D56B529642AE4BBDEDF116EF917C2D5933F42344A9643382CD0D394AED92D"},
+        {"public_key": "e17d56"},
+        {"public_key": 1},
+        "extra member",
+    ],
+)
+def test_selected_with_a_malformed_producer_key_block_is_refused(block, issuer_allowlist, requester_key):
+    """producer-key/v1 is exactly one 64-lowercase-hex public_key (the
+    draft's producer-key/v1 Extension); nothing may ride beside it."""
+    raw = _capsulectl_withheld()
+    if block == "extra member":
+        block = dict(raw["extensions"]["producer-key/v1"], disclosures={"x": {"agent_input": {"secret": 1}}})
+    raw["extensions"]["producer-key/v1"] = block
+    with pytest.raises(BundleRefused, match="producer-key/v1"):
+        _accept(raw, issuer_allowlist, requester_key)

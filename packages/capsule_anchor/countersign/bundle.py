@@ -22,6 +22,7 @@ bundle -- INCLUDING, always, a bundle that is not payload-free apart from that o
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
@@ -169,6 +170,7 @@ _SELECTED_MEMBERS = frozenset(
 #: refused, since some carry payloads (``composed/v1`` nests whole member
 #: bundles, disclosures included).
 _SELECTED_EXTENSIONS = frozenset({"producer-key/v1"})
+_LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}")
 
 
 def _check_selected_withheld(raw: dict) -> None:
@@ -179,7 +181,10 @@ def _check_selected_withheld(raw: dict) -> None:
     --withheld`` do); here it must also carry no
     ``disclosures`` (not even an empty overlay), no ``disclosure_record``, no
     member outside :data:`_SELECTED_MEMBERS` and no extension outside
-    :data:`_SELECTED_EXTENSIONS`."""
+    :data:`_SELECTED_EXTENSIONS`, whose one block has exactly the draft's
+    shape. This closes every place the draft defines for payload material;
+    it cannot show that a producer hid nothing in a free-form value such as
+    ``verification``, which is the producer's own statement."""
     extra = sorted(set(raw) - _SELECTED_MEMBERS)
     if extra:
         raise BundleRefused(
@@ -194,6 +199,18 @@ def _check_selected_withheld(raw: dict) -> None:
             f"a payloads_mode: selected bundle may carry only the {sorted(_SELECTED_EXTENSIONS)} "
             f"extension here, but it carries {kinds}"
         )
+    # The draft's producer-key/v1 block is exactly one 64-lowercase-hex
+    # public_key, and a producer MUST NOT add other members; anything else
+    # in it could carry what the bundle withholds.
+    if "producer-key/v1" in extensions:
+        block = extensions["producer-key/v1"]
+        key = block.get("public_key") if isinstance(block, dict) else None
+        if not (
+            isinstance(key, str) and _LOWER_HEX_64.fullmatch(key) and set(block) == {"public_key"}
+        ):
+            raise BundleRefused(
+                'the producer-key/v1 extension must be exactly {"public_key": <64 lowercase hex>}'
+            )
 
 
 def _check_disclosures(raw: dict, disclosable_kinds: frozenset[str]) -> None:
