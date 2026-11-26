@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Runs locally what CI runs on pull requests and main: python.yml on Python
-# 3.11 and 3.12, hostname-lint.yml and neutrality.yml's scanner self-test.
+# 3.11 and 3.12, hostname-lint.yml, neutrality.yml's scanner self-test and
+# local-witness.yml (without its /etc/hosts block, which needs sudo).
 # Not run: neutrality.yml's scan itself, which needs the NEUTRALITY_TERMS
 # repository secret, dco.yml's sign-off check, and python.yml's test-postgres
 # job, which needs a Postgres database (CONTRIBUTING.md, Dev setup, says how
@@ -22,3 +23,18 @@ done
 # hostname-lint.yml and neutrality.yml's scanner self-test.
 "$tmp/py3.12/bin/python" .github/hostname_lint.py .
 "$tmp/py3.12/bin/python" .github/neutrality_scan.py --self-test
+
+# local-witness.yml: start ci/local-witness, register a checkpoint over TLS,
+# check the authority key and the log.
+mkdir -p "$tmp/lw"
+RUNNER_TEMP="$tmp/lw" GITHUB_OUTPUT="$tmp/lw/out" SRC="$PWD" BLOCK=false bash ci/local-witness/start.sh
+trap 'kill "$(cat "$tmp/lw/local-witness/pid")" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+out() { sed -n "s/^$1=//p" "$tmp/lw/out"; }
+SSL_CERT_FILE="$(out ca-bundle)" "$tmp/py3.12/bin/python" examples/cross-witness-checkpoint-smoke/submit_checkpoint.py \
+  --host "$(out url)" --log-id ci-local-witness/v1 > /dev/null
+SSL_CERT_FILE="$(out ca-bundle)" URL="$(out url)" KEY="$(out public-key)" "$tmp/py3.12/bin/python" -c '
+import os, httpx
+got = httpx.get(os.environ["URL"] + "/anchor/authority-pubkey").json()["pubkey_hex"]
+assert got == os.environ["KEY"], (got, os.environ["KEY"])'
+grep -qE '"POST /checkpoints HTTP/[0-9.]+" 2[0-9][0-9]' "$(out log)"
+echo "local witness: ok"
