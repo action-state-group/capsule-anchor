@@ -717,11 +717,26 @@ def _chain(key, log_id):
     return cps
 
 
+def _continuity_assertion(receipt: bytes) -> dict | None:
+    import cbor2
+    from capsule_anchor.anchoring.service import _COSE_CONTINUITY_LABEL
+
+    protected = cbor2.loads(cbor2.loads(receipt).value[0])
+    return protected.get(_COSE_CONTINUITY_LABEL)
+
+
 def _store_service(tmp_path, db):
-    return AnchorerService() if db == "memory" else AnchorerService(db_path=str(tmp_path / "w.db"))
+    if db == "memory":
+        return AnchorerService()
+    if db == "sqlite":
+        return AnchorerService(db_path=str(tmp_path / "w.db"))
+    return AnchorerService(store=_pg_pair()[0])
 
 
-@pytest.mark.parametrize("db", ["memory", "sqlite"])
+_EVERY_STORE = ["memory", "sqlite", pytest.param("postgres", marks=_pg_required)]
+
+
+@pytest.mark.parametrize("db", _EVERY_STORE)
 def test_a_receipt_stored_before_its_tip_failed_is_completed_by_the_retry(tmp_path, db):
     """capsule-anchor#120: checkpoint N's acceptance stores its receipt, then
     fails before its tip moves (these stores, like v0.1.4's Postgres store,
@@ -764,9 +779,38 @@ def test_a_checkpoint_preregistered_on_register_moves_the_tip_when_posted():
     svc.witness_checkpoint(first)
     plain = svc.register_signed_statement_full(bytes.fromhex(_checkpoint_digest(n)))
     posted = svc.witness_checkpoint(n)
-    assert posted.receipt == plain.receipt
     assert posted.continuity_grade == CONTINUITY_GRADE_WITNESSED
+    assert posted.leaf_index == plain.leaf_index  # the leaf it already had, no second one
+    # The receipt carries the signed continuity assertion a witnessed grade promises.
+    assert _continuity_assertion(plain.receipt) is None
+    assertion = _continuity_assertion(posted.receipt)
+    assert (assertion["prev_size"], assertion["mmr_size"]) == (first["mmr_size"], n["mmr_size"])
     assert svc.get_checkpoint_readback("prereg-tip")["continuity_grade"] == CONTINUITY_GRADE_WITNESSED
+    assert svc.witness_checkpoint(n).receipt == posted.receipt  # a retry answers the same receipt
+    assert svc.witness_checkpoint(n1).continuity_grade == CONTINUITY_GRADE_WITNESSED
+
+
+@pytest.mark.parametrize("db", _EVERY_STORE)
+def test_a_record_left_without_a_grade_is_completed_by_the_retry(tmp_path, db):
+    """Before #120 a retry could record N with no grade while the first
+    acceptance had not moved the tip, and that acceptance could then fail.
+    The retry after the upgrade completes it: tip, grade and record."""
+    from capsule_anchor.anchoring.service import _checkpoint_digest
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    svc = _store_service(tmp_path, db)
+    first, n, n1 = _chain(Ed25519PrivateKey.generate(), "ungraded")
+    svc.witness_checkpoint(first)
+    plain = svc.register_signed_statement_full(bytes.fromhex(_checkpoint_digest(n)))
+    svc._record_checkpoint_read_surface(n, plain)  # noqa: SLF001 -- the old retry's record, grade None
+    assert svc.get_checkpoint_readback("ungraded")["continuity_grade"] is None
+
+    retry = svc.witness_checkpoint(n)
+    assert retry.continuity_grade == CONTINUITY_GRADE_WITNESSED
+    readback = svc.get_checkpoint_readback("ungraded")
+    assert readback["continuity_grade"] == CONTINUITY_GRADE_WITNESSED
+    assert readback["receipt"] == retry.receipt
+    assert readback["equivocations"] == []
     assert svc.witness_checkpoint(n1).continuity_grade == CONTINUITY_GRADE_WITNESSED
 
 
