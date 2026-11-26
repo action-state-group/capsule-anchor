@@ -6,9 +6,9 @@ evidence-bundle-00``, wire ``bundle_version: "2"`` / ``bundle_kind:
 "evidence-bundle/v2"``) -- the exact shape ``capsulectl bundle`` produces --
 carrying ``completeness.payloads_mode: "none"`` or ``"selected"``: every
 record's full content withheld to digests, checkpoints, and completeness
-proofs only. ``selected`` is what a withheld bundle with records states (the
-draft keeps ``none`` for an empty history), and is accepted only when it
-discloses nothing at all. The one exception, for ``none`` only, is a holder's opt-in ``disclosures`` overlay of the ``agent_input``
+proofs only. ``selected`` is what capsule-cli and capsulectl write for a
+withheld bundle with records (the draft allows either and requires ``none``
+for an empty history), and is accepted only when it discloses nothing at all. The one exception, for ``none`` only, is a holder's opt-in ``disclosures`` overlay of the ``agent_input``
 of the record kinds the deployer lists as disclosable (``config.disclosable_kinds``,
 empty by default), checked against the digest each record sealed. This module does not own that wire format -- it is
 the donated spec's own bundle shape, codec'd and verified by the neutral
@@ -175,10 +175,10 @@ _LOWER_HEX_64 = re.compile(r"[0-9a-f]{64}")
 
 def _check_selected_withheld(raw: dict) -> None:
     """Refuse a ``payloads_mode: "selected"`` bundle unless it discloses
-    nothing. The AAC draft writes ``none`` only for an empty history, so a
-    withheld bundle with records states ``selected`` (the reference builder,
-    capsule-cli's digests-only bundle and capsulectl's ``deal report
-    --withheld`` do); here it must also carry no
+    nothing. A withheld bundle with records may state ``none`` or
+    ``selected`` (the draft requires ``none`` only for an empty history); the
+    AAC Python reference builder, capsule-cli's digests-only bundle and
+    capsulectl's ``deal report --withheld`` write ``selected``. It is accepted here only with no
     ``disclosures`` (not even an empty overlay), no ``disclosure_record``, no
     member outside :data:`_SELECTED_MEMBERS` and no extension outside
     :data:`_SELECTED_EXTENSIONS`, whose one block has exactly the draft's

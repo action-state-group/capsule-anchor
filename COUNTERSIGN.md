@@ -11,9 +11,9 @@ what is defined here.
 / `bundle_kind: "evidence-bundle/v2"`) — the exact bytes `capsulectl bundle` produces,
 carrying `completeness.payloads_mode: "none"` and, at most, the holder's opt-in disclosure of
 the payloads of record kinds the deployment lists as disclosable (§5), or
-`payloads_mode: "selected"` with nothing disclosed (the form `capsulectl deal report --withheld`
-writes). This
-module never invents its own bundle model: the digest (JCS-canonical,
+`payloads_mode: "selected"` with nothing disclosed (the form capsule-cli's digests-only
+`bundle` and `capsulectl deal report --withheld` write). This module never invents its
+own bundle model: the digest (JCS-canonical,
 `sha256(JCS(bundle \ countersignatures))`) and the structural/completeness
 verification (graph closure, CLL #13 range proof, per-record inclusion proof) are
 computed by the neutral `agent_action_capsule.bundle` reference library, the same one
@@ -157,16 +157,18 @@ raised during it, and is also HTTP 422):
    `completeness.payloads_mode: "none"`, or `"selected"` with nothing disclosed. Anything
    with a payload present is refused by construction.
 
-   A bundle that has records and withholds every payload states `"selected"`: the AAC
-   Evidence Bundle draft keeps `"none"` for an empty history, and capsule-cli and
-   `capsulectl deal report --withheld` write `"selected"`. Such a bundle is accepted only
-   when it carries no `disclosures` member (not even an empty one), no `disclosure_record`,
-   no member outside the v2 core (`bundle_version`, `bundle_kind`, `root`, `records`,
-   `completeness`, `completeness_certificate`, `checkpoint`, `category_coverage`,
-   `verification`, `extensions`, `countersignatures`) and no extension other than
-   `producer-key/v1`, which must be exactly `{"public_key": <64 lowercase hex>}`; `composed/v1`, for example, nests whole member bundles and is refused. These close every place the draft defines for payload
-   material; a free-form value such as `verification` is the producer's own statement and is
-   not inspected.
+   A bundle that has records and withholds every payload may state `"none"` or, as
+   capsule-cli's digests-only `bundle` and `capsulectl deal report --withheld` write it,
+   `"selected"` with nothing selected; the AAC Evidence Bundle draft requires `"none"` for
+   an empty history. A `"selected"` bundle is accepted only when it carries no
+   `disclosures` member (not even an empty one), no `disclosure_record`, no member outside
+   the v2 core (`bundle_version`, `bundle_kind`, `root`, `records`, `completeness`,
+   `completeness_certificate`, `checkpoint`, `category_coverage`, `verification`,
+   `extensions`, `countersignatures`) and no extension other than `producer-key/v1`, which
+   must be exactly `{"public_key": <64 lowercase hex>}`. `composed/v1`, for example, nests
+   whole member bundles and is refused. These close every place the draft defines for
+   payload material; a free-form value such as `verification` is the producer's own
+   statement and is not inspected.
 
    For `"none"`, the one exception is an optional, holder opt-in `disclosures` overlay
    that discloses only the `agent_input` of records whose `action_type` the deployment
