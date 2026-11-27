@@ -223,6 +223,8 @@ With Postgres as the backing store, multiple Cloud Run instances are safe:
     --project=PROJECT_ID
   ```
   `--min-instances=1` avoids cold-start latency for the first request on a new instance.
+- **Scaling**: what still grows with the log, the ceilings it sets (memory first), and the ranked
+  fixes are in [docs/architecture/20-witness-scaling.md](../docs/architecture/20-witness-scaling.md).
 
 
 ## Key management and rotation

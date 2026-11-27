@@ -22,6 +22,21 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Changed
 
+- **The witness no longer reads its whole log into memory at startup.** A new instance read
+  every log entry as a model in one query before keeping 32 bytes a leaf: 234 MiB at 54,000
+  entries and 1,691 MiB at 540,000 in a local profile, so a 512 Mi instance would be killed at
+  startup somewhere between about 73,000 and 125,000 entries. The sync now reads 5,000 entries
+  a query (102 and 145 MiB) (#138, #132).
+- **Consistency proofs come from the cached tree.** `GET /anchor/consistency-proof` copied every
+  leaf and rehashed the trees under the instance lock, about 1 s per call in production; it now
+  reuses the kept subtree hashes (0.49 ms at 54,000 entries locally). The proof is unchanged
+  (#136, #132).
+- **A waiting write no longer stalls the instance.** `POST /checkpoints` and
+  `POST /countersign/register` ran their registration on the event loop, so one write waiting
+  for the writer lock or Postgres held up every other request on the instance; they now run it
+  in the thread pool (#140, #132).
+- **The hosted-witness monitor also fails at 65,000 log entries,** a tripwire until the
+  startup change above is deployed (#141, #132).
 - **`GET /anchor/transparency-log` returns at most 1000 entries per response.** This is a
   behavior change for callers that send no `limit`: such a call used to return every entry
   from `after_index` to the tip (about 54,000 at `after_index=0`), and now returns the first
