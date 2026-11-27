@@ -29,6 +29,12 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   get its stored receipt back. A client retries or re-anchors it to the witness's tip like any
   continuity 409 (#120).
 
+### Removed
+
+- **`anchoring/sql_store.py` (`SqlLogStore`).** The SQLAlchemy store was never imported, its
+  SQLAlchemy dependency was never declared, and it lacked the `writer_lock` the service now
+  needs. `PostgresLogStore` in `anchoring/store.py` stays the production store (#134).
+
 ### Fixed
 
 - **Countersign accepts a withheld bundle that states `payloads_mode: "selected"`.** A
