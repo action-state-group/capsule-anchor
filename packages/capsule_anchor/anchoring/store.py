@@ -133,8 +133,10 @@ class InMemoryLogStore:
     def all_entries(self) -> list[TransparencyLogEntry]:
         return list(self._log)
 
-    def entries_after(self, after_index: int) -> list[TransparencyLogEntry]:
-        return [e for e in self._log if e.log_index >= after_index]
+    def entries_after(self, after_index: int, limit: int | None = None) -> list[TransparencyLogEntry]:
+        # append_entry keeps log_index equal to the list position.
+        start = max(after_index, 0)
+        return self._log[start:] if limit is None else self._log[start : start + limit]
 
     def size(self) -> int:
         return len(self._log)
@@ -646,13 +648,13 @@ class SqliteLogStore:
             )
             return [self._row_to_entry(r) for r in cur.fetchall()]
 
-    def entries_after(self, after_index: int) -> list[TransparencyLogEntry]:
+    def entries_after(self, after_index: int, limit: int | None = None) -> list[TransparencyLogEntry]:
         with self._lock:
             cur = self._conn.execute(
                 "SELECT log_index, logged_at, kind, payload_hash, log_signature, "
                 "prev_log_hash FROM log_entries WHERE log_index >= ? "
-                "ORDER BY log_index ASC",
-                (after_index,),
+                "ORDER BY log_index ASC LIMIT ?",
+                (after_index, -1 if limit is None else limit),
             )
             return [self._row_to_entry(r) for r in cur.fetchall()]
 
@@ -1464,13 +1466,13 @@ class PostgresLogStore:
             )
             return [self._row_to_entry(r) for r in cur.fetchall()]
 
-    def entries_after(self, after_index: int) -> list[TransparencyLogEntry]:
+    def entries_after(self, after_index: int, limit: int | None = None) -> list[TransparencyLogEntry]:
         with self._lock:
             cur = self._read(
                 "SELECT log_index, logged_at, kind, payload_hash, log_signature, "
                 "prev_log_hash FROM log_entries WHERE log_index >= %s "
-                "ORDER BY log_index ASC",
-                (after_index,),
+                "ORDER BY log_index ASC LIMIT %s",
+                (after_index, limit),
             )
             return [self._row_to_entry(r) for r in cur.fetchall()]
 

@@ -769,6 +769,12 @@ class ConsistencyProof(BaseModel):
     proof: list[str]
 
 
+#: Log entries read per query when the service syncs its cached tree. One page
+#: of entries is in memory at a time (about 3 KiB each as models); the whole
+#: log was, before capsule-anchor#132.
+SYNC_PAGE_ROWS = 5000
+
+
 class AnchorerService:
     """Countersign tenant roots and maintain a real CT transparency log.
 
@@ -956,14 +962,25 @@ class AnchorerService:
     def _sync_log(self) -> None:
         """Bring the cached tree up to the stored log: read only the entries
         after the ones already cached. The log is append-only and never
-        pruned, so nothing cached ever changes. Caller holds ``self._lock``."""
-        for entry in self._store.entries_after(self._tree.size):
-            if entry.log_index != self._tree.size:
-                raise RuntimeError(
-                    f"log entry {entry.log_index} read where {self._tree.size} was expected"
-                )
-            self._tree.append(ct_leaf_hash(entry))
-            self._last_entry = entry
+        pruned, so nothing cached ever changes. Caller holds ``self._lock``.
+
+        Read in pages of ``SYNC_PAGE_ROWS``, each dropped once its leaves are
+        kept, so a new instance's first read of the whole log holds one page
+        of entries in memory, not the log (capsule-anchor#132)."""
+        while True:
+            page = self._store.entries_after(self._tree.size, limit=SYNC_PAGE_ROWS)
+            for entry in page:
+                if entry.log_index != self._tree.size:
+                    raise RuntimeError(
+                        f"log entry {entry.log_index} read where {self._tree.size} was expected"
+                    )
+                self._tree.append(ct_leaf_hash(entry))
+                self._last_entry = entry
+            if len(page) < SYNC_PAGE_ROWS:
+                return
+            # Drop this page before reading the next, or both are in memory
+            # while the next one is built.
+            del page
 
     def log_size(self) -> int:
         """The number of log entries, read incrementally (not ``COUNT(*)``)."""
