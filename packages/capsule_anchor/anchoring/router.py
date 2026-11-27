@@ -40,7 +40,9 @@ Endpoints:
   --- Legacy routes (kept for existing callers registered against anchor.aac) ---
   POST /anchor/anchor                 -> countersign a root + append to log
   GET  /anchor/countersigned-root     -> fetch a stored CountersignedRoot
-  GET  /anchor/transparency-log       -> append-only log feed (for monitors)
+  GET  /anchor/transparency-log       -> append-only log feed (for monitors),
+                                         paged: at most 1000 entries per response,
+                                         Link rel="next" while more remain
   POST /anchor/inclusion-proof        -> build a Merkle inclusion proof
   POST /anchor/verify-inclusion       -> verify an inclusion proof
 
@@ -99,6 +101,7 @@ import hashlib
 import json
 import threading
 import time
+import urllib.parse
 
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -158,6 +161,11 @@ class _SlidingWindowLimiter:
             dq.append(now)
             return True
 
+
+#: Most entries one ``GET /anchor/transparency-log`` response carries, and the
+#: page size when the caller sends no ``limit``. Before capsule-anchor#133 the
+#: route returned the whole log (about 54,000 entries) in one response.
+TRANSPARENCY_LOG_PAGE_MAX = 1000
 
 # 300 POST submissions per minute globally (5/s average).
 # Digest-only endpoint is the primary surface; register-statement shares the budget.
@@ -564,20 +572,46 @@ def get_router() -> APIRouter:
 
     @router.get("/transparency-log", response_model=list[TransparencyLogEntry])
     def transparency_log(
-        after_index: int = 0, capsule_id: str | None = None
+        response: Response,
+        after_index: int = 0,
+        capsule_id: str | None = None,
+        limit: int | None = None,
     ) -> list[TransparencyLogEntry]:
-        """Append-only log feed (for monitors).
+        """Append-only log feed (for monitors), one page per response.
+
+        Returns entries with ``log_index >= after_index`` in index order, at
+        most ``limit`` of them: ``limit`` defaults to, and is clamped to,
+        ``TRANSPARENCY_LOG_PAGE_MAX``; 0 or less is 400. When more entries
+        remain, a ``Link: <?after_index=K&limit=L>; rel="next"`` header names
+        the next page, a query-only reference that resolves against this
+        request's own path (RFC 8288, RFC 3986 section 5.2). Follow ``next``
+        until it is absent: the reader is then at the tip as of that read,
+        and later entries are read from the last ``log_index + 1``
+        (capsule-anchor#133).
 
         When ``capsule_id`` is supplied, return only entries bound to that
         capsule (Phase 3 — used by the ``gopher verify`` CLI to surface
-        "this capsule was anchored at <timestamp> in batch <N>"). The
-        ``after_index`` filter still applies on top.
+        "this capsule was anchored at <timestamp> in batch <N>"), paged the
+        same way; the ``next`` link keeps the filter.
         """
+        if limit is None:
+            limit = TRANSPARENCY_LOG_PAGE_MAX
+        elif limit <= 0:
+            raise HTTPException(status_code=400, detail="limit must be >= 1")
+        limit = min(limit, TRANSPARENCY_LOG_PAGE_MAX)
         svc = get_service()
+        # One row past the page tells whether a next page exists.
         if capsule_id is not None:
-            entries = svc.transparency_log_for_capsule(capsule_id)
-            return [e for e in entries if e.log_index >= after_index]
-        return svc.transparency_log(after_index)
+            entries = svc.transparency_log_for_capsule(capsule_id, after_index, limit + 1)
+        else:
+            entries = svc.transparency_log(after_index, limit + 1)
+        if len(entries) > limit:
+            entries = entries[:limit]
+            query = {"after_index": entries[-1].log_index + 1, "limit": limit}
+            if capsule_id is not None:
+                query["capsule_id"] = capsule_id
+            response.headers["Link"] = f'<?{urllib.parse.urlencode(query)}>; rel="next"'
+        return entries
 
     @router.post("/inclusion-proof", response_model=MerkleProof)
     def inclusion_proof(req: InclusionProofRequest) -> MerkleProof:

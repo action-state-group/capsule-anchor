@@ -83,7 +83,9 @@ class AnchorerService(Protocol):
     def get_countersigned_root(self, tenant_id: str,
                                root_hash: str) -> CountersignedRoot | None: ...
 
-    def transparency_log(self, after_index: int = 0) -> list[TransparencyLogEntry]: ...
+    def transparency_log(
+        self, after_index: int = 0, limit: int | None = None
+    ) -> list[TransparencyLogEntry]: ...
 
 
 @runtime_checkable

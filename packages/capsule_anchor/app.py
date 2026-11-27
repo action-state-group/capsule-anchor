@@ -114,6 +114,8 @@ def create_app() -> FastAPI:
         allow_origins=["https://agentactioncapsule.org"],
         allow_methods=["GET"],
         allow_headers=[],
+        # The transparency log's next-page link (capsule-anchor#133).
+        expose_headers=["Link"],
     )
 
     from capsule_anchor.anchoring.router import (
