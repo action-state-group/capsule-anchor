@@ -158,12 +158,16 @@ class InMemoryLogStore:
     def entries_for_capsule(
         self, capsule_id: str, after_index: int = 0, limit: int | None = None
     ) -> list[TransparencyLogEntry]:
-        idxs = sorted(
-            i for i, c in self._capsule_ids.items() if c == capsule_id and i >= after_index
-        )
-        if limit is not None:
-            idxs = idxs[:limit]
-        return [self._log[i] for i in idxs]
+        # Walk the log in index order and stop at ``limit``, so a page never
+        # collects every match first.
+        out: list[TransparencyLogEntry] = []
+        # append_entry keeps log_index equal to the list position.
+        for i in range(max(after_index, 0), len(self._log)):
+            if limit is not None and len(out) >= limit:
+                break
+            if self._capsule_ids.get(i) == capsule_id:
+                out.append(self._log[i])
+        return out
 
     # --- idempotent statement dedup ---
     def put_statement(
