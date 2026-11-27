@@ -14,6 +14,7 @@ Only GETs: the probe adds no checkpoint to the witness's log.
 from __future__ import annotations
 
 import argparse
+import http.client
 import sys
 import time
 import urllib.error
@@ -44,15 +45,31 @@ def verdict(samples: list[Sample], limit: float, slow_count: int) -> tuple[bool,
     return True, f"{len(samples)} probes answered 200, {len(slow)} slower than {limit:g} s"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is an answer other than 200: never follow it to a page that might answer 200."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 def fetch(url: str, timeout: float, clock: Callable[[], float] = time.monotonic) -> Sample:
+    """One GET, bounded by ``timeout`` seconds in all (connection, headers and the whole body)."""
     start = clock()
+    deadline = start + timeout
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:  # noqa: S310 (an https URL we name)
-            r.read()
+        with _OPENER.open(url, timeout=timeout) as r:
+            while r.read1(65536):
+                if clock() > deadline:
+                    return Sample(None, clock() - start, f"TimeoutError: no full answer in {timeout:g} s")
+            if r.length:  # read1 ends quietly when the server closes before Content-Length
+                return Sample(None, clock() - start, f"IncompleteRead: {r.length} bytes missing")
             return Sample(r.status, clock() - start)
     except urllib.error.HTTPError as e:
         return Sample(e.code, clock() - start)
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as e:
         reason = getattr(e, "reason", e)
         return Sample(None, clock() - start, f"{type(reason).__name__}: {reason}")
 

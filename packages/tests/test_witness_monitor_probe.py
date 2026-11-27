@@ -65,13 +65,36 @@ def test_bad_counts_are_refused():
 
 
 class _Handler(BaseHTTPRequestHandler):
-    status, delay = 200, 0.0
+    status, delay, mode = 200, 0.0, "ok"
 
     def do_GET(self):  # noqa: N802
+        if self.path == "/landing":
+            self.send_response(200)
+            self.end_headers()
+            return
         time.sleep(self.delay)
-        self.send_response(self.status)
-        self.end_headers()
-        self.wfile.write(b"{}")
+        if self.mode == "redirect":
+            self.send_response(302)
+            self.send_header("Location", "/landing")
+            self.end_headers()
+        elif self.mode == "trickle":  # a byte every 0.1 s, each within the socket timeout
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            for _ in range(100):
+                self.wfile.write(b"x")
+                self.wfile.flush()
+                time.sleep(0.1)
+        elif self.mode == "truncated":  # closes before the declared length
+            self.send_response(200)
+            self.send_header("Content-Length", "100")
+            self.end_headers()
+            self.wfile.write(b"{}")
+            self.close_connection = True
+        else:
+            self.send_response(self.status)
+            self.end_headers()
+            self.wfile.write(b"{}")
 
     def log_message(self, *a):
         pass
@@ -84,7 +107,7 @@ def server():
     yield srv
     srv.shutdown()
     srv.server_close()
-    _Handler.status, _Handler.delay = 200, 0.0
+    _Handler.status, _Handler.delay, _Handler.mode = 200, 0.0, "ok"
 
 
 def _url(srv):
@@ -110,3 +133,22 @@ def test_fetch_connection_refused():
     sock.close()
     s = probe.fetch(f"http://127.0.0.1:{port}/health", 2)
     assert s.status is None and s.error
+
+
+def test_fetch_does_not_follow_a_redirect(server):
+    """A /health that redirects to a page answering 200 is not healthy."""
+    _Handler.mode = "redirect"
+    assert probe.fetch(_url(server), 5).status == 302
+
+
+def test_fetch_bounds_the_whole_answer(server):
+    """A body trickled in under the socket timeout still ends the sample at the overall limit."""
+    _Handler.mode = "trickle"
+    s = probe.fetch(_url(server), 1.0)
+    assert s.status is None and "no full answer" in s.error and s.seconds < 3
+
+
+def test_fetch_truncated_answer_is_a_failed_sample(server):
+    _Handler.mode = "truncated"
+    s = probe.fetch(_url(server), 5)
+    assert s.status is None and "IncompleteRead" in s.error

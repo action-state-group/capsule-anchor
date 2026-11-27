@@ -69,3 +69,23 @@ jobs:
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           ASSIGNEE: ${{ vars.CI_FAILURE_ASSIGNEE }}
         run: bash .github/scripts/report-failure.sh
+      # The watchdog lists only issues labelled ci-red, and the shared reporter
+      # only warns when labelling fails: check the label here (issues API, not
+      # search, which lags) and add it again, failing the job if it never sticks.
+      - name: the issue carries ci-red
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "hosted witness probe failed"
+        run: |
+          titled() { gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100$1" \
+            --jq "map(select(.title == env.TITLE and .pull_request == null) | .number) | sort | .[]"; }
+          for _ in 1 2 3; do
+            [ -n "$(titled '&labels=ci-red')" ] && exit 0
+            gh label create ci-red --repo "$GITHUB_REPOSITORY" --color B60205 \
+              --description "A workflow failed on main or a nightly" > /dev/null 2>&1 || true
+            n="$(titled '' | head -n 1)"
+            [ -z "$n" ] || gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --add-label ci-red > /dev/null || true
+            sleep 10
+          done
+          echo "::error::no open issue titled '$TITLE' carries ci-red, so the watchdog will not list it"
+          exit 1
