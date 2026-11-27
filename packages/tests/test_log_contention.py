@@ -66,6 +66,48 @@ def test_cached_audit_path_equals_full_audit_path():
             assert tree.audit_path(i, size) == ct.inclusion_audit_path(i, leaves[:size]), (i, size)
 
 
+def test_cached_consistency_proof_equals_full_consistency_proof():
+    tree = CachedTree()
+    leaves = [_leaf(n) for n in range(600)]
+    for h in leaves:
+        tree.append(h)
+    pairs = [(m, n) for n in range(1, 131) for m in range(1, n + 1)]
+    rng = random.Random(132)
+    big = [1, 2, 255, 256, 257, 300, 511, 512, 513, 599, 600]
+    pairs += [(m, n) for n in big for m in big if m <= n]
+    pairs += [tuple(sorted(rng.sample(range(1, 601), 2))) for _ in range(300)]
+    for m, n in pairs:
+        expected = ct.consistency_proof(m, n, leaves)
+        assert tree.consistency_proof(m, n) == expected, (m, n)
+        assert ct.verify_consistency_proof(m, n, tree.root(m), tree.root(n), expected), (m, n)
+
+
+def test_cached_consistency_proof_refuses_sizes_out_of_range():
+    tree = CachedTree()
+    for n in range(5):
+        tree.append(_leaf(n))
+    for m, n in [(0, 3), (4, 3), (1, 6), (-1, 2)]:
+        with pytest.raises(ValueError):
+            tree.consistency_proof(m, n)
+
+
+def test_service_consistency_proof_matches_the_full_computation_on_a_grown_log():
+    svc = AnchorerService(attestor=AttestorService())
+    for n in range(MEMO_MIN + 40):
+        svc.register_signed_statement_full(_digest(f"proof-{n}"))
+    leaves = svc._ct_leaves()  # noqa: SLF001
+    size = len(leaves)
+    for m in (0, 1, 7, MEMO_MIN - 1, MEMO_MIN, MEMO_MIN + 1, size - 1, size):
+        proof = svc.consistency_proof(m, size)
+        assert proof.first_root == ct.merkle_tree_hash(leaves[:m])
+        assert proof.second_root == ct.merkle_tree_hash(leaves)
+        expected = [] if m in (0, size) else ct.consistency_proof(m, size, leaves)
+        assert proof.proof == expected, m
+        assert svc.verify_consistency(proof), m
+    with pytest.raises(ValueError):
+        svc.consistency_proof(2, size + 1)
+
+
 def test_memo_keeps_only_large_complete_subtrees():
     tree = CachedTree()
     for n in range(4 * MEMO_MIN + 3):

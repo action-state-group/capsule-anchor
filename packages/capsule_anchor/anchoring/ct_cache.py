@@ -7,9 +7,10 @@ kept too: a root or an audit path then costs about ``log2(N)`` stored hashes
 plus at most a few hundred fresh ones, instead of re-reading and re-hashing
 the whole log on every registration.
 
-Results are identical to ``ct.merkle_tree_hash`` and
-``ct.inclusion_audit_path`` over the same leaves (``tests/test_ct_cache.py``
-checks every size up to 600).
+Results are identical to ``ct.merkle_tree_hash``, ``ct.inclusion_audit_path``
+and ``ct.consistency_proof`` over the same leaves (the cached-tree tests in
+``packages/tests/test_log_contention.py`` compare them at every size up to 600
+and every pair of sizes up to 130).
 """
 
 from __future__ import annotations
@@ -59,8 +60,8 @@ class CachedTree:
         return self._leaves[index].hex()
 
     def leaves_hex(self, size: int) -> list[str]:
-        """The first ``size`` leaf hashes as hex, for the readers that use
-        ``ct``'s whole-list algorithms (consistency proofs)."""
+        """The first ``size`` leaf hashes as hex (a white-box view for tests;
+        the service's proofs and roots use the kept subtree hashes)."""
         return [h.hex() for h in self._leaves[:size]]
 
     def _mth(self, start: int, end: int) -> bytes:
@@ -102,3 +103,36 @@ class CachedTree:
                 path.append(self._mth(start, start + k))
                 start = start + k
         return [h.hex() for h in reversed(path)]
+
+    def consistency_proof(self, first: int, second: int) -> list[str]:
+        """The RFC6962 consistency proof between the trees of the first
+        ``first`` and ``second`` leaves, as hex (RFC6962 2.1.2): the same
+        list ``ct.consistency_proof`` builds, from kept subtree hashes
+        instead of every leaf (capsule-anchor#132)."""
+        if not 0 < first <= second <= len(self._leaves):
+            raise ValueError("require 0 < first <= second <= tree size")
+        if first == second:
+            return []
+        return [h.hex() for h in self._subproof(first, 0, second, True)]
+
+    def _subproof(self, m: int, start: int, end: int, start_from_old_root: bool) -> list[bytes]:
+        """SUBPROOF(m, D[start:end], b) of RFC6962 2.1.2, iteratively: each
+        step adds one sibling subtree hash, and the list is built leaf side
+        last, as the recursion returns it."""
+        tail: list[bytes] = []
+        while True:
+            n = end - start
+            if m == n:
+                if not start_from_old_root:
+                    tail.append(self._mth(start, end))
+                break
+            k = _split(n)
+            if m <= k:
+                tail.append(self._mth(start + k, end))
+                end = start + k
+            else:
+                tail.append(self._mth(start, start + k))
+                m -= k
+                start += k
+                start_from_old_root = False
+        return tail[::-1]
