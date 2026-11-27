@@ -9,6 +9,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -32,6 +33,7 @@ jobs:
   # here, each in a schema of its own (packages/tests/conftest.py).
   test-postgres:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:17
