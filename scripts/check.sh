@@ -20,8 +20,12 @@ unset NEUTRALITY_TERMS CAPSULE_ANCHOR_TEST_DATABASE_URL
 tmp="$(mktemp -d)"
 cleanup() {
   kill "$(cat "$tmp/lw/local-witness/pid" 2>/dev/null)" 2>/dev/null || true
-  if [ -f "$tmp/pg/data/postmaster.pid" ]; then
-    pg_ctl -D "$tmp/pg/data" -m immediate stop > /dev/null 2>&1 || true
+  # A throwaway Postgres that will not stop fails the check and keeps its
+  # directory (data and log) for diagnosis instead of being left running unseen.
+  if [ -f "$tmp/pg/data/postmaster.pid" ] \
+    && ! pg_ctl -D "$tmp/pg/data" -m immediate -w stop > /dev/null 2>&1; then
+    echo "test-postgres: could not stop the throwaway server; see $tmp/pg" >&2
+    exit 1
   fi
   rm -rf "$tmp"
 }
@@ -53,9 +57,12 @@ done
 "$tmp/py3.12/bin/python" .github/hostname_lint.py .
 "$tmp/py3.12/bin/python" .github/neutrality_scan.py --self-test
 
-# neutrality.yml's scan, when its terms are at hand.
+# neutrality.yml's scan, when its terms are at hand. As in CI, the terms go
+# only to origin/main's copy of the scanner, run by an isolated interpreter
+# that has not installed this checkout: the checkout is only scanned as data.
 if [ -n "$neutrality_terms" ]; then
-  NEUTRALITY_TERMS="$neutrality_terms" "$tmp/py3.12/bin/python" .github/neutrality_scan.py .
+  git show origin/main:.github/neutrality_scan.py > "$tmp/neutrality_scan.py"
+  NEUTRALITY_TERMS="$neutrality_terms" "$(uv python find 3.12)" -I "$tmp/neutrality_scan.py" .
 else
   echo "neutrality scan: NOT RUN (NEUTRALITY_TERMS unset; CI runs it)"
 fi
@@ -83,7 +90,10 @@ if [ -z "$db_url" ]; then
   createdb -h "$tmp/pg" -U postgres capsule_anchor_test
   db_url="postgresql://postgres@/capsule_anchor_test?host=$tmp/pg"
 fi
-CAPSULE_ANCHOR_TEST_DATABASE_URL="$db_url" "$tmp/py3.12/bin/python" -m pytest -q -rs
+# libpq bounds a connection and every statement, so an unresponsive database
+# fails the phase instead of hanging the check.
+CAPSULE_ANCHOR_TEST_DATABASE_URL="$db_url" PGCONNECT_TIMEOUT=10 PGOPTIONS="-c statement_timeout=120s" \
+  "$tmp/py3.12/bin/python" -m pytest -q -rs
 
 # local-witness.yml: start ci/local-witness, register a checkpoint over TLS,
 # check the authority key and the log. The two CAPSULE_ANCHOR_* settings are
