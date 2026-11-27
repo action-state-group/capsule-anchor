@@ -48,17 +48,22 @@ at a p99 of 5.0 s, with a maximum of 174 s.
   highest memory sample on the live revision `00015-cbd` is 0.58 of 512 Mi, about 297 MiB, at
   48,000 to 54,000 entries (`container/memory/utilizations`, one-minute p99, 2026-11-26 21:27Z to
   2026-11-27 12:40Z). That sample is bucketed and may miss the startup transient, so take it as a
-  lower bound: if it includes the startup read (about 155 MiB at that size), the rest is about
-  140 MiB, and a new instance is killed during startup at about 125,000 entries. Every instance
-  that starts after that point, autoscaled or rolled out, crash-loops: the witness goes down, not
-  slow.
+  lower bound on the peak, and read it both ways:
+  - if the sample includes the startup read (about 155 MiB at that size), the rest is about
+    140 MiB, and a new instance is killed during startup at about **125,000 entries**;
+  - if it missed the transient, about 297 MiB is the steady baseline, the startup peaks at
+    297 MiB plus 3 KiB an entry, and the kill comes at about **73,000 entries**.
+
+  Every instance that starts after that point, autoscaled or rolled out, crash-loops: the witness
+  goes down, not slow.
   - **When.** The live log held 54,011 entries at 2026-11-27 12:44Z and grew by 89 in the 46
-    minutes before (about 2,800 a day). At that rate 125,000 is about 2026-12-22; at the week's
-    pace while CI still posted to it (about 28,000 a week), about 2026-12-15.
-  - **Order.** Fix 1 is deployed before anything else in this note.
+    minutes before, about 2,800 a day; that sample is thin. At that rate 73,000 is about
+    2026-12-04 and 125,000 about 2026-12-22; at the week's pace while CI still posted to it
+    (about 28,000 a week), about 2026-12-02 and 2026-12-15.
+  - **Order.** Fix 1 is deployed before anything else in this note, and before 2026-12-02.
   - **Tripwire.** The `/health` monitor (`.github/workflows/witness-monitor.yml`) fails, and so
-    opens its `ci-red` issue, once `tree_size` reaches 100,000. Raise its threshold only after
-    fix 1 is live.
+    opens its `ci-red` issue, once `tree_size` reaches 65,000, below the low bound. It is a
+    backstop, not the plan. Raise its threshold only after fix 1 is live.
   - **Stopgap.** If fix 1 is not live when the tripwire fires, raise the Cloud Run memory to 1 Gi;
     that is spend, Steven's call (section 3.6).
 - **Write throughput is one writer at a time across all instances** (the advisory lock, #113).
@@ -87,7 +92,7 @@ in full, as now, because the next append chains to it.
   1,691 to 145 MiB at 540,000 (local Postgres, pages of 5,000). What remains above the baseline is
   one page of rows plus the cached tree, which does grow with the log, at about 73 bytes a leaf
   (one 32-byte `bytes` object and its list slot) plus the subtree memo: about 4 MiB at 54,000
-  and 40 MiB at 540,000. That moves the startup's 512 Mi ceiling from about 125,000 entries to
+  and 40 MiB at 540,000. That moves the startup's 512 Mi ceiling from 73,000 to 125,000 entries to
   several million. It does not bound a request that reads the whole log: `GET
   /anchor/transparency-log?after_index=0` still materializes every entry (section 4). The time of the read stays O(N) (0.25 s and 2.79 s locally); it is spent at startup,
   not on a request.
@@ -162,8 +167,8 @@ Everything in this section that costs money (minimum instances, more memory, a l
 tier) is Steven's decision, as is every deploy.
 
 - **Cloud Run memory (512 Mi):** after fix 1 is deployed the remaining growth is the cached tree,
-  about 40 MiB at 540,000 entries. Until it is deployed, the 125,000-entry ceiling and the stopgap
-  in section 2 apply.
+  about 40 MiB at 540,000 entries. Until it is deployed, the 73,000 to 125,000-entry ceiling and the
+  stopgap in section 2 apply.
 - **Cloud SQL `db-f1-micro`:** CPU peaked at 54% in an hour, memory in use 13%, at most 10
   backends. No change needed.
 - **Minimum instances (0 today):** a new instance takes 5.6 to 9.1 s to start (p50 per day), 176
