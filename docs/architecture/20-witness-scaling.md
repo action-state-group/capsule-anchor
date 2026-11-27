@@ -60,7 +60,9 @@ at a p99 of 5.0 s, with a maximum of 174 s.
     minutes before, about 2,800 a day; that sample is thin. At that rate 73,000 is about
     2026-12-04 and 125,000 about 2026-12-22; at the week's pace while CI still posted to it
     (about 28,000 a week), about 2026-12-02 and 2026-12-15.
-  - **Order.** Fix 1 is deployed before anything else in this note, and before 2026-12-02.
+  - **Order.** Fix 1 is deployed before anything else in this note, and before 2026-12-02. Done:
+    it went live on 2026-11-27 at 13:19Z (revision `capsule-witness-00016-h6z`, main
+    `2a63377`, at about 54,080 entries).
   - **Tripwire.** The `/health` monitor (`.github/workflows/witness-monitor.yml`) fails, and so
     opens its `ci-red` issue, once `tree_size` reaches 65,000, below the low bound (#141). It is a
     backstop, not the plan. Raise its threshold only after fix 1 is live.
@@ -164,7 +166,9 @@ configuration of project `fluxxom`.
 ### 6. Operator: settings that need no change now
 
 Everything in this section that costs money (minimum instances, more memory, a larger Cloud SQL
-tier) is Steven's decision, as is every deploy.
+tier) is Steven's decision. A deploy goes out on an owner's go: fixes 1 to 3 (with #127 and #139)
+were deployed on Ethan's on 2026-11-27, as revision `capsule-witness-00016-h6z` of main
+`2a63377`.
 
 - **Cloud Run memory (512 Mi):** after fix 1 is deployed the remaining growth is the cached tree,
   about 40 MiB at 540,000 entries. Until it is deployed, the 73,000 to 125,000-entry ceiling and the
