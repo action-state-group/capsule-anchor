@@ -9,10 +9,9 @@ samples took longer than ``--limit`` seconds, or when ``--max-tree-size`` is set
 the signed tree head from the store (packages/capsule_anchor/app.py, ``health``), so a stalled
 database shows here too.
 
-``--max-tree-size`` is a tripwire, not a health check: until the paged startup read
-(capsule-anchor#138, docs/architecture/20-witness-scaling.md section 2) is live, a new instance
-runs out of its 512 Mi during startup somewhere between about 73,000 and 125,000 entries, so
-the monitor reports before the low end.
+``--max-tree-size`` is a tripwire, not a health check: it reports when the log reaches a size
+whose startup memory has not been measured (capsule-anchor#132; the workflow names the
+threshold and the measurement to take before raising it).
 
 Only GETs: the probe adds no checkpoint to the witness's log.
 """
@@ -55,8 +54,8 @@ def verdict(samples: list[Sample], limit: float, slow_count: int,
         return False, f"{len(slow)} of {len(samples)} probes took longer than {limit:g} s"
     sizes = [s.tree_size for s in samples if s.tree_size is not None]
     if max_tree_size is not None and sizes and max(sizes) >= max_tree_size:
-        return False, (f"tree_size {max(sizes)} reached the tripwire {max_tree_size}: deploy the paged "
-                       "startup read or raise the memory (https://github.com/action-state-group/capsule-anchor/issues/132)")
+        return False, (f"tree_size {max(sizes)} reached the tripwire {max_tree_size}: measure the startup "
+                       "memory at this size before raising it (https://github.com/action-state-group/capsule-anchor/issues/132)")
     return True, f"{len(samples)} probes answered 200, {len(slow)} slower than {limit:g} s"
 
 

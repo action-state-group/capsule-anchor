@@ -35,8 +35,9 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   `POST /countersign/register` ran their registration on the event loop, so one write waiting
   for the writer lock or Postgres held up every other request on the instance; they now run it
   in the thread pool (#140, #132).
-- **The hosted-witness monitor also fails at 65,000 log entries,** a tripwire until the
-  startup change above is deployed (#141, #132).
+- **The hosted-witness monitor also fails at 1,000,000 log entries,** a tripwire on the
+  startup memory: 65,000 until the startup change above was deployed (#141), then 1,000,000,
+  twice the largest size measured (#132).
 - **`GET /anchor/transparency-log` returns at most 1000 entries per response.** This is a
   behavior change for callers that send no `limit`: such a call used to return every entry
   from `after_index` to the tip (about 54,000 at `after_index=0`), and now returns the first

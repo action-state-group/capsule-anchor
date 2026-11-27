@@ -65,7 +65,10 @@ at a p99 of 5.0 s, with a maximum of 174 s.
     `2a63377`, at about 54,080 entries).
   - **Tripwire.** The `/health` monitor (`.github/workflows/witness-monitor.yml`) fails, and so
     opens its `ci-red` issue, once `tree_size` reaches 65,000, below the low bound (#141). It is a
-    backstop, not the plan. Raise its threshold only after fix 1 is live.
+    backstop, not the plan. Raise its threshold only after fix 1 is live. Done: with fix 1 live
+    it is 1,000,000, twice the largest measured size (540,000, peak 127 MiB at startup). Before
+    raising it again, measure the startup peak at 1,000,000 and 2,000,000 entries and the live
+    revision's memory near the threshold.
   - **Stopgap.** If fix 1 is not live when the tripwire fires, raise the Cloud Run memory to 1 Gi;
     that is spend, Steven's call (section 3.6).
 - **Write throughput is one writer at a time across all instances** (the advisory lock, #113).
