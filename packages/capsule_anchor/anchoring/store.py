@@ -155,9 +155,19 @@ class InMemoryLogStore:
     def get_capsule_id(self, log_index: int) -> str | None:
         return self._capsule_ids.get(log_index)
 
-    def entries_for_capsule(self, capsule_id: str) -> list[TransparencyLogEntry]:
-        idxs = {i for i, c in self._capsule_ids.items() if c == capsule_id}
-        return [e for e in self._log if e.log_index in idxs]
+    def entries_for_capsule(
+        self, capsule_id: str, after_index: int = 0, limit: int | None = None
+    ) -> list[TransparencyLogEntry]:
+        # Walk the log in index order and stop at ``limit``, so a page never
+        # collects every match first.
+        out: list[TransparencyLogEntry] = []
+        # append_entry keeps log_index equal to the list position.
+        for i in range(max(after_index, 0), len(self._log)):
+            if limit is not None and len(out) >= limit:
+                break
+            if self._capsule_ids.get(i) == capsule_id:
+                out.append(self._log[i])
+        return out
 
     # --- idempotent statement dedup ---
     def put_statement(
@@ -717,16 +727,18 @@ class SqliteLogStore:
             row = cur.fetchone()
         return None if row is None else str(row[0])
 
-    def entries_for_capsule(self, capsule_id: str) -> list[TransparencyLogEntry]:
+    def entries_for_capsule(
+        self, capsule_id: str, after_index: int = 0, limit: int | None = None
+    ) -> list[TransparencyLogEntry]:
         with self._lock:
             cur = self._conn.execute(
                 "SELECT le.log_index, le.logged_at, le.kind, le.payload_hash, "
                 "le.log_signature, le.prev_log_hash "
                 "FROM log_entries le "
                 "JOIN log_capsule_bindings b ON le.log_index = b.log_index "
-                "WHERE b.capsule_id = ? "
-                "ORDER BY le.log_index ASC",
-                (capsule_id,),
+                "WHERE b.capsule_id = ? AND le.log_index >= ? "
+                "ORDER BY le.log_index ASC LIMIT ?",
+                (capsule_id, after_index, -1 if limit is None else limit),
             )
             return [self._row_to_entry(r) for r in cur.fetchall()]
 
@@ -1544,15 +1556,18 @@ class PostgresLogStore:
             row = cur.fetchone()
         return None if row is None else str(row[0])
 
-    def entries_for_capsule(self, capsule_id: str) -> list[TransparencyLogEntry]:
+    def entries_for_capsule(
+        self, capsule_id: str, after_index: int = 0, limit: int | None = None
+    ) -> list[TransparencyLogEntry]:
         with self._lock:
             cur = self._read(
                 "SELECT le.log_index, le.logged_at, le.kind, le.payload_hash, "
                 "le.log_signature, le.prev_log_hash "
                 "FROM log_entries le "
                 "JOIN log_capsule_bindings b ON le.log_index = b.log_index "
-                "WHERE b.capsule_id = %s ORDER BY le.log_index ASC",
-                (capsule_id,),
+                "WHERE b.capsule_id = %s AND le.log_index >= %s "
+                "ORDER BY le.log_index ASC LIMIT %s",
+                (capsule_id, after_index, limit),
             )
             return [self._row_to_entry(r) for r in cur.fetchall()]
 

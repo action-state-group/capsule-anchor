@@ -917,17 +917,22 @@ class AnchorerService:
         with self._lock:
             return self._store.get_root(tenant_id, root_hash)
 
-    def transparency_log(self, after_index: int = 0) -> list[TransparencyLogEntry]:
-        """Return log entries with ``log_index >= after_index`` (monitor feed)."""
+    def transparency_log(
+        self, after_index: int = 0, limit: int | None = None
+    ) -> list[TransparencyLogEntry]:
+        """Return log entries with ``log_index >= after_index`` in index
+        order, at most ``limit`` of them (monitor feed)."""
         with self._lock:
-            return self._store.entries_after(after_index)
+            return self._store.entries_after(after_index, limit=limit)
 
     def transparency_log_for_capsule(
-        self, capsule_id: str
+        self, capsule_id: str, after_index: int = 0, limit: int | None = None
     ) -> list[TransparencyLogEntry]:
-        """Return log entries bound to ``capsule_id`` (Phase 3 verify-CLI feed)."""
+        """Return log entries bound to ``capsule_id`` with ``log_index >=
+        after_index`` in index order, at most ``limit`` of them (Phase 3
+        verify-CLI feed)."""
         with self._lock:
-            return self._store.entries_for_capsule(capsule_id)
+            return self._store.entries_for_capsule(capsule_id, after_index, limit)
 
     def get_capsule_id(self, log_index: int) -> str | None:
         """Look up the capsule_id (if any) bound to ``log_index``."""

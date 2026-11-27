@@ -414,7 +414,7 @@ From `packages/capsule_anchor/app.py` and `anchoring/router.py` (and
 | `POST` | `/anchor/anchor` | Countersign a caller's `{tenant_id, root_hash, seq_from, seq_to}` and append it to the log; adds an RFC 3161 timestamp when the TSA is on |
 | `GET`  | `/anchor/countersigned-root` | Look up a countersigned root by `tenant_id` and `root_hash` |
 | `GET`  | `/anchor/sth` | Current RFC 6962 Signed Tree Head |
-| `GET`  | `/anchor/transparency-log` | Append-only log feed |
+| `GET`  | `/anchor/transparency-log?after_index=&limit=` | Append-only log feed, entries with `log_index >= after_index` in order, one page per response: `limit` defaults to and is capped at 1000 (0 or less is 400). While more entries remain, a `Link: <?after_index=K&limit=L>; rel="next"` header names the next page; follow it until it is absent, then poll again from the last `log_index + 1`. `capsule_id=` limits the feed to one capsule's entries, paged the same way |
 | `GET`  | `/anchor/inclusion-proof-ct` | RFC 6962 CT inclusion proof |
 | `GET`  | `/anchor/consistency-proof` | RFC 6962 consistency proof |
 | `POST` | `/anchor/inclusion-proof` | A Merkle proof over leaf hashes the caller supplies |

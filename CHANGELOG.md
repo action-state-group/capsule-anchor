@@ -22,6 +22,14 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Changed
 
+- **`GET /anchor/transparency-log` returns at most 1000 entries per response.** This is a
+  behavior change for callers that send no `limit`: such a call used to return every entry
+  from `after_index` to the tip (about 54,000 at `after_index=0`), and now returns the first
+  1000 of them. An optional `limit` (1 to 1000; above 1000 is capped, 0 or less is 400) asks
+  for a smaller page. While more entries remain, the response carries
+  `Link: <?after_index=K&limit=L>; rel="next"`, which keeps any `capsule_id` filter; follow it
+  until it is absent, then poll again from the last `log_index + 1`. The body is still a JSON
+  list of the same entries (#133).
 - **A cached checkpoint that does not extend the tip is now refused.** A checkpoint whose
   receipt was stored but whose acceptance was never recorded, posted again on
   `POST /checkpoints` while it is ahead of the log's tip, now gets the same continuity check
