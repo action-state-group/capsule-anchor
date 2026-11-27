@@ -1,0 +1,93 @@
+# SPDX-License-Identifier: Apache-2.0
+# witness-monitor: a person hears the same day when the hosted witness
+# (witness.agentactioncapsule.org) stops answering or slows down (#109, ask 3).
+#
+# Every 15 minutes, ci/witness-monitor/probe.py sends three GET /health, 10 s
+# apart, 30 s each at most. The run fails when any gets no 200, or when two of
+# the three take longer than 5 s. A failed scheduled run opens or comments on
+# one issue labelled ci-red, which the coordinator's watchdog lists (its CI-RED
+# line). Close that issue once the witness answers again.
+#
+# GETs only: the monitor adds nothing to the witness's log. The rate of 500s on
+# POST /checkpoints is not visible from outside; the Cloud Monitoring policies
+# on the service cover it (deploy/DEPLOY.md, Uptime monitoring).
+#
+# Test alert: run it by hand with limit 0, so every answer counts as slow; a
+# by-hand run reports only when limit is set.
+name: witness-monitor
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Seconds a /health answer may take (default 5). Setting it reports a failure to the ci-red issue; 0 fires a test alert."
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: witness-monitor
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: probe the hosted witness's /health
+        env:
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          set -o pipefail
+          python3 ci/witness-monitor/probe.py --limit "${LIMIT:-5}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  report-failure:
+    # A scheduled failure, or a by-hand run that set limit (the test alert).
+    name: report an unhealthy witness
+    needs: probe
+    if: failure() && (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.limit != ''))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: report on the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "hosted witness probe failed"
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ASSIGNEE: ${{ vars.CI_FAILURE_ASSIGNEE }}
+        run: bash .github/scripts/report-failure.sh
+      # The watchdog lists only issues labelled ci-red, and the shared reporter
+      # only warns when labelling fails: check the label here (issues API, not
+      # search, which lags) and add it again, failing the job if it never sticks.
+      - name: the issue carries ci-red
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "hosted witness probe failed"
+        run: |
+          titled() { gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100$1" \
+            --jq "map(select(.title == env.TITLE and .pull_request == null) | .number) | sort | .[]"; }
+          labelled() { [ -n "$(titled '&labels=ci-red')" ]; }
+          for _ in 1 2 3; do
+            labelled && exit 0
+            gh label create ci-red --repo "$GITHUB_REPOSITORY" --color B60205 \
+              --description "A workflow failed on main or a nightly" > /dev/null 2>&1 || true
+            n="$(titled '' | head -n 1)"
+            [ -z "$n" ] || gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --add-label ci-red > /dev/null || true
+            sleep 10
+          done
+          labelled && exit 0
+          echo "::error::no open issue titled '$TITLE' carries ci-red, so the watchdog will not list it"
+          exit 1
