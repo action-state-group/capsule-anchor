@@ -104,6 +104,7 @@ import time
 import urllib.parse
 
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 
 from capsule_anchor.contracts.types import (
@@ -1130,9 +1131,12 @@ def get_router() -> APIRouter:
                 detail=f"checkpoint too large ({len(body)} bytes; max {MAX_STATEMENT_BYTES})",
             )
         content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        # Registration blocks (the signature check, the log's writer lock,
+        # Postgres): in the thread pool, so the event loop keeps answering
+        # other requests meanwhile (capsule-anchor#132).
         if content_type == CLL_CHECKPOINT_JSON_CONTENT_TYPE:
-            return _witness_checkpoint_json(body)
-        return _witness_checkpoint_cose(body)
+            return await run_in_threadpool(_witness_checkpoint_json, body)
+        return await run_in_threadpool(_witness_checkpoint_cose, body)
 
     @canonical.get(
         "/checkpoints/{log_id:path}",

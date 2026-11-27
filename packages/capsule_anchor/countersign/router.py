@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ValidationError
 
 from capsule_anchor.anchoring.router import _SlidingWindowLimiter
@@ -148,6 +149,12 @@ def get_router() -> APIRouter:
             raise HTTPException(status_code=429, detail="rate limit exceeded — try again later")
 
         body = await request.body()
+        # The rest blocks (signature checks, the log's writer lock, Postgres):
+        # in the thread pool, so the event loop keeps answering other
+        # requests meanwhile (capsule-anchor#132).
+        return await run_in_threadpool(_register, body, background_tasks)
+
+    def _register(body: bytes, background_tasks: BackgroundTasks) -> dict:
         if len(body) > MAX_STATEMENT_BYTES:
             raise HTTPException(
                 status_code=413,
