@@ -79,13 +79,15 @@ jobs:
         run: |
           titled() { gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100$1" \
             --jq "map(select(.title == env.TITLE and .pull_request == null) | .number) | sort | .[]"; }
+          labelled() { [ -n "$(titled '&labels=ci-red')" ]; }
           for _ in 1 2 3; do
-            [ -n "$(titled '&labels=ci-red')" ] && exit 0
+            labelled && exit 0
             gh label create ci-red --repo "$GITHUB_REPOSITORY" --color B60205 \
               --description "A workflow failed on main or a nightly" > /dev/null 2>&1 || true
             n="$(titled '' | head -n 1)"
             [ -z "$n" ] || gh issue edit "$n" --repo "$GITHUB_REPOSITORY" --add-label ci-red > /dev/null || true
             sleep 10
           done
+          labelled && exit 0
           echo "::error::no open issue titled '$TITLE' carries ci-red, so the watchdog will not list it"
           exit 1

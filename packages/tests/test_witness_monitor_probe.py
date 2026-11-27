@@ -85,6 +85,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"x")
                 self.wfile.flush()
                 time.sleep(0.1)
+        elif self.mode == "slow-headers":  # each header line within the socket timeout, all of them past the limit
+            self.send_response(200)
+            for i in range(15):
+                self.send_header(f"X-Slow-{i}", "1")
+                self.flush_headers()
+                time.sleep(0.1)
+            self.end_headers()
+            self.wfile.write(b"{}")
         elif self.mode == "truncated":  # closes before the declared length
             self.send_response(200)
             self.send_header("Content-Length", "100")
@@ -152,3 +160,9 @@ def test_fetch_truncated_answer_is_a_failed_sample(server):
     _Handler.mode = "truncated"
     s = probe.fetch(_url(server), 5)
     assert s.status is None and "IncompleteRead" in s.error
+
+
+def test_fetch_bounds_trickled_headers(server):
+    _Handler.mode = "slow-headers"
+    s = probe.fetch(_url(server), 1.0)
+    assert s.status is None and "no full answer" in s.error and s.seconds < 2

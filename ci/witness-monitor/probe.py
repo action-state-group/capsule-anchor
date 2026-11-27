@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import http.client
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -55,23 +56,41 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(_NoRedirect)
 
 
+def _get(url: str, timeout: float) -> int:
+    with _OPENER.open(url, timeout=timeout) as r:
+        while r.read1(65536):
+            pass
+        if r.length:  # read1 ends quietly when the server closes before Content-Length
+            raise http.client.IncompleteRead(b"", r.length)
+        return r.status
+
+
 def fetch(url: str, timeout: float, clock: Callable[[], float] = time.monotonic) -> Sample:
-    """One GET, bounded by ``timeout`` seconds in all (connection, headers and the whole body)."""
+    """One GET, bounded by ``timeout`` seconds in all: connection, headers and the whole body.
+
+    The request runs on a daemon thread, so a server that trickles its headers or body (each
+    read within the socket timeout) still ends the sample at ``timeout``.
+    """
     start = clock()
-    deadline = start + timeout
-    try:
-        with _OPENER.open(url, timeout=timeout) as r:
-            while r.read1(65536):
-                if clock() > deadline:
-                    return Sample(None, clock() - start, f"TimeoutError: no full answer in {timeout:g} s")
-            if r.length:  # read1 ends quietly when the server closes before Content-Length
-                return Sample(None, clock() - start, f"IncompleteRead: {r.length} bytes missing")
-            return Sample(r.status, clock() - start)
-    except urllib.error.HTTPError as e:
-        return Sample(e.code, clock() - start)
-    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as e:
-        reason = getattr(e, "reason", e)
-        return Sample(None, clock() - start, f"{type(reason).__name__}: {reason}")
+    got: list = []
+
+    def run() -> None:
+        try:
+            got.append(_get(url, timeout))
+        except urllib.error.HTTPError as e:
+            got.append(e.code)
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as e:
+            got.append(getattr(e, "reason", e))
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    t.join(timeout)
+    took = clock() - start
+    if not got:
+        return Sample(None, took, f"TimeoutError: no full answer in {timeout:g} s")
+    if isinstance(got[0], int):
+        return Sample(got[0], took)
+    return Sample(None, took, f"{type(got[0]).__name__}: {got[0]}")
 
 
 def main(argv: list[str] | None = None, get: Callable[[str, float], Sample] = fetch,
