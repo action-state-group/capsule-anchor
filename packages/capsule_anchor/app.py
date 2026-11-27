@@ -232,8 +232,11 @@ def create_app() -> FastAPI:
     logger.info("consistency-proof policy for native checkpoint logs: %s", consistency_proof_policy)
     cfg_anchor(_svc)
     # Read the log once now, so the first registration on a new instance does
-    # not do it while holding the service lock (capsule-anchor#109).
+    # not do it while holding the service lock (capsule-anchor#109), and hash
+    # the tree once, so the first root or consistency proof does not either
+    # (capsule-anchor#132): a new process's subtree memo starts empty.
     _svc.log_size()
+    _svc.ct_root()
 
     # Enrolled external checkpoint submitters (POST /checkpoints identity
     # pinning) -- loads from CAPSULE_ANCHOR_CHECKPOINT_SUBMITTERS_FILE if

@@ -1236,15 +1236,17 @@ class AnchorerService:
         size-``old_size`` log -- the core anti-fork / anti-backdate guarantee.
         """
         with self._lock:
-            leaves = self._ct_leaves()
-            if not (0 <= old_size <= new_size <= len(leaves)):
+            # From the cached tree's kept subtree hashes, not a copy of every
+            # leaf: O(log N) per proof once the memo is warm (capsule-anchor#132).
+            self._sync_log()
+            if not (0 <= old_size <= new_size <= self._tree.size):
                 raise ValueError("require 0 <= old_size <= new_size <= log size")
-            first_root = ct.merkle_tree_hash(leaves[:old_size])
-            second_root = ct.merkle_tree_hash(leaves[:new_size])
+            first_root = self._tree.root(old_size)
+            second_root = self._tree.root(new_size)
             if old_size == 0 or old_size == new_size:
                 proof: list[str] = []
             else:
-                proof = ct.consistency_proof(old_size, new_size, leaves)
+                proof = self._tree.consistency_proof(old_size, new_size)
             return ConsistencyProof(
                 first_size=old_size,
                 second_size=new_size,
