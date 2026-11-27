@@ -56,7 +56,7 @@ def verdict(samples: list[Sample], limit: float, slow_count: int,
     sizes = [s.tree_size for s in samples if s.tree_size is not None]
     if max_tree_size is not None and sizes and max(sizes) >= max_tree_size:
         return False, (f"tree_size {max(sizes)} reached the tripwire {max_tree_size}: deploy the paged "
-                       "startup read or raise the memory (docs/architecture/20-witness-scaling.md, section 2)")
+                       "startup read or raise the memory (https://github.com/action-state-group/capsule-anchor/issues/132)")
     return True, f"{len(samples)} probes answered 200, {len(slow)} slower than {limit:g} s"
 
 
@@ -90,7 +90,7 @@ def _tree_size(body: bytes) -> int | None:
     reading, never a reason to call an answering witness unhealthy)."""
     try:
         size = json.loads(body).get("tree_size")
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, RecursionError):  # RecursionError: deeply nested JSON
         return None
     return size if isinstance(size, int) and not isinstance(size, bool) else None
 

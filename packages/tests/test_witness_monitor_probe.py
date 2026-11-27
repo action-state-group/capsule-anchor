@@ -72,7 +72,7 @@ def test_tree_size_tripwire(sizes, ok, capsys):
     assert code == (0 if ok else 1)
     assert lines[-1].startswith("healthy: " if ok else "UNHEALTHY: ")
     if not ok:
-        assert "tripwire 100000" in lines[-1] and "20-witness-scaling.md" in lines[-1]
+        assert "tripwire 100000" in lines[-1] and "capsule-anchor/issues/132" in lines[-1]
 
 
 def test_tree_size_is_ignored_without_the_flag(capsys):
@@ -197,6 +197,7 @@ def test_fetch_bounds_trickled_headers(server):
     (b'{"tree_size": true}', None),
     (b"[1, 2]", None),  # not an object
     (b"not json", None),
+    (b'{"tree_size": ' + b"[" * 20000 + b"]" * 20000 + b"}", None),  # nested past the recursion limit
 ])
 def test_fetch_reads_tree_size_from_a_200(server, body, size):
     _Handler.body = body

@@ -11,7 +11,8 @@
 # It also fails once /health's tree_size reaches 65,000: a memory tripwire.
 # Until the paged startup read (#138) is live, a new instance runs out of its
 # 512 Mi during startup somewhere between about 73,000 and 125,000 entries
-# (docs/architecture/20-witness-scaling.md, section 2). Raise or drop
+# (capsule-anchor#132; docs/architecture/20-witness-scaling.md, section 2,
+# once #137 lands). Raise or drop
 # --max-tree-size only after that fix is deployed.
 #
 # GETs only: the monitor adds nothing to the witness's log. The rate of 500s on
