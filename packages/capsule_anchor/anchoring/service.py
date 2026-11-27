@@ -978,6 +978,9 @@ class AnchorerService:
                 self._last_entry = entry
             if len(page) < SYNC_PAGE_ROWS:
                 return
+            # Drop this page before reading the next, or both are in memory
+            # while the next one is built.
+            del page
 
     def log_size(self) -> int:
         """The number of log entries, read incrementally (not ``COUNT(*)``)."""

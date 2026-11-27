@@ -1021,6 +1021,40 @@ def test_a_first_sync_holds_one_page_of_entries_not_the_log(monkeypatch):
     assert store.full_reads == 0
 
 
+class _Page(list):
+    """A page that can be weakly referenced, to see when the sync lets go of it."""
+
+
+class _PageWatchingStore(InMemoryLogStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.previous = None
+        self.overlaps = 0
+        self.pages = 0
+
+    def entries_after(self, after_index, limit=None):
+        import weakref
+
+        if self.previous is not None and self.previous() is not None:
+            self.overlaps += 1  # the caller still holds the last page
+        page = _Page(super().entries_after(after_index, limit))
+        self.previous = weakref.ref(page)
+        self.pages += 1
+        return page
+
+
+def test_a_sync_lets_go_of_each_page_before_reading_the_next(monkeypatch):
+    from capsule_anchor.anchoring import service as service_module
+
+    monkeypatch.setattr(service_module, "SYNC_PAGE_ROWS", 5)
+    store = _PageWatchingStore()
+    _grow_mixed_log(AnchorerService(store=store), 23)
+    store.previous, store.overlaps, store.pages = None, 0, 0
+    assert AnchorerService(store=store).log_size() == 23
+    assert store.pages == 5
+    assert store.overlaps == 0
+
+
 def test_entries_after_honors_the_limit_on_every_store(tmp_path):
     stores = [InMemoryLogStore(), SqliteLogStore(str(tmp_path / "limit.db"))]
     if TEST_DATABASE_URL is not None:
