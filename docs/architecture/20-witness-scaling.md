@@ -42,13 +42,25 @@ at a p99 of 5.0 s, with a maximum of 174 s.
 
 ## 2. The ceilings
 
-- **Memory is the first hard limit.** The startup read peaks at about 3 KiB per entry (160 MiB for
-  54,000, 1,617 MiB for 540,000). With a 512 Mi container and the local baseline of 74 MiB, a new
-  instance is killed during startup at about 150,000 entries, earlier if the production baseline is
-  higher. Every instance that starts after that point, autoscaled or rolled out, crash-loops: the
-  witness goes down, not slow. The log grew by about 28,000 entries in the measured week while CI
-  ran against it, and by about 600 a day without it, so that is between a month and several months
-  away. Fix 1 removes this ceiling.
+- **Memory is the first hard limit, and it has a date.** The startup read peaks at about 3 KiB per
+  entry (160 MiB for 54,000, 1,617 MiB for 540,000, over a local baseline of 74 MiB; every local
+  figure in this note is from the rerun on #132 unless it says otherwise). In production, the
+  highest memory sample on the live revision `00015-cbd` is 0.58 of 512 Mi, about 297 MiB, at
+  48,000 to 54,000 entries (`container/memory/utilizations`, one-minute p99, 2026-11-26 21:27Z to
+  2026-11-27 12:40Z). That sample is bucketed and may miss the startup transient, so take it as a
+  lower bound: if it includes the startup read (about 155 MiB at that size), the rest is about
+  140 MiB, and a new instance is killed during startup at about 125,000 entries. Every instance
+  that starts after that point, autoscaled or rolled out, crash-loops: the witness goes down, not
+  slow.
+  - **When.** The live log held 54,011 entries at 2026-11-27 12:44Z and grew by 89 in the 46
+    minutes before (about 2,800 a day). At that rate 125,000 is about 2026-12-22; at the week's
+    pace while CI still posted to it (about 28,000 a week), about 2026-12-15.
+  - **Order.** Fix 1 is deployed before anything else in this note.
+  - **Tripwire.** The `/health` monitor (`.github/workflows/witness-monitor.yml`) fails, and so
+    opens its `ci-red` issue, once `tree_size` reaches 100,000. Raise its threshold only after
+    fix 1 is live.
+  - **Stopgap.** If fix 1 is not live when the tripwire fires, raise the Cloud Run memory to 1 Gi;
+    that is spend, Steven's call (section 3.6).
 - **Write throughput is one writer at a time across all instances** (the advisory lock, #113).
   This is an estimate, not a measured ceiling: if most of the 75 ms median request is the writer
   section (a checkpoint's section also runs its continuity checks and writes its read-surface
@@ -75,8 +87,9 @@ in full, as now, because the next append chains to it.
   1,691 to 145 MiB at 540,000 (local Postgres, pages of 5,000). What remains above the baseline is
   one page of rows plus the cached tree, which does grow with the log, at about 73 bytes a leaf
   (one 32-byte `bytes` object and its list slot) plus the subtree memo: about 4 MiB at 54,000
-  and 40 MiB at 540,000. That moves the 512 Mi ceiling from about 150,000 entries to several
-  million. The time of the read stays O(N) (0.25 s and 2.79 s locally); it is spent at startup,
+  and 40 MiB at 540,000. That moves the startup's 512 Mi ceiling from about 125,000 entries to
+  several million. It does not bound a request that reads the whole log: `GET
+  /anchor/transparency-log?after_index=0` still materializes every entry (section 4). The time of the read stays O(N) (0.25 s and 2.79 s locally); it is spent at startup,
   not on a request.
 - **Cost:** an optional `limit` on one store method, and tests that the paged sync builds the same
   tree as one read of the whole log, across page boundaries, with both leaf forms, on all three
@@ -113,14 +126,19 @@ plain `def` route already does.
 - **Gain:** a write waiting on the writer lock or on Postgres no longer stalls the event loop, so
   routes that take no service lock (`GET /`, the DID document, the registration policy) answer at
   once. Routes that take the instance lock, `GET /health` among them (it calls `log_size()`,
-  `app.py:368`), still wait for the writer section in progress, as they do from a thread today;
-  that wait is bounded by the writer lock's 10 s timeout. Changing what `/health` locks is a
-  separate decision and is not part of this fix.
+  `app.py:368`), still wait for the writer section in progress, as they do from a thread today.
+  That wait has no bound of its own: the 10 s timeout covers only taking the writer lock
+  (`store.py:1415`), not the statements that follow once it is held. Changing what `/health` locks
+  is a separate decision and is not part of this fix.
 - **Cost:** a few lines per handler, and a test per handler that `GET /` answers on the same event
   loop while a registration is held inside the service (without the change it waits the whole
   5 s hold).
 - **Risk:** low. The service is already called from many threads (every `def` route); the lock
-  discipline is unchanged.
+  discipline is unchanged. The thread pool is anyio's shared limiter, 40 threads by default, the
+  same one every `def` route uses, and a registration can hold a thread for as long as it waits
+  on the writer lock (up to 10 s). A burst of more than about 40 waiting writes on one instance
+  would therefore queue the `def` reads behind them. At the November peak (0.2 writes a second)
+  that is far off; raising the limiter or giving writes their own is the answer if it is not.
 
 ### 4. Fewer round trips per registration (measure before building)
 
@@ -140,15 +158,21 @@ configuration of project `fluxxom`.
 
 ### 6. Operator: settings that need no change now
 
+Everything in this section that costs money (minimum instances, more memory, a larger Cloud SQL
+tier) is Steven's decision, as is every deploy.
+
 - **Cloud Run memory (512 Mi):** after fix 1 is deployed the remaining growth is the cached tree,
-  about 40 MiB at 540,000 entries. Until it is deployed, the 150,000-entry ceiling above applies.
+  about 40 MiB at 540,000 entries. Until it is deployed, the 125,000-entry ceiling and the stopgap
+  in section 2 apply.
 - **Cloud SQL `db-f1-micro`:** CPU peaked at 54% in an hour, memory in use 13%, at most 10
   backends. No change needed.
 - **Minimum instances (0 today):** a new instance takes 5.6 to 9.1 s to start (p50 per day), 176
   starts in the week. `deploy/DEPLOY.md` already recommends `--min-instances=1` (and
-  `--max-instances=10`); the live service runs 0 and 20. One minimum instance would spare the
-  first request after an idle period that wait, for the cost of one idle instance: a cost
-  decision, not a scaling fix.
+  `--max-instances=10`); the live service runs 0 and 20 (`gcloud run services describe`,
+  2026-11-27). The live values are what runs; the guide's are a recommendation nobody applied.
+  One minimum instance would spare the first request after an idle period that wait, for the
+  cost of one idle instance. Steven decides whether to apply it; the guide is then updated to
+  whatever he chooses, so the two stop drifting.
 - **maxScale 20:** never approached (hourly peak 8). With one writer at a time, more instances do
   not raise write capacity.
 
@@ -163,5 +187,7 @@ configuration of project `fluxxom`.
   size. After fix 1 the startup read costs about 0.5 s per 100,000 entries locally, a few
   seconds in production, and is not on any request path, so a new table is not justified yet; revisit at a few million entries.
 - **A second connection for reads**, so reads do not wait behind a writer section on the store's
-  one connection: the profile shows a read waits at most one writer section (under 10 ms locally),
-  not the log, so it is not worth a second connection's failure modes.
+  one connection: in the profile a read waited behind at most one writer section (an 11.1 ms
+  maximum locally at 540,000 entries, with four writers), not behind the log. That is a measurement, not a bound (a
+  slow statement inside a section makes the read wait as long), and it does not justify a second
+  connection's failure modes.

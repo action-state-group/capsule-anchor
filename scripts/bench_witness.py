@@ -178,26 +178,37 @@ def run(url: str, label: str) -> None:
 
     # 4. The same reads while four threads register on this instance.
     stop = threading.Event()
+    writer_errors: list[BaseException] = []
 
     def writer() -> None:
-        while not stop.is_set():
-            svc.register_signed_statement_full(_digest(f"{label}-writer"))
+        try:
+            while not stop.is_set():
+                svc.register_signed_statement_full(_digest(f"{label}-writer"))
+        except BaseException as exc:  # noqa: BLE001 - reported below, never a silent measurement
+            writer_errors.append(exc)
+            stop.set()
 
     writers = [threading.Thread(target=writer) for _ in range(4)]
     for w in writers:
         w.start()
     sth_times, proof_times = [], []
-    for _ in range(30):
-        t = time.perf_counter()
-        svc.get_sth()
-        sth_times.append(time.perf_counter() - t)
-    for _ in range(5):
-        t = time.perf_counter()
-        svc.consistency_proof(1000, svc.log_size())
-        proof_times.append(time.perf_counter() - t)
-    stop.set()
-    for w in writers:
-        w.join()
+    try:
+        for _ in range(30):
+            t = time.perf_counter()
+            svc.get_sth()
+            sth_times.append(time.perf_counter() - t)
+        for _ in range(5):
+            t = time.perf_counter()
+            svc.consistency_proof(1000, svc.log_size())
+            proof_times.append(time.perf_counter() - t)
+    finally:
+        stop.set()
+        for w in writers:
+            w.join()
+    if writer_errors:
+        # A writer that failed (WriterBusy, say) would leave fewer than four
+        # writing: the "under 4 writers" figures would not mean that.
+        raise RuntimeError(f"{len(writer_errors)} writer thread(s) failed") from writer_errors[0]
     out["under_4_writers_get_sth_ms"] = {"p50": _pct(sth_times, 50) * 1e3, "max": max(sth_times) * 1e3}
     out["under_4_writers_consistency_proof_ms"] = {"p50": _pct(proof_times, 50) * 1e3, "max": max(proof_times) * 1e3}
 
