@@ -90,3 +90,16 @@ def test_schema_cycle_leaves_other_schemas_alone():
 def test_drop_refuses_a_schema_this_suite_did_not_create():
     with pytest.raises(ValueError, match="did not create"):
         drop_test_schema(TEST_DATABASE_URL, "public")
+
+
+def test_a_schema_url_keeps_the_pgoptions_settings(monkeypatch):
+    """scripts/check.sh bounds statements through PGOPTIONS; the schema URL's
+    own options parameter must not drop that bound."""
+    monkeypatch.setenv("PGOPTIONS", "-c statement_timeout=1500ms")
+    schema, url = create_test_schema(TEST_DATABASE_URL)
+    try:
+        with _connect(url) as conn:
+            assert conn.execute("SHOW statement_timeout").fetchone()[0] == "1500ms"
+            assert conn.execute("SELECT current_schema()").fetchone()[0] == schema
+    finally:
+        drop_test_schema(TEST_DATABASE_URL, schema)

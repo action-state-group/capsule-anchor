@@ -30,7 +30,10 @@ def create_test_schema(database_url: str) -> tuple[str, str]:
     schema = f"{SCHEMA_PREFIX}{uuid.uuid4().hex}"
     with psycopg.connect(database_url, autocommit=True) as conn:
         conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-    return schema, make_conninfo(database_url, options=f"-c search_path={schema}")
+    # An explicit options parameter replaces libpq's PGOPTIONS default, so keep
+    # whatever PGOPTIONS sets (scripts/check.sh bounds statements with it).
+    options = " ".join(filter(None, [os.environ.get("PGOPTIONS"), f"-c search_path={schema}"]))
+    return schema, make_conninfo(database_url, options=options)
 
 
 def drop_test_schema(database_url: str, schema: str) -> None:

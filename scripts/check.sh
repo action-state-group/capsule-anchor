@@ -58,11 +58,14 @@ done
 "$tmp/py3.12/bin/python" .github/neutrality_scan.py --self-test
 
 # neutrality.yml's scan, when its terms are at hand. As in CI, the terms go
-# only to origin/main's copy of the scanner, run by an isolated interpreter
-# that has not installed this checkout: the checkout is only scanned as data.
+# only to origin/main's copy of the scanner, run by the base interpreter the
+# 3.12 venv was made from (read from pyvenv.cfg, never by running the venv,
+# whose site-packages hold this checkout) with -I -S: no site initialization,
+# no .pth files, no environment. The checkout is only scanned as data.
 if [ -n "$neutrality_terms" ]; then
   git show origin/main:.github/neutrality_scan.py > "$tmp/neutrality_scan.py"
-  NEUTRALITY_TERMS="$neutrality_terms" "$(uv python find 3.12)" -I "$tmp/neutrality_scan.py" .
+  base_python="$(sed -n 's/^home = //p' "$tmp/py3.12/pyvenv.cfg")/python3.12"
+  NEUTRALITY_TERMS="$neutrality_terms" "$base_python" -I -S "$tmp/neutrality_scan.py" .
 else
   echo "neutrality scan: NOT RUN (no local term list: NEUTRALITY_TERMS unset; CI runs it)"
 fi
