@@ -593,3 +593,33 @@ def test_the_module_is_called_once_so_a_later_call_cannot_bypass_validation(monk
     resp = client.post("/countersign/register", json=_submission(raw, requester_key, profile_id="pack/v1"))
     assert resp.status_code == 200, resp.text
     assert len(calls) == 1
+
+
+def test_get_root_answers_while_a_countersign_registration_is_blocked(monkeypatch, requester_key, issuer_allowlist):
+    """capsule-anchor#132: see tests/test_handlers_off_event_loop.py."""
+    import threading
+
+    from ..test_handlers_off_event_loop import HOLD_S, _get_root_while_held
+
+    client = _strict_client(monkeypatch, issuer_allowlist)
+    entered, release = threading.Event(), threading.Event()
+    real = router_module.accept_bundle
+
+    def held(*args, **kwargs):
+        entered.set()
+        release.wait(HOLD_S)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(router_module, "accept_bundle", held)
+    submission = _submission(base_bundle_raw(), requester_key)
+    responses: list = []
+
+    def post():
+        resp = client.post("/countersign/register", json=submission)
+        responses.append(resp)
+        return resp
+
+    with client:
+        elapsed = _get_root_while_held(client, post, entered, release)
+    assert elapsed < HOLD_S / 2, f"GET / waited {elapsed:.2f}s behind a blocked registration"
+    assert responses[0].status_code == 200, responses[0].text
