@@ -30,7 +30,7 @@ What still grows with the log:
 | Startup: peak memory of the full log read | +160 MiB (74 to 234 MiB) | +1,617 MiB (74 to 1,691 MiB) | `_sync_log` (`anchoring/service.py:956`) materializes every row as a `TransparencyLogEntry` (`store.py:1467`) |
 | Startup: time of that read | 0.31 s local | 3.46 s local | same |
 | `GET /anchor/consistency-proof` | 68 ms local, about 1 s in production | 688 ms local | `consistency_proof` (`service.py:1232`) copies every leaf and rehashes both trees, under the instance lock |
-| `GET /anchor/transparency-log?after_index=0` | the whole log in one response | the whole log | `transparency_log` (`service.py:914`) |
+| `GET /anchor/transparency-log?after_index=0` | the whole log in one response | the whole log | `transparency_log` (`service.py:914`); paged since #139 (section 4) |
 | Steady memory of the cached tree | about 4 MiB | about 40 MiB | `CachedTree._leaves`, one `bytes` object per leaf |
 
 And one cost does not grow with the log but multiplies every other: `POST /checkpoints`
@@ -62,7 +62,7 @@ at a p99 of 5.0 s, with a maximum of 174 s.
     (about 28,000 a week), about 2026-12-02 and 2026-12-15.
   - **Order.** Fix 1 is deployed before anything else in this note, and before 2026-12-02.
   - **Tripwire.** The `/health` monitor (`.github/workflows/witness-monitor.yml`) fails, and so
-    opens its `ci-red` issue, once `tree_size` reaches 65,000, below the low bound. It is a
+    opens its `ci-red` issue, once `tree_size` reaches 65,000, below the low bound (#141). It is a
     backstop, not the plan. Raise its threshold only after fix 1 is live.
   - **Stopgap.** If fix 1 is not live when the tripwire fires, raise the Cloud Run memory to 1 Gi;
     that is spend, Steven's call (section 3.6).
@@ -80,7 +80,7 @@ at a p99 of 5.0 s, with a maximum of 174 s.
 Ranked by expected gain against cost and risk. 1 to 4 are code changes in this repository that
 take effect at the next deploy; 5 and 6 need an operator.
 
-### 1. Bound the startup read's memory
+### 1. Bound the startup read's memory (#138, merged)
 
 `_sync_log` reads the log in pages: `entries_after` takes an optional row limit on the three stores
 (in-memory, SQLite, Postgres; keyset on `log_index`), and the sync loops until a page comes back
@@ -93,8 +93,8 @@ in full, as now, because the next append chains to it.
   one page of rows plus the cached tree, which does grow with the log, at about 73 bytes a leaf
   (one 32-byte `bytes` object and its list slot) plus the subtree memo: about 4 MiB at 54,000
   and 40 MiB at 540,000. That moves the startup's 512 Mi ceiling from 73,000 to 125,000 entries to
-  several million. It does not bound a request that reads the whole log: `GET
-  /anchor/transparency-log?after_index=0` still materializes every entry (section 4). The time of the read stays O(N) (0.25 s and 2.79 s locally); it is spent at startup,
+  several million. It does not bound a request that reads the whole log; `GET
+  /anchor/transparency-log` did that until #139 paged it (section 4). The time of the read stays O(N) (0.25 s and 2.79 s locally); it is spent at startup,
   not on a request.
 - **Cost:** an optional `limit` on one store method, and tests that the paged sync builds the same
   tree as one read of the whole log, across page boundaries, with both leaf forms, on all three
@@ -102,7 +102,7 @@ in full, as now, because the next append chains to it.
 - **Risk:** low. Read-only, the same rows in the same order; a gap or reordering is caught by the
   existing index check in `_sync_log`.
 
-### 2. Consistency proofs from the cached tree
+### 2. Consistency proofs from the cached tree (#136, merged)
 
 `CachedTree` gains the RFC 6962 §2.1.2 `SUBPROOF` over its own subtree hashes, the same way
 `audit_path` already reuses them, and `consistency_proof` uses it and `CachedTree.root` instead of
@@ -122,7 +122,7 @@ copying every leaf.
   `packages/tests/test_log_contention.py`).
 - **Risk:** low. The output is a list of hashes the tests compare byte for byte.
 
-### 3. Run the blocking handlers off the event loop
+### 3. Run the blocking handlers off the event loop (#140)
 
 `POST /checkpoints` and `POST /countersign/register` keep reading the body with `await` and then
 run the registration in the thread pool (`fastapi.concurrency.run_in_threadpool`), as every
@@ -181,13 +181,13 @@ tier) is Steven's decision, as is every deploy.
 - **maxScale 20:** never approached (hourly peak 8). With one writer at a time, more instances do
   not raise write capacity.
 
-## 4. Not changed, and why
+## 4. Not changed here, and why
 
-- **`GET /anchor/transparency-log` returns the whole log from `after_index`.** At 54,000 entries
-  that is one large response (p50 856 ms on the old revision, 31 calls in the week). A page limit
-  would change what a monitor receives, a public API change; it is its own item,
-  [capsule-anchor#133](https://github.com/action-state-group/capsule-anchor/issues/133), rather
-  than done here.
+- **`GET /anchor/transparency-log` returned the whole log from `after_index`.** At 54,000 entries
+  that was one large response (p50 856 ms on the old revision, 31 calls in the week). A page limit
+  changes what a monitor receives, a public API change, so it was its own item with its own door
+  confirmation: [capsule-anchor#133](https://github.com/action-state-group/capsule-anchor/issues/133),
+  merged as #139 (at most 1000 entries a response, with a `rel="next"` link).
 - **Persisting the tree's subtree hashes** in Postgres would make startup independent of the log
   size. After fix 1 the startup read costs about 0.5 s per 100,000 entries locally, a few
   seconds in production, and is not on any request path, so a new table is not justified yet; revisit at a few million entries.
