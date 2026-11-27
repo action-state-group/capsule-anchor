@@ -83,10 +83,13 @@ class _CountingStore(InMemoryLogStore):
         super().__init__()
         self.read_from: list[int] = []
         self.full_reads = 0
+        self.largest_page = 0
 
-    def entries_after(self, after_index):
+    def entries_after(self, after_index, limit=None):
         self.read_from.append(after_index)
-        return super().entries_after(after_index)
+        page = super().entries_after(after_index, limit)
+        self.largest_page = max(self.largest_page, len(page))
+        return page
 
     def all_entries(self):
         self.full_reads += 1
@@ -955,3 +958,80 @@ def test_cached_tree_truncate_forgets_rolled_back_leaves():
         tree.append(h)
     assert tree.root(700) == ct.merkle_tree_hash(leaves)
     assert tree.root(512) == ct.merkle_tree_hash(leaves[:512])
+
+
+# --- the sync reads the log in pages (capsule-anchor#132) ---------------------
+
+
+def _grow_mixed_log(svc: AnchorerService, n: int) -> None:
+    """Statements and countersigned roots: both leaf forms (ct_leaf_payload)."""
+    for i in range(n):
+        if i % 3 == 0:
+            svc.anchor("tenant", hashlib.sha256(f"root-{i}".encode()).hexdigest(), (i, i))
+        else:
+            svc.register_signed_statement_full(_digest(f"page-{i}"))
+
+
+def _assert_paged_sync_matches_full_read(make_store, monkeypatch, total: int = 23) -> None:
+    from capsule_anchor.anchoring import service as service_module
+
+    attestor = AttestorService()
+    _grow_mixed_log(AnchorerService(attestor=attestor, store=make_store()), total)
+    for page in (1, 4, 5, total - 1, total, total + 1):
+        monkeypatch.setattr(service_module, "SYNC_PAGE_ROWS", page)
+        full = [ct_leaf_hash(e) for e in make_store().all_entries()]
+        fresh = AnchorerService(attestor=attestor, store=make_store())
+        assert fresh.log_size() == len(full), page
+        assert fresh._tree.leaves_hex(len(full)) == full, page  # noqa: SLF001
+        assert fresh._last_entry == make_store().get_entry(len(full) - 1), page  # noqa: SLF001
+        # The next append chains to the last entry the pages ended on.
+        fresh.register_signed_statement_full(_digest(f"after-pages-{page}"))
+        assert fresh.verify_log(), page
+
+
+def test_paged_sync_builds_the_same_tree_in_memory(monkeypatch):
+    store = InMemoryLogStore()
+    _assert_paged_sync_matches_full_read(lambda: store, monkeypatch)
+
+
+def test_paged_sync_builds_the_same_tree_on_sqlite(tmp_path, monkeypatch):
+    path = str(tmp_path / "log.db")
+    _assert_paged_sync_matches_full_read(lambda: SqliteLogStore(path), monkeypatch)
+
+
+@_pg_required
+def test_pg_paged_sync_builds_the_same_tree(monkeypatch):
+    from capsule_anchor.anchoring.store import PostgresLogStore
+
+    url = os.environ["CAPSULE_ANCHOR_DATABASE_URL"]
+    _assert_paged_sync_matches_full_read(lambda: PostgresLogStore(url), monkeypatch)
+
+
+def test_a_first_sync_holds_one_page_of_entries_not_the_log(monkeypatch):
+    from capsule_anchor.anchoring import service as service_module
+
+    monkeypatch.setattr(service_module, "SYNC_PAGE_ROWS", 7)
+    store = _CountingStore()
+    _grow_mixed_log(AnchorerService(store=store), 40)
+    store.largest_page = 0
+    store.read_from.clear()
+    assert AnchorerService(store=store).log_size() == 40
+    assert store.largest_page == 7
+    assert store.read_from == [0, 7, 14, 21, 28, 35]
+    assert store.full_reads == 0
+
+
+def test_entries_after_honors_the_limit_on_every_store(tmp_path):
+    stores = [InMemoryLogStore(), SqliteLogStore(str(tmp_path / "limit.db"))]
+    if TEST_DATABASE_URL is not None:
+        from capsule_anchor.anchoring.store import PostgresLogStore
+
+        stores.append(PostgresLogStore(os.environ["CAPSULE_ANCHOR_DATABASE_URL"]))
+    for store in stores:
+        svc = AnchorerService(store=store)
+        for i in range(6):
+            svc.register_signed_statement_full(_digest(f"limit-{type(store).__name__}-{i}"))
+        assert [e.log_index for e in store.entries_after(2, limit=3)] == [2, 3, 4]
+        assert [e.log_index for e in store.entries_after(4, limit=10)] == [4, 5]
+        assert [e.log_index for e in store.entries_after(1)] == [1, 2, 3, 4, 5]
+        assert store.entries_after(6, limit=3) == []
