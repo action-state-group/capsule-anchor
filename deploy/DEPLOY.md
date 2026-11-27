@@ -262,6 +262,17 @@ a Cloud Monitoring alert if an alerting policy is attached. Set one up in the
 Cloud Console: Monitoring → Alerting → Create policy → Uptime check policy →
 notify via email or PagerDuty.
 
+A policy is only as good as its channel: after creating or changing one, send
+the channel a test notification (Monitoring → Alerting → Edit notification
+channels → the channel → Send test notification) and confirm a named person got
+it. An email channel nobody reads alerts nobody (#109).
+
+Independently of Cloud Monitoring, `.github/workflows/witness-monitor.yml`
+probes the hosted witness's `/health` every 15 minutes from GitHub Actions and
+opens a `ci-red` issue in this repository when it fails or is slow. It needs no
+GCP access and sees only what an outside client sees, so the rate of 500s on
+`POST /checkpoints` stays with the Cloud Monitoring policies.
+
 Smoke-test the write path after each deploy (substitute a real 64-hex capsule_id):
 
 ```bash

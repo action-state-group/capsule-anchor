@@ -15,6 +15,10 @@ All notable changes to `capsule-anchor` are documented here. The format follows
   of the job. `ci/local-witness/check` prints the log and fails unless it answered a
   `POST /checkpoints`. CI jobs that test witnessing use it instead of posting to
   `witness.agentactioncapsule.org` (#109, ask 1).
+- **A monitor for the hosted witness.** `.github/workflows/witness-monitor.yml` sends three
+  `GET /health` to `witness.agentactioncapsule.org` every 15 minutes and fails when one gets
+  no 200 or two take longer than 5 s; a failed scheduled run opens or comments on one
+  `ci-red` issue, so a person hears of it the same day. It only reads (#109, ask 3).
 
 ### Changed
 
