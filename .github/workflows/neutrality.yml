@@ -76,6 +76,7 @@ permissions:
 jobs:
   neutrality:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # Base repo — TRUSTED. Supplies the scanner. Never the PR's version of it.
       - name: Checkout base (trusted — provides the scanner)
