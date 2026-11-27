@@ -64,7 +64,7 @@ if [ -n "$neutrality_terms" ]; then
   git show origin/main:.github/neutrality_scan.py > "$tmp/neutrality_scan.py"
   NEUTRALITY_TERMS="$neutrality_terms" "$(uv python find 3.12)" -I "$tmp/neutrality_scan.py" .
 else
-  echo "neutrality scan: NOT RUN (NEUTRALITY_TERMS unset; CI runs it)"
+  echo "neutrality scan: NOT RUN (no local term list: NEUTRALITY_TERMS unset; CI runs it)"
 fi
 
 # python.yml's test-postgres job: the whole suite again, against Postgres.
@@ -112,3 +112,4 @@ got = httpx.get(os.environ["URL"] + "/anchor/authority-pubkey").json()["pubkey_h
 assert got == os.environ["KEY"], (got, os.environ["KEY"])'
 grep -qE '"POST /checkpoints HTTP/[0-9.]+" 2[0-9][0-9]' "$(out log)"
 echo "local witness: ok"
+echo "local witness production block: NOT RUN (it edits /etc/hosts with sudo; CI runs it)"
