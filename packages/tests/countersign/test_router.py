@@ -611,7 +611,9 @@ def test_get_root_answers_while_a_countersign_registration_is_blocked(monkeypatc
         return real(*args, **kwargs)
 
     monkeypatch.setattr(router_module, "accept_bundle", held)
-    submission = _submission(base_bundle_raw(), requester_key)
+    # No profile: the generic checks only, so the answer does not depend on
+    # which policy modules other tests registered.
+    submission = _submission(base_bundle_raw(), requester_key, profile_id=None)
     responses: list = []
 
     def post():
