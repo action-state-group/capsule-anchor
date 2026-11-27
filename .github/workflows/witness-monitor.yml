@@ -8,6 +8,12 @@
 # one issue labelled ci-red, which the coordinator's watchdog lists (its CI-RED
 # line). Close that issue once the witness answers again.
 #
+# It also fails once /health's tree_size reaches 65,000: a memory tripwire.
+# Until the paged startup read (#138) is live, a new instance runs out of its
+# 512 Mi during startup somewhere between about 73,000 and 125,000 entries
+# (docs/architecture/20-witness-scaling.md, section 2). Raise or drop
+# --max-tree-size only after that fix is deployed.
+#
 # GETs only: the monitor adds nothing to the witness's log. The rate of 500s on
 # POST /checkpoints is not visible from outside; the Cloud Monitoring policies
 # on the service cover it (deploy/DEPLOY.md, Uptime monitoring).
@@ -46,7 +52,7 @@ jobs:
           LIMIT: ${{ inputs.limit }}
         run: |
           set -o pipefail
-          python3 ci/witness-monitor/probe.py --limit "${LIMIT:-5}" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 ci/witness-monitor/probe.py --limit "${LIMIT:-5}" --max-tree-size 65000 | tee -a "$GITHUB_STEP_SUMMARY"
 
   report-failure:
     # A scheduled failure, or a by-hand run that set limit (the test alert).

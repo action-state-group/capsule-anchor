@@ -59,13 +59,35 @@ def test_no_response_line_names_the_error(capsys):
     assert lines[0] == "probe 1: no response (TimeoutError: timed out) in 30.00 s"
 
 
+@pytest.mark.parametrize("sizes,ok", [
+    ([54_011, 54_012, 54_013], True),
+    ([99_999, 99_999, 99_999], True),
+    ([99_999, 100_000, 100_000], False),  # reaching the tripwire fails the run
+    ([None, None, None], True),  # a body without tree_size never fails an answering witness
+    ([None, 120_000, None], False),
+])
+def test_tree_size_tripwire(sizes, ok, capsys):
+    samples = [S(200, 0.1, tree_size=n) for n in sizes]
+    code, lines, _ = run(samples, capsys, "--max-tree-size", "100000")
+    assert code == (0 if ok else 1)
+    assert lines[-1].startswith("healthy: " if ok else "UNHEALTHY: ")
+    if not ok:
+        assert "tripwire 100000" in lines[-1] and "20-witness-scaling.md" in lines[-1]
+
+
+def test_tree_size_is_ignored_without_the_flag(capsys):
+    code, lines, _ = run([S(200, 0.1, tree_size=10**9)] * 3, capsys)
+    assert code == 0
+    assert lines[0] == "probe 1: 200 in 0.10 s, tree_size 1000000000"
+
+
 def test_bad_counts_are_refused():
     with pytest.raises(SystemExit):
         probe.main(["--samples", "0"])
 
 
 class _Handler(BaseHTTPRequestHandler):
-    status, delay, mode = 200, 0.0, "ok"
+    status, delay, mode, body = 200, 0.0, "ok", b"{}"
 
     def do_GET(self):  # noqa: N802
         if self.path == "/landing":
@@ -102,7 +124,7 @@ class _Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(self.status)
             self.end_headers()
-            self.wfile.write(b"{}")
+            self.wfile.write(self.body)
 
     def log_message(self, *a):
         pass
@@ -115,7 +137,7 @@ def server():
     yield srv
     srv.shutdown()
     srv.server_close()
-    _Handler.status, _Handler.delay, _Handler.mode = 200, 0.0, "ok"
+    _Handler.status, _Handler.delay, _Handler.mode, _Handler.body = 200, 0.0, "ok", b"{}"
 
 
 def _url(srv):
@@ -166,3 +188,23 @@ def test_fetch_bounds_trickled_headers(server):
     _Handler.mode = "slow-headers"
     s = probe.fetch(_url(server), 1.0)
     assert s.status is None and "no full answer" in s.error and s.seconds < 2
+
+
+@pytest.mark.parametrize("body,size", [
+    (b'{"status": "ok", "tree_size": 54011, "storage": "postgres"}', 54011),
+    (b"{}", None),
+    (b'{"tree_size": "54011"}', None),  # not an integer
+    (b'{"tree_size": true}', None),
+    (b"[1, 2]", None),  # not an object
+    (b"not json", None),
+])
+def test_fetch_reads_tree_size_from_a_200(server, body, size):
+    _Handler.body = body
+    s = probe.fetch(_url(server), 5)
+    assert s.status == 200 and s.tree_size == size
+
+
+def test_fetch_reads_no_tree_size_from_an_error_answer(server):
+    _Handler.status, _Handler.body = 503, b'{"tree_size": 54011}'
+    s = probe.fetch(_url(server), 5)
+    assert s.status == 503 and s.tree_size is None
