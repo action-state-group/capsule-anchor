@@ -687,7 +687,7 @@ def get_router() -> APIRouter:
         an ``/anchor/anchor`` receipt, a transparency-log entry).
 
         A COSE Receipt names the same ``key_id`` in its protected ``kid`` (4)
-        since capsule-anchor#103 (RFC 9943 Section 6); receipts issued before
+        since capsule-anchor#104 (RFC 9943 Section 6); receipts issued before
         that carry no ``kid``. Either way a relying party takes the key itself
         from HERE (or from ``/.well-known/did.json``), never from the receipt,
         and for a receipt without ``kid`` tries each published key across a

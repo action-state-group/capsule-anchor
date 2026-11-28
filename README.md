@@ -468,14 +468,15 @@ to submit: RFC 9943 §8.2 puts that check on issuers. `/health` carries
 `embedded_payloads` (`detached` or `as_submitted_up_to_cap`).
 
 **How to check a receipt is published there too** (capsule-anchor#124), so a
-verifier needs no other document: `receipts` gives the entry rule for each
+verifier of a receipt signed by a published key needs no other document from this
+service: `receipts` gives the entry rule for each
 `entry_hash_scheme` (`sig_structure`: SHA-256 of the statement's RFC 9052
 `Sig_structure`; `legacy`: SHA-256 of the registered bytes), the RFC 9162 leaf
 `SHA-256(0x00 || entry)`, where the inclusion proof sits (unprotected label 396,
 not signed), that the signature covers the Merkle root alone, and the receipt key
 (`key_id`, `/anchor/authority-pubkey`, `/.well-known/did.json`, key selection and
 rotation). `signed_tree_heads` gives the tree-head signing input, which writes the
-timestamp ending in `+00:00` where `GET /anchor/sth` shows `Z`, and how to bind a
+timestamp ending in `+00:00` where `GET /anchor/sth` shows `Z` (#144 tracks the fix), and how to bind a
 receipt's root at its `tree_size` to a verified tree head with
 `GET /anchor/consistency-proof`.
 

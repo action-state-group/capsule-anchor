@@ -29,7 +29,9 @@ def _node(left: bytes, right: bytes) -> bytes:
 
 
 def _root_from_inclusion(leaf: bytes, leaf_index: int, tree_size: int, path: list[bytes]) -> bytes:
-    """RFC 9162 Section 2.1.3.2."""
+    """RFC 9162 Section 2.1.3.2, over the unsigned integers ``receipts.inclusion_proof`` names."""
+    for n in (leaf_index, tree_size):
+        assert isinstance(n, int) and not isinstance(n, bool) and n >= 0
     assert leaf_index < tree_size
     fn, sn, r = leaf_index, tree_size - 1, leaf
     for p in path:
@@ -140,8 +142,12 @@ def _verify_receipt(policy: dict, pub: Ed25519PublicKey, statement: bytes, reg: 
     return tree_size, root
 
 
-def _verified_sth(client: TestClient, pub: Ed25519PublicKey) -> SignedTreeHead:
+def _verified_sth(client: TestClient, policy: dict, pub: Ed25519PublicKey) -> dict:
     """Check the latest signed tree head per ``signed_tree_heads``, from its JSON alone."""
+    rules = policy["signed_tree_heads"]
+    assert rules["latest"] == "GET /anchor/sth"
+    # timestamp_form: the signed bytes end in "+00:00" where the JSON shows "Z".
+    assert '"+00:00"' in rules["timestamp_form"] and '"Z"' in rules["timestamp_form"]
     raw = client.get("/anchor/sth").json()
     timestamp = raw["timestamp"]
     assert timestamp.endswith("Z")
@@ -181,7 +187,10 @@ def test_an_outside_verifier_checks_receipts_from_the_policy_alone(client):
     assert key["receipt_issuer"] == "did:web:verifier-test.example"
     pub = Ed25519PublicKey.from_public_bytes(raw_key)
 
-    sth = _verified_sth(client, pub)
+    sth = _verified_sth(client, policy, pub)
+    # binding_a_receipt: a consistency proof checked between the verifier's own two roots.
+    binding = policy["signed_tree_heads"]["binding_a_receipt"]
+    assert "old_size=M&new_size=N" in binding and "your own two roots" in binding
     sth_root = bytes.fromhex(sth["root_hash"])
     for statement, reg in zip(statements, regs, strict=True):
         tree_size, root = _verify_receipt(policy, pub, statement, reg)
@@ -225,6 +234,17 @@ def test_a_tampered_receipt_or_head_fails_the_verifier(client):
         with pytest.raises((AssertionError, InvalidSignature)):
             _verify_receipt(policy, pub, statements[2], forged_reg)
 
+    # A single-leaf receipt with leaf_index -1: an empty path would give back the leaf itself.
+    receipt = cbor2.loads(base64.b64decode(regs[0]["receipt_b64"]))
+    protected_bstr, unprotected, _payload, signature = receipt.value
+    (proof_bstr,) = unprotected[396][-1]
+    tree_size, leaf_index, path = cbor2.loads(proof_bstr)
+    assert (tree_size, leaf_index, list(path)) == (1, 0, [])
+    forged_receipt = cbor2.CBORTag(18, [protected_bstr, {396: {-1: [cbor2.dumps([1, -1, []])]}}, None, signature])
+    forged_reg = dict(regs[0], receipt_b64=base64.b64encode(cbor2.dumps(forged_receipt)).decode())
+    with pytest.raises(AssertionError):
+        _verify_receipt(policy, pub, statements[0], forged_reg)
+
     # A wrong old root is not consistent with the head.
     tree_size, root = _verify_receipt(policy, pub, statements[0], regs[0])
     proof = client.get("/anchor/consistency-proof", params={"old_size": tree_size, "new_size": raw["tree_size"]}).json()
@@ -261,11 +281,13 @@ def test_the_policy_states_the_rules_issue_124_asks_for(client):
         "label": 395, "value": 1, "name": "RFC9162_SHA256", "reference": "RFC 9942 Section 5.1",
     }
     assert "396" in receipts["inclusion_proof"] and "[tree_size, leaf_index" in receipts["inclusion_proof"]
+    assert "leaf_index < tree_size" in receipts["inclusion_proof"]
+    assert "nine-field record" in receipts["entry"]["registered_bytes"]["POST /checkpoints"]
     assert "the signature binds the root alone" in receipts["unsigned"]
     assert "[\"Signature1\", protected, h'', root]" in receipts["signature"]
     assert receipts["key"]["key_id"] == client.get("/anchor/authority-pubkey").json()["key_id"]
     assert "/anchor/authority-pubkey" in receipts["key"]["public_key"]
-    assert "no kid" in receipts["protected_header"]["before_capsule_anchor_103"]
+    assert "no kid" in receipts["protected_header"]["receipts_without_kid"]
     assert "exactly as received" in receipts["protected_header"]["as_received"]
     assert "kid" in receipts["key"]["selection"]
     assert "retired" in receipts["key"]["rotation"]

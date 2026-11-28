@@ -192,7 +192,7 @@ def build_cose_receipt(
                   three MUST on a Receipt (``kid`` because this Receipt names
                   its key by neither ``x5t`` nor ``x5chain``), and
                   ``register_signed_statement_full`` always passes them.
-                  ``None`` omits each (the pre-#103 wire shape).
+                  ``None`` omits each (the pre-#104 wire shape).
 
     Returns the tagged COSE_Sign1 CBOR bytes. See the module-level wire spec.
     """
@@ -767,8 +767,10 @@ def receipt_rules() -> dict:
             ),
             "registered_bytes": {
                 "POST /transparency/register-statement": "the submitted Signed Statement",
-                "POST /checkpoints": "the 32-byte checkpoint digest (SHA-256 of the checkpoint's signing "
-                "body), not the submitted COSE or JSON (legacy rule)",
+                "POST /checkpoints": "the 32-byte checkpoint digest, not the submitted COSE or JSON (legacy "
+                "rule): SHA-256 of the sorted, whitespace-free JSON of the nine-field record {v, kind, log_id, "
+                "mmr_size, root, prev_size, prev_root, key_id, timestamp} read from the submission "
+                "(OPERATOR_GUIDE.md section 5, step 2, gives the mapping)",
                 "POST /register and POST /v1/digest": "the 32 raw bytes of the submitted capsule_id or digest "
                 "(legacy rule)",
             },
@@ -783,15 +785,16 @@ def receipt_rules() -> dict:
             "entry_hash, iat is this service's clock at registration",
             "optional": f"{_COSE_GRADE_LABEL} (witness grade) and {_COSE_CONTINUITY_LABEL} (continuity "
             "assertion) on checkpoint registrations only",
-            "before_capsule_anchor_103": "receipts issued before capsule-anchor#103 carry no kid and no iss "
-            "or sub",
+            "receipts_without_kid": "receipts issued before capsule-anchor#104 (merged 2026-11-25) carry no "
+            "kid and no iss or sub",
             "as_received": "verify over the receipt's protected header bytes exactly as received; never "
             "re-encode them from these labels",
         },
         "inclusion_proof": (
             f"unprotected header {_COSE_VDP_LABEL} (vdp), key {_COSE_VDP_INCLUSION_KEY}: an array holding one "
             "bstr-wrapped CBOR [tree_size, leaf_index, [audit path, 32-byte hashes]] (RFC 9942 Section 5.2); "
-            "recompute the root from the leaf with RFC 9162 Section 2.1.3.2"
+            "tree_size and leaf_index are unsigned integers and leaf_index < tree_size; recompute the root "
+            "from the leaf with RFC 9162 Section 2.1.3.2"
         ),
         "signature": (
             "over the RFC 9052 Sig_structure [\"Signature1\", protected, h'', root]: root is the 32-byte RFC "
