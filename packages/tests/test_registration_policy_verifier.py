@@ -309,15 +309,18 @@ def test_a_checkpoint_entry_rebuilds_from_the_policy_alone(client):
     from .test_checkpoints_and_register_witness_host import _CLL_CONTENT_TYPE, _checkpoint_cose, _peaks_for
 
     key = Ed25519PrivateKey.generate()
-    cose = _checkpoint_cose(key, log_id="policy-log", mmr_size=7, new_peaks=_peaks_for("policy-log-7", n=3))
+    # A non-ASCII log id: the published digest encoding escapes it, as the service does.
+    cose = _checkpoint_cose(key, log_id="policy-l\u00f6g-\U0001f4dc", mmr_size=7, new_peaks=_peaks_for("p", n=3))
     resp = client.post("/checkpoints", content=cose, headers={"Content-Type": _CLL_CONTENT_TYPE})
     assert resp.status_code == 200, resp.text
     reg = resp.json()
     policy = client.get("/transparency/registration-policy").json()
     rules = policy["receipts"]["entry"]["checkpoint_record"]
     assert "issued_at" in rules["from_cose"] and "SHA-256(right || left)" in rules["fold"]
+    assert "itself a CBOR array" in rules["fold"] and "escaped as \\uXXXX" in rules["digest"]
 
     def fold(raw: bytes) -> str:
+        assert isinstance(raw, bytes)  # a byte string whose content is the CBOR array
         hashes = list(cbor2.loads(raw))
         if not hashes:
             return bytes(32).hex()
@@ -340,7 +343,9 @@ def test_a_checkpoint_entry_rebuilds_from_the_policy_alone(client):
         "key_id": key.public_key().public_bytes_raw().hex(),
         "timestamp": claims["issued_at"],
     }
-    digest = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).digest()
+    encoded = json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    assert b"\\u00f6" in encoded and b"\\ud83d\\udcdc" in encoded
+    digest = hashlib.sha256(encoded).digest()
     assert reg["entry_hash_scheme"] == "legacy"
     assert _entry(policy, digest, reg["entry_hash_scheme"]).hex() == reg["entry_hash"]
     pub = Ed25519PublicKey.from_public_bytes(

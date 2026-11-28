@@ -773,19 +773,22 @@ def receipt_rules() -> dict:
                 "(legacy rule)",
             },
             "checkpoint_record": {
-                "digest": "SHA-256 of the UTF-8 JSON of the nine-field record {v, kind, log_id, mmr_size, root, "
-                "prev_size, prev_root, key_id, timestamp}, keys sorted, separators \",\" and \":\", no whitespace",
+                "digest": "SHA-256 of the JSON of the nine-field record {v, kind, log_id, mmr_size, root, "
+                "prev_size, prev_root, key_id, timestamp}: keys sorted, separators \",\" and \":\", no "
+                "whitespace, and every non-ASCII character escaped as \\uXXXX (a UTF-16 surrogate pair above "
+                "U+FFFF), so the bytes are ASCII",
                 "from_cose": (
                     "the statement's payload is a CBOR claims map. v: 1; kind: \"mmr_checkpoint\"; log_id: the "
                     "CWT iss; mmr_size: claims log_size; prev_size: claims prev_size; root: lowercase hex of the "
-                    "fold of claims commitment; prev_root: the same over claims prev_commitment, or \"\" when it "
-                    "is absent or empty; key_id: lowercase hex of the raw 32-byte Ed25519 key the signature was "
+                    "fold of claims commitment; prev_root: the same over claims prev_commitment (see fold); key_id: lowercase hex of the raw 32-byte Ed25519 key the signature was "
                     "checked under (an enrolled log's pinned key, else the kid); timestamp: claims issued_at as given"
                 ),
                 "fold": (
-                    "a commitment is a CBOR array of 32-byte peak hashes; while more than one remains, pop the "
-                    "last (right) and the one before it (left) and push SHA-256(right || left); the one left is "
-                    "the root (32 zero bytes for no peaks)"
+                    "commitment and prev_commitment are CBOR byte strings whose content is itself a CBOR array "
+                    "of 32-byte peak hashes: decode the byte string's content. While more than one peak remains, "
+                    "pop the last (right) and the one before it (left) and push SHA-256(right || left); the one "
+                    "left is the root, and an encoded empty array gives 32 zero bytes. An absent or empty "
+                    "prev_commitment byte string gives prev_root \"\""
                 ),
                 "from_json": "the nine fields under the names the log's enrollment maps; root and prev_root "
                 "lowercased",
