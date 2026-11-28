@@ -8,6 +8,13 @@ All notable changes to `capsule-anchor` are documented here. The format follows
 
 ### Added
 
+- **The registration policy says how to check a receipt.** `GET /transparency/registration-policy`
+  gains `receipts` (the entry rule for each `entry_hash_scheme`, the RFC 9162 leaf, the receipt's
+  protected header, where the unsigned inclusion proof sits, what the signature covers, and the
+  receipt key with its selection and rotation) and `signed_tree_heads` (the tree-head signing input,
+  whose timestamp ends in `+00:00` where `/anchor/sth` shows `Z`, tracked in #144, and how to bind a receipt's root
+  to a verified head). An outside verifier of a receipt signed by a published key needs no other document from this service. OPERATOR_GUIDE's receipt steps no
+  longer say the root sits in the protected header (#124).
 - **`ci/local-witness`, a witness for other repositories' CI.** A composite action starts
   this service inside the calling job over TLS on `localhost` (its own venv, an in-memory
   store, a throwaway key), outputs the URL, the authority public key, a CA bundle for

@@ -416,9 +416,31 @@ def create_app() -> FastAPI:
     def registration_policy() -> dict:
         """This service's registration policy and privacy posture, published so
         an issuer can decide what to submit (RFC 9943 5.1.1 and 8.2: the
-        privacy check is the issuer's). Reflects this instance's configuration."""
-        from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES
+        privacy check is the issuer's). Reflects this instance's configuration.
+
+        ``receipts`` and ``signed_tree_heads`` say how an outside verifier
+        checks a receipt with nothing but this response and the key it names
+        (capsule-anchor#124). RFC 9943 Section 5.1.1 leaves the encoding of a
+        registration policy to the operator; the vocabulary is RFC 9942's."""
+        from capsule_anchor.anchoring.router import get_service
+        from capsule_anchor.anchoring.service import MAX_STATEMENT_BYTES, receipt_rules, sth_rules
         from capsule_anchor.countersign.config import strict_countersign_active
+
+        svc = get_service()
+        receipts = receipt_rules()
+        receipts["key"] = {
+            "alg": "Ed25519",
+            "key_id": svc.attestor.key_id,
+            "key_id_derivation": "the first 16 hex characters of SHA-256 over the raw 32-byte public key",
+            "public_key": "GET /anchor/authority-pubkey (pubkey_hex: the raw 32-byte key, hex; key_id) or "
+            "GET /.well-known/did.json (verificationMethod publicKeyJwk.x, base64url)",
+            "receipt_issuer": svc.receipt_issuer,
+            "selection": "select the key by the receipt's kid (or a signed tree head's signature.key_id); "
+            "for a receipt without kid, try each published key until one verifies",
+            "rotation": "key_id here is the key signing now. A receipt or tree head signed by a retired "
+            "key verifies only against that key as its operator publishes it (OPERATOR_GUIDE.md, Key "
+            "rotation); with no published key that verifies, the receipt cannot be checked",
+        }
 
         leaves = []
         if _public_log_publisher is not None:
@@ -436,6 +458,8 @@ def create_app() -> FastAPI:
             },
             "recommended_submission": "a statement made over a hash (RFC 9943 6.2 hash envelope: "
             "payload = the digest, protected header 258 payload_hash_alg); keep the preimage yourself",
+            "receipts": receipts,
+            "signed_tree_heads": sth_rules(),
             "privacy": {
                 "stored": [
                     "the log's leaf hashes (entry hashes) and the receipts issued for them",

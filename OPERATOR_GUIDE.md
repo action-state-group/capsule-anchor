@@ -227,8 +227,8 @@ repo, and not in a shell history file.
 **Key identity.** `key_id` is the first 16 hex characters of `sha256(pubkey_bytes)`
 — derived the same way wherever it appears (`/health`, `/anchor/authority-pubkey`,
 `/.well-known/did.json`, every JSON `Signature` object, and, since
-capsule-anchor#103, the protected `kid` (4) of every COSE Receipt). Receipts issued
-before #103 carry no `kid`; a verifier resolves their key from one of those surfaces.
+capsule-anchor#104, the protected `kid` (4) of every COSE Receipt). Receipts issued
+before #104 carry no `kid`; a verifier resolves their key from one of those surfaces.
 See **Key rotation** below.
 
 **`did:web` identity.** The DID document at `/.well-known/did.json` is derived from
@@ -544,7 +544,7 @@ authority key's `key_id`) and the CWT claims map (15) holding `iss` (the instanc
 `did:web:<CAPSULE_ANCHOR_PUBLIC_HOST>`), `sub` (the registered statement's own
 subject, else its `entry_hash`) and `iat`, as RFC 9943 Section 6 requires; plus,
 when present, the witness grade (-65537) and the continuity assertion (-65538).
-Receipts issued before capsule-anchor#103 carry only `iat` in their claims and no
+Receipts issued before capsule-anchor#104 carry only `iat` in their claims and no
 `kid`. A verifier resolves the witness key out of band (`GET /.well-known/did.json`
 or `GET /anchor/authority-pubkey`), selecting it by the receipt's `kid` or, for a
 receipt without one, trying the published keys until one verifies. Receipts
@@ -572,7 +572,7 @@ entries) carries the same `key_id` as a JSON field.
    ```
    STHs and `Signature` objects produced after this redeploy carry the new
    `key_id`, and so do COSE Receipts (`kid`). A receipt issued before
-   capsule-anchor#103 names no key; which key signed it is determined only by which
+   capsule-anchor#104 names no key; which key signed it is determined only by which
    published key verifies it.
 
 3. Publish the old public key alongside the new one. After rotation,
@@ -652,10 +652,13 @@ signed by the witness's authority key.
 
 2. Recompute the entry hash from the submission you made:
    - For `POST /register` (capsule_id submit): `entry_hash = sha256(bytes.fromhex(capsule_id))`.
-   - For `POST /checkpoints` (CLL checkpoint): the `entry_hash` in the response is
-     `sha256` of the checkpoint's own canonical signing body. The service's response
-     field states this; an independent verifier holding the checkpoint record can
-     recompute it without trusting the response.
+   - For `POST /checkpoints` (CLL checkpoint): the registered bytes are the 32-byte
+     checkpoint digest, so `entry_hash = sha256(digest)`. The digest is `sha256` of the
+     sorted, whitespace-free JSON of the nine-field record `{v, kind, log_id, mmr_size,
+     root, prev_size, prev_root, key_id, timestamp}`; the policy's
+     `receipts.entry.checkpoint_record` gives how each field is read from a COSE or JSON
+     checkpoint. An independent verifier holding the checkpoint can recompute it without
+     trusting the response.
    - For `POST /transparency/register-statement` (COSE_Sign1 Signed Statement):
      `entry_hash` is `sha256` of the RFC 9052 `Sig_structure` when the statement is a
      parseable `COSE_Sign1` with an embedded payload (`entry_hash_scheme: "sig_structure"`),
@@ -664,13 +667,27 @@ signed by the witness's authority key.
 3. Compute the CT leaf hash: `sha256(b"\x00" + bytes.fromhex(entry_hash))`.
    This is the RFC 9162 leaf preimage — the `0x00` byte is the leaf-node prefix.
 
-4. Fold the Merkle audit path: starting from the leaf hash, for each element in the
-   audit path, combine with `sha256(b"\x01" + left + right)` (RFC 9162 internal
-   node hashing), taking the left/right order from the audit path.
+4. Parse `receipt_b64` as a `COSE_Sign1` (CBOR tag 18). Its unprotected header 396,
+   key -1, holds an array with one byte string; CBOR-decode that byte string to get the
+   inclusion proof `[tree_size, leaf_index, audit_path]`. Recompute
+   the root from the leaf hash with RFC 9162 Section 2.1.3.2, which takes the
+   left/right order from `leaf_index` and `tree_size` and hashes internal nodes as
+   `sha256(b"\x01" + left + right)`.
 
-5. Verify the COSE Receipt: parse the `receipt_b64` as a `COSE_Sign1` (CBOR tag 18),
-   check that the `root_hash` from step 4 matches the root in the receipt's protected
-   header, and verify the Ed25519 signature using the pinned public key from step 1.
+5. Verify the Ed25519 signature with the pinned public key from step 1 over the
+   RFC 9052 `Sig_structure` `["Signature1", protected, h'', root]`: `protected` is
+   the receipt's protected header bytes exactly as received, and `root` is the
+   32-byte root from step 4. The receipt's payload is detached (nil); the root is
+   not carried in it or in any header.
+
+6. The signature covers the root alone, not `tree_size` or `leaf_index`. To bind the
+   root to its tree size, verify a signed tree head (`GET /anchor/sth`) and a
+   consistency proof from the receipt's tree size to the head's
+   (`GET /anchor/consistency-proof`).
+
+`GET /transparency/registration-policy` publishes these rules for the running
+instance, with the tree-head signing input and the current `key_id`, in its
+`receipts` and `signed_tree_heads` members.
 
 The [`agent-action-capsule`](https://github.com/action-state-group/agent-action-capsule)
 library and [`scitt-cose`](https://github.com/action-state-group/scitt-cose) verifier

@@ -410,7 +410,7 @@ From `packages/capsule_anchor/app.py` and `anchoring/router.py` (and
 | `GET`  | `/v1/inclusion/{capsule_id}` | Inclusion proof and receipt for a registered digest (404 if absent); never registers |
 | `POST` | `/transparency/register-statement` | Register a SCITT Signed Statement (above) |
 | `GET`  | `/transparency/statements?subject=` | Every statement registered under a CWT `sub`, with what was kept of its payload and `payload_form` (unauthenticated claims; see [Data](#data-what-is-stored-and-what-leaves)) |
-| `GET`  | `/transparency/registration-policy` | This service's registration policy (embedded-payload storage, size limits, issuer binding) and privacy posture (what it stores, what leaves it) |
+| `GET`  | `/transparency/registration-policy` | This service's registration policy (embedded-payload storage, size limits, issuer binding), privacy posture (what it stores, what leaves it), and how to check its receipts and signed tree heads (entry and leaf rule, receipt key) |
 | `POST` | `/anchor/anchor` | Countersign a caller's `{tenant_id, root_hash, seq_from, seq_to}` and append it to the log; adds an RFC 3161 timestamp when the TSA is on |
 | `GET`  | `/anchor/countersigned-root` | Look up a countersigned root by `tenant_id` and `root_hash` |
 | `GET`  | `/anchor/sth` | Current RFC 6962 Signed Tree Head |
@@ -466,6 +466,19 @@ a larger payload is stored detached). A malformed value stops startup.
 privacy posture (what it stores, what leaves it) so an issuer can decide what
 to submit: RFC 9943 §8.2 puts that check on issuers. `/health` carries
 `embedded_payloads` (`detached` or `as_submitted_up_to_cap`).
+
+**How to check a receipt is published there too** (capsule-anchor#124), so a
+verifier of a receipt signed by a published key needs no other document from this
+service: `receipts` gives the entry rule for each
+`entry_hash_scheme` (`sig_structure`: SHA-256 of the statement's RFC 9052
+`Sig_structure`; `legacy`: SHA-256 of the registered bytes), the RFC 9162 leaf
+`SHA-256(0x00 || entry)`, where the inclusion proof sits (unprotected label 396,
+not signed), that the signature covers the Merkle root alone, and the receipt key
+(`key_id`, `/anchor/authority-pubkey`, `/.well-known/did.json`, key selection and
+rotation). `signed_tree_heads` gives the tree-head signing input, which writes the
+timestamp ending in `+00:00` where `GET /anchor/sth` shows `Z` (#144 tracks the fix), and how to bind a
+receipt's root at its `tree_size` to a verified tree head with
+`GET /anchor/consistency-proof`.
 
 Why receipts verify the same either way, and how that was checked:
 [`docs/architecture/19-embedded-payload-storage.md`](docs/architecture/19-embedded-payload-storage.md).
