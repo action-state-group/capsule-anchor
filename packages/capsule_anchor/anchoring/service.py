@@ -735,6 +735,107 @@ def sth_payload(tree_size: int, root_hash: str, timestamp: datetime) -> bytes:
     )
 
 
+def receipt_rules() -> dict:
+    """How a verifier checks this service's COSE Receipts, as published by
+    ``GET /transparency/registration-policy`` (capsule-anchor#124).
+
+    Built from the same constants ``build_cose_receipt`` and
+    ``_entry_hash_preimage`` use, so the published rule follows the code.
+    The instance's key (``key``) is added by the endpoint.
+    """
+    return {
+        "format": f"COSE Receipt (RFC 9942): COSE_Sign1, CBOR tag {_COSE_SIGN1_TAG}, payload nil (detached)",
+        "verifiable_data_structure": {
+            "label": _COSE_VDS_LABEL,
+            "value": _COSE_VDS_RFC9162_SHA256,
+            "name": "RFC9162_SHA256",
+            "reference": "RFC 9942 Section 5.1",
+        },
+        "entry": {
+            "scheme": "apply the rule the registration response's entry_hash_scheme names; entry_hash is "
+            "the hex of the 32-byte entry",
+            ENTRY_HASH_SCHEME_SIG_STRUCTURE: (
+                "entry = SHA-256 of the RFC 9052 Section 4.4 Sig_structure [\"Signature1\", protected, h'', "
+                "payload], built from the registered COSE_Sign1's own protected header bytes and embedded "
+                "payload; its signature is not included. New registrations of a COSE_Sign1 with an embedded "
+                "payload use this rule"
+            ),
+            ENTRY_HASH_SCHEME_LEGACY: (
+                "entry = SHA-256 of the registered bytes. Used for bytes that are not a COSE_Sign1 with an "
+                "embedded payload, and kept by entries registered before the sig_structure rule, whose "
+                "resubmission returns the original receipt"
+            ),
+            "registered_bytes": {
+                "POST /transparency/register-statement": "the submitted Signed Statement",
+                "POST /checkpoints": "the 32-byte checkpoint digest (SHA-256 of the checkpoint's signing "
+                "body), not the submitted COSE or JSON (legacy rule)",
+                "POST /register and POST /v1/digest": "the 32 raw bytes of the submitted capsule_id or digest "
+                "(legacy rule)",
+            },
+        },
+        "leaf": "SHA-256(0x00 || entry) over the 32-byte entry: the RFC 9162 Section 2.1.1 leaf hash",
+        "protected_header": {
+            "alg": f"{_COSE_ALG_LABEL}: {_COSE_ALG_EDDSA} (EdDSA, Ed25519)",
+            "vds": f"{_COSE_VDS_LABEL}: {_COSE_VDS_RFC9162_SHA256}",
+            "kid": f"{_COSE_KID_LABEL}: the UTF-8 bytes of key.key_id",
+            "cwt_claims": f"{HDR_CWT_CLAIMS}: {{{_CWT_ISS}: iss, {_CWT_SUB}: sub, {_CWT_IAT}: iat}} (RFC 9943 "
+            "Section 6); iss is key.receipt_issuer, sub is the statement's own CWT sub or else its "
+            "entry_hash, iat is this service's clock at registration",
+            "optional": f"{_COSE_GRADE_LABEL} (witness grade) and {_COSE_CONTINUITY_LABEL} (continuity "
+            "assertion) on checkpoint registrations only",
+            "before_capsule_anchor_103": "receipts issued before capsule-anchor#103 carry no kid and no iss "
+            "or sub",
+            "as_received": "verify over the receipt's protected header bytes exactly as received; never "
+            "re-encode them from these labels",
+        },
+        "inclusion_proof": (
+            f"unprotected header {_COSE_VDP_LABEL} (vdp), key {_COSE_VDP_INCLUSION_KEY}: an array holding one "
+            "bstr-wrapped CBOR [tree_size, leaf_index, [audit path, 32-byte hashes]] (RFC 9942 Section 5.2); "
+            "recompute the root from the leaf with RFC 9162 Section 2.1.3.2"
+        ),
+        "signature": (
+            "over the RFC 9052 Sig_structure [\"Signature1\", protected, h'', root]: root is the 32-byte RFC "
+            "9162 Merkle tree hash recomputed from the inclusion proof; external_aad is empty"
+        ),
+        "unsigned": (
+            "tree_size and leaf_index sit only in the unprotected inclusion proof, which the signature does "
+            "not cover: the signature binds the root alone. To bind that root to its tree_size, check it "
+            "against a signed tree head (signed_tree_heads)"
+        ),
+    }
+
+
+def sth_rules() -> dict:
+    """How a verifier checks this service's signed tree heads, as published by
+    ``GET /transparency/registration-policy`` (capsule-anchor#124). Mirrors
+    ``sth_payload``."""
+    return {
+        "latest": "GET /anchor/sth",
+        "consistency": "GET /anchor/consistency-proof?old_size=M&new_size=N (RFC 9162 Section 2.1.4)",
+        "root_hash": "hex of the same RFC 9162 Merkle tree hash a receipt signs, at tree_size",
+        "signature": (
+            "signature.signature (hex) is Ed25519, by the receipt key, over the UTF-8 bytes of the "
+            "JSON object {\"root_hash\", \"timestamp\", \"tree_size\"} with keys sorted and no "
+            "whitespace (separators \",\" and \":\")"
+        ),
+        "timestamp_form": (
+            "the signed bytes carry the timestamp ending in \"+00:00\" where the /anchor/sth JSON shows "
+            "\"Z\"; the digits are the same"
+        ),
+        "signing_input_example": (
+            '{"root_hash":"cc032fb27a3c3023c8a21bad72228983aec352153a0dea9d727f9c3542a5aabd",'
+            '"timestamp":"2026-11-28T06:52:16.304315+00:00","tree_size":56315}'
+        ),
+        "binding_a_receipt": (
+            "verify a signed tree head first and keep its tree_size N and root_hash. For a receipt whose "
+            "recomputed root is at tree_size M: if M = N the two roots must be equal; if M < N, fetch "
+            "GET /anchor/consistency-proof?old_size=M&new_size=N and verify its proof (RFC 9162 Section "
+            "2.1.4.2) from the receipt's root to the head's root_hash, your own two roots, not the response's "
+            "first_root and second_root; if M > N, fetch a newer head"
+        ),
+    }
+
+
 class SignedTreeHead(BaseModel):
     """RFC6962 Signed Tree Head over the CT log of transparency-log entries.
 
@@ -1568,7 +1669,7 @@ class AnchorerService:
                 # RFC 9943 §6: iss, sub and kid are MUST on a Receipt. sub is
                 # what the registered statement says it is about (its own CWT
                 # sub, RFC 9943 §3 and Figure 10), else the entry it covers.
-                iss=self._receipt_issuer or self._attestor.key_id,
+                iss=self.receipt_issuer,
                 sub=subject or entry_hash,
                 kid=self._attestor.key_id.encode("utf-8"),
             )
@@ -2050,3 +2151,8 @@ class AnchorerService:
     @property
     def attestor(self) -> AttestorService:
         return self._attestor
+
+    @property
+    def receipt_issuer(self) -> str:
+        """The ``iss`` signed into every new COSE Receipt."""
+        return self._receipt_issuer or self._attestor.key_id

@@ -652,10 +652,10 @@ signed by the witness's authority key.
 
 2. Recompute the entry hash from the submission you made:
    - For `POST /register` (capsule_id submit): `entry_hash = sha256(bytes.fromhex(capsule_id))`.
-   - For `POST /checkpoints` (CLL checkpoint): the `entry_hash` in the response is
-     `sha256` of the checkpoint's own canonical signing body. The service's response
-     field states this; an independent verifier holding the checkpoint record can
-     recompute it without trusting the response.
+   - For `POST /checkpoints` (CLL checkpoint): the registered bytes are the 32-byte
+     checkpoint digest (`sha256` of the checkpoint's canonical signing body), so
+     `entry_hash = sha256(digest)`. An independent verifier holding the checkpoint
+     record can recompute it without trusting the response.
    - For `POST /transparency/register-statement` (COSE_Sign1 Signed Statement):
      `entry_hash` is `sha256` of the RFC 9052 `Sig_structure` when the statement is a
      parseable `COSE_Sign1` with an embedded payload (`entry_hash_scheme: "sig_structure"`),
@@ -664,13 +664,26 @@ signed by the witness's authority key.
 3. Compute the CT leaf hash: `sha256(b"\x00" + bytes.fromhex(entry_hash))`.
    This is the RFC 9162 leaf preimage — the `0x00` byte is the leaf-node prefix.
 
-4. Fold the Merkle audit path: starting from the leaf hash, for each element in the
-   audit path, combine with `sha256(b"\x01" + left + right)` (RFC 9162 internal
-   node hashing), taking the left/right order from the audit path.
+4. Parse `receipt_b64` as a `COSE_Sign1` (CBOR tag 18). Its unprotected header 396,
+   key -1, holds the inclusion proof `[tree_size, leaf_index, audit_path]`. Recompute
+   the root from the leaf hash with RFC 9162 Section 2.1.3.2, which takes the
+   left/right order from `leaf_index` and `tree_size` and hashes internal nodes as
+   `sha256(b"\x01" + left + right)`.
 
-5. Verify the COSE Receipt: parse the `receipt_b64` as a `COSE_Sign1` (CBOR tag 18),
-   check that the `root_hash` from step 4 matches the root in the receipt's protected
-   header, and verify the Ed25519 signature using the pinned public key from step 1.
+5. Verify the Ed25519 signature with the pinned public key from step 1 over the
+   RFC 9052 `Sig_structure` `["Signature1", protected, h'', root]`: `protected` is
+   the receipt's protected header bytes exactly as received, and `root` is the
+   32-byte root from step 4. The receipt's payload is detached (nil); the root is
+   not carried in it or in any header.
+
+6. The signature covers the root alone, not `tree_size` or `leaf_index`. To bind the
+   root to its tree size, verify a signed tree head (`GET /anchor/sth`) and a
+   consistency proof from the receipt's tree size to the head's
+   (`GET /anchor/consistency-proof`).
+
+`GET /transparency/registration-policy` publishes these rules for the running
+instance, with the tree-head signing input and the current `key_id`, in its
+`receipts` and `signed_tree_heads` members.
 
 The [`agent-action-capsule`](https://github.com/action-state-group/agent-action-capsule)
 library and [`scitt-cose`](https://github.com/action-state-group/scitt-cose) verifier
