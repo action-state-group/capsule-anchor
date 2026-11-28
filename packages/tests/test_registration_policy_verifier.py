@@ -282,7 +282,8 @@ def test_the_policy_states_the_rules_issue_124_asks_for(client):
     }
     assert "396" in receipts["inclusion_proof"] and "[tree_size, leaf_index" in receipts["inclusion_proof"]
     assert "leaf_index < tree_size" in receipts["inclusion_proof"]
-    assert "nine-field record" in receipts["entry"]["registered_bytes"]["POST /checkpoints"]
+    assert "checkpoint_record" in receipts["entry"]["registered_bytes"]["POST /checkpoints"]
+    assert set(receipts["entry"]["checkpoint_record"]) == {"digest", "from_cose", "fold", "from_json"}
     assert "the signature binds the root alone" in receipts["unsigned"]
     assert "[\"Signature1\", protected, h'', root]" in receipts["signature"]
     assert receipts["key"]["key_id"] == client.get("/anchor/authority-pubkey").json()["key_id"]
@@ -300,3 +301,49 @@ def test_the_policy_states_the_rules_issue_124_asks_for(client):
     assert list(example) == ["root_hash", "timestamp", "tree_size"]
     assert example["timestamp"].endswith("+00:00")
     assert json.dumps(example, sort_keys=True, separators=(",", ":")) == heads["signing_input_example"]
+
+
+def test_a_checkpoint_entry_rebuilds_from_the_policy_alone(client):
+    """``receipts.entry.checkpoint_record``: the entry of a COSE checkpoint, rebuilt from the
+    submission with only the published mapping and fold."""
+    from .test_checkpoints_and_register_witness_host import _CLL_CONTENT_TYPE, _checkpoint_cose, _peaks_for
+
+    key = Ed25519PrivateKey.generate()
+    cose = _checkpoint_cose(key, log_id="policy-log", mmr_size=7, new_peaks=_peaks_for("policy-log-7", n=3))
+    resp = client.post("/checkpoints", content=cose, headers={"Content-Type": _CLL_CONTENT_TYPE})
+    assert resp.status_code == 200, resp.text
+    reg = resp.json()
+    policy = client.get("/transparency/registration-policy").json()
+    rules = policy["receipts"]["entry"]["checkpoint_record"]
+    assert "issued_at" in rules["from_cose"] and "SHA-256(right || left)" in rules["fold"]
+
+    def fold(raw: bytes) -> str:
+        hashes = list(cbor2.loads(raw))
+        if not hashes:
+            return bytes(32).hex()
+        while len(hashes) > 1:
+            right, left = hashes.pop(), hashes.pop()
+            hashes.append(hashlib.sha256(right + left).digest())
+        return hashes[0].hex()
+
+    protected_bstr, _unprotected, payload, _signature = cbor2.loads(cose).value
+    claims = cbor2.loads(payload)
+    prev = claims.get("prev_commitment", b"")
+    record = {
+        "v": 1,
+        "kind": "mmr_checkpoint",
+        "log_id": cbor2.loads(protected_bstr)[15][1],
+        "mmr_size": claims["log_size"],
+        "root": fold(claims["commitment"]),
+        "prev_size": claims["prev_size"],
+        "prev_root": fold(prev) if prev else "",
+        "key_id": key.public_key().public_bytes_raw().hex(),
+        "timestamp": claims["issued_at"],
+    }
+    digest = hashlib.sha256(json.dumps(record, sort_keys=True, separators=(",", ":")).encode()).digest()
+    assert reg["entry_hash_scheme"] == "legacy"
+    assert _entry(policy, digest, reg["entry_hash_scheme"]).hex() == reg["entry_hash"]
+    pub = Ed25519PublicKey.from_public_bytes(
+        bytes.fromhex(client.get("/anchor/authority-pubkey").json()["pubkey_hex"])
+    )
+    _verify_receipt(policy, pub, digest, reg)

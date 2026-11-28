@@ -655,14 +655,10 @@ signed by the witness's authority key.
    - For `POST /checkpoints` (CLL checkpoint): the registered bytes are the 32-byte
      checkpoint digest, so `entry_hash = sha256(digest)`. The digest is `sha256` of the
      sorted, whitespace-free JSON of the nine-field record `{v, kind, log_id, mmr_size,
-     root, prev_size, prev_root, key_id, timestamp}`. For a COSE checkpoint: `v` is 1,
-     `kind` is `"mmr_checkpoint"`, `log_id` is the CWT `iss`, `mmr_size` is the claims'
-     `log_size`, `prev_size` is `prev_size`, `root` and `prev_root` are the hex roots
-     folded from `commitment` and `prev_commitment` (`prev_root` is `""` without one),
-     `key_id` is the hex of the key the signature was checked under (an enrolled log's
-     pinned key, else the `kid`), and `timestamp` is `issued_at`. A JSON checkpoint
-     carries the nine fields under its enrolled names. An independent verifier holding
-     the checkpoint can recompute it without trusting the response.
+     root, prev_size, prev_root, key_id, timestamp}`; the policy's
+     `receipts.entry.checkpoint_record` gives how each field is read from a COSE or JSON
+     checkpoint. An independent verifier holding the checkpoint can recompute it without
+     trusting the response.
    - For `POST /transparency/register-statement` (COSE_Sign1 Signed Statement):
      `entry_hash` is `sha256` of the RFC 9052 `Sig_structure` when the statement is a
      parseable `COSE_Sign1` with an embedded payload (`entry_hash_scheme: "sig_structure"`),

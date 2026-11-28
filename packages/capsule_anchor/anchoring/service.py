@@ -768,11 +768,27 @@ def receipt_rules() -> dict:
             "registered_bytes": {
                 "POST /transparency/register-statement": "the submitted Signed Statement",
                 "POST /checkpoints": "the 32-byte checkpoint digest, not the submitted COSE or JSON (legacy "
-                "rule): SHA-256 of the sorted, whitespace-free JSON of the nine-field record {v, kind, log_id, "
-                "mmr_size, root, prev_size, prev_root, key_id, timestamp} read from the submission "
-                "(OPERATOR_GUIDE.md section 5, step 2, gives the mapping)",
+                "rule); see checkpoint_record",
                 "POST /register and POST /v1/digest": "the 32 raw bytes of the submitted capsule_id or digest "
                 "(legacy rule)",
+            },
+            "checkpoint_record": {
+                "digest": "SHA-256 of the UTF-8 JSON of the nine-field record {v, kind, log_id, mmr_size, root, "
+                "prev_size, prev_root, key_id, timestamp}, keys sorted, separators \",\" and \":\", no whitespace",
+                "from_cose": (
+                    "the statement's payload is a CBOR claims map. v: 1; kind: \"mmr_checkpoint\"; log_id: the "
+                    "CWT iss; mmr_size: claims log_size; prev_size: claims prev_size; root: lowercase hex of the "
+                    "fold of claims commitment; prev_root: the same over claims prev_commitment, or \"\" when it "
+                    "is absent or empty; key_id: lowercase hex of the raw 32-byte Ed25519 key the signature was "
+                    "checked under (an enrolled log's pinned key, else the kid); timestamp: claims issued_at as given"
+                ),
+                "fold": (
+                    "a commitment is a CBOR array of 32-byte peak hashes; while more than one remains, pop the "
+                    "last (right) and the one before it (left) and push SHA-256(right || left); the one left is "
+                    "the root (32 zero bytes for no peaks)"
+                ),
+                "from_json": "the nine fields under the names the log's enrollment maps; root and prev_root "
+                "lowercased",
             },
         },
         "leaf": "SHA-256(0x00 || entry) over the 32-byte entry: the RFC 9162 Section 2.1.1 leaf hash",
