@@ -352,3 +352,14 @@ def test_a_checkpoint_entry_rebuilds_from_the_policy_alone(client):
         bytes.fromhex(client.get("/anchor/authority-pubkey").json()["pubkey_hex"])
     )
     _verify_receipt(policy, pub, digest, reg)
+
+
+def test_an_encoded_empty_commitment_folds_to_zero_bytes(client):
+    """``checkpoint_record.fold``: an encoded empty array gives 32 zero bytes, as the service's
+    own decode and fold do."""
+    from capsule_anchor.anchoring.checkpoint_cose import _decode_commitment, _root_from_peaks
+
+    fold = client.get("/transparency/registration-policy").json()["receipts"]["entry"]["checkpoint_record"]["fold"]
+    assert "an encoded empty array gives 32 zero bytes" in fold
+    empty = cbor2.dumps([])
+    assert _root_from_peaks(_decode_commitment(empty, what="commitment")) == bytes(32)
